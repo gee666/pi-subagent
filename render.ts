@@ -155,22 +155,23 @@ function statusIcon(r: SingleResult, theme: { fg: ThemeFg }): string {
 export function renderCall(args: Record<string, any>, theme: { fg: ThemeFg; bold: (s: string) => string }): Text {
 	const delegationMode = normalizeDelegationMode(args.mode);
 	const modeBadge = theme.fg("muted", ` [${delegationMode}]`);
+	const tasks = Array.isArray(args.tasks) ? args.tasks : [];
 
-	if (args.tasks && args.tasks.length > 0) {
+	if (tasks.length > 1) {
 		let text =
 			theme.fg("toolTitle", theme.bold("subagent ")) +
-			theme.fg("accent", `parallel (${args.tasks.length} tasks)`) +
+			theme.fg("accent", `parallel (${tasks.length} tasks)`) +
 			modeBadge;
-		for (const t of args.tasks.slice(0, 3)) {
+		for (const t of tasks.slice(0, 3)) {
 			text += `\n  ${theme.fg("accent", t.agent)}${theme.fg("dim", ` ${truncate(t.task, 40)}`)}`;
 		}
-		if (args.tasks.length > 3) text += `\n  ${theme.fg("muted", `... +${args.tasks.length - 3} more`)}`;
+		if (tasks.length > 3) text += `\n  ${theme.fg("muted", `... +${tasks.length - 3} more`)}`;
 		return new Text(text, 0, 0);
 	}
 
-	// Single mode
-	const agentName = args.agent || "...";
-	const preview = args.task ? truncate(args.task, 60) : "...";
+	const singleTask = tasks[0];
+	const agentName = singleTask?.agent || args.agent || "...";
+	const preview = singleTask?.task ? truncate(singleTask.task, 60) : args.task ? truncate(args.task, 60) : "...";
 	let text =
 		theme.fg("toolTitle", theme.bold("subagent ")) +
 		theme.fg("accent", agentName) +

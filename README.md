@@ -88,6 +88,50 @@ pi --subagent-max-depth 0
 pi --subagent-max-depth 3 --no-subagent-prevent-cycles
 ```
 
+### Tool Call Shape
+
+`subagent` always accepts a top-level `tasks` array:
+
+- One task = single-agent delegation
+- Multiple tasks = parallel delegation
+
+Single-task example:
+
+```json
+{ "tasks": [{ "agent": "writer", "task": "Document the API" }], "mode": "spawn" }
+```
+
+Multi-task example:
+
+```json
+{ "tasks": [{ "agent": "writer", "task": "Draft release notes" }, { "agent": "reviewer", "task": "Review the draft" }], "mode": "fork" }
+```
+
+Each task item supports:
+
+- `agent` — subagent name
+- `task` — delegated task text
+- `cwd` — optional working directory override for that task
+
+### Parallel Execution Limits
+
+For multi-task calls, two environment variables control fan-out:
+
+- `PI_SUBAGENT_MAX_PARALLEL_TASKS` — maximum number of tasks allowed in one call (default: `16`)
+- `PI_SUBAGENT_MAX_CONCURRENCY` — maximum number of subagents running at the same time inside that call (default: `8`)
+
+`PI_SUBAGENT_MAX_CONCURRENCY` is effectively clamped to at least `1`.
+
+### Project-local Agent Confirmation
+
+Project-local agents from `.pi/agents/*.md` can be gated by `PI_SUBAGENT_CONFIRM_PROJECT_AGENTS`:
+
+- `true`, `ask`, or `once` (default) — prompt with **Yes once**, **Yes for this session**, or **No**
+- `false` or `never` — skip the prompt and allow project-local agents immediately
+- `session` — allow project-local agents for the rest of the current session without prompting
+
+If you choose **Yes for this session** in the UI, the choice is remembered and you will not be asked again in that session. In non-UI mode, `ask` blocks execution because the extension cannot prompt.
+
 ### Context Mode (`spawn` vs `fork`)
 
 `subagent` supports a top-level `mode` switch:
@@ -103,11 +147,11 @@ Quick rule of thumb:
 Examples:
 
 ```json
-{ "agent": "writer", "task": "Document the API", "mode": "spawn" }
+{ "tasks": [{ "agent": "writer", "task": "Document the API" }], "mode": "spawn" }
 ```
 
 ```json
-{ "agent": "review", "task": "Double-check this migration", "mode": "fork" }
+{ "tasks": [{ "agent": "review", "task": "Double-check this migration" }], "mode": "fork" }
 ```
 
 If omitted, mode defaults to `spawn`.
@@ -119,7 +163,7 @@ Subagents are defined as Markdown files with YAML frontmatter.
 **User Agents:** `~/.pi/agent/agents/*.md`
 **Project Agents:** `.pi/agents/*.md`
 
-The extension always loads agents from both locations. If a project agent shares a name with a user agent, the project agent wins. When project agents are requested, Pi will prompt for confirmation before running them.
+The extension always loads agents from both locations. If a project agent shares a name with a user agent, the project agent wins. When project agents are requested, Pi can prompt for confirmation before running them, depending on `PI_SUBAGENT_CONFIRM_PROJECT_AGENTS`.
 
 Example agent (`~/.pi/agent/agents/writer.md`):
 
@@ -196,7 +240,7 @@ What it can see depends on `mode`:
 
 #### `spawn` mode (default)
 
-`subagent({ agent: "writer", task: "Document the API" })` sends:
+`subagent({ tasks: [{ agent: "writer", task: "Document the API" }] })` sends:
 
 ```
 [System Prompt from ~/.pi/agent/agents/writer.md]
@@ -208,7 +252,7 @@ No parent conversation history is included. In `spawn`, include all required con
 
 #### `fork` mode
 
-`subagent({ agent: "writer", task: "Document the API", mode: "fork" })` sends:
+`subagent({ tasks: [{ agent: "writer", task: "Document the API" }], mode: "fork" })` sends:
 
 ```
 [Forked snapshot of current session context]
@@ -235,7 +279,7 @@ Note: `fork` copies session context, not transient runtime-only prompt mutations
 
 When running multiple agents in parallel:
 
-- All subagents start simultaneously (up to 4 concurrent)
+- Subagents run concurrently up to `PI_SUBAGENT_MAX_CONCURRENCY` (default `8`)
 - The top-level `mode` applies to all tasks in that call
 - Main agent receives a combined result after all finish:
 
@@ -254,7 +298,7 @@ Parallel: 3/3 succeeded
 - **Depth + Cycle Guards** — Depth limiting and ancestry-cycle checks prevent runaway recursive delegation by default.
 - **Streaming Updates** — Watch subagent progress in real-time as tool calls and outputs stream in.
 - **Rich TUI Rendering** — Collapsed/expanded views with usage stats, tool call previews, and markdown output.
-- **Security Confirmation** — Project-local agents require explicit user approval before execution.
+- **Security Confirmation** — Project-local agents can require explicit user approval, with one-time and session-wide approval options.
 
 ## Project Structure
 

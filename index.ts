@@ -4,9 +4,9 @@
  * Delegates tasks to specialized subagents, each running as an isolated `pi`
  * process.
  *
- * Supports two invocation shapes:
- *   - Single:   { agent: "name", task: "..." }
- *   - Parallel: { tasks: [{ agent: "name", task: "..." }, ...] }
+ * The tool always accepts a `tasks` array:
+ *   - One task: treated as a single-agent delegation.
+ *   - Multiple tasks: treated as a parallel delegation.
  *
  * And two context modes:
  *   - spawn (default): child gets only the task prompt.
@@ -37,12 +37,17 @@ const DEFAULT_MAX_CONCURRENCY = 8;
 const PARALLEL_HEARTBEAT_MS = 1000;
 const DEFAULT_MAX_DELEGATION_DEPTH = 3;
 const DEFAULT_PREVENT_CYCLE_DELEGATION = true;
+const DEFAULT_PROJECT_AGENT_CONFIRMATION = "ask";
 const SUBAGENT_DEPTH_ENV = "PI_SUBAGENT_DEPTH";
 const SUBAGENT_MAX_DEPTH_ENV = "PI_SUBAGENT_MAX_DEPTH";
 const SUBAGENT_STACK_ENV = "PI_SUBAGENT_STACK";
 const SUBAGENT_PREVENT_CYCLES_ENV = "PI_SUBAGENT_PREVENT_CYCLES";
 const SUBAGENT_MAX_PARALLEL_TASKS_ENV = "PI_SUBAGENT_MAX_PARALLEL_TASKS";
 const SUBAGENT_MAX_CONCURRENCY_ENV = "PI_SUBAGENT_MAX_CONCURRENCY";
+const SUBAGENT_CONFIRM_PROJECT_AGENTS_ENV = "PI_SUBAGENT_CONFIRM_PROJECT_AGENTS";
+
+type ProjectAgentConfirmationSetting = "ask" | "never" | "session";
+type ProjectAgentApproval = "once" | "session" | "no";
 
 // ---------------------------------------------------------------------------
 // Tool parameter schema
@@ -62,41 +67,16 @@ const TaskItem = Type.Object({
 });
 
 const SubagentParams = Type.Object({
-  agent: Type.Optional(
-    Type.String({
-      description:
-        "Agent name for single mode. Must match an available agent name exactly.",
-    }),
-  ),
-  task: Type.Optional(
-    Type.String({
-      description:
-        "Task description for single mode. In spawn mode it must be self-contained; in fork mode the subagent also receives your current session context.",
-    }),
-  ),
-  tasks: Type.Optional(
-    Type.Array(TaskItem, {
-      description:
-        "For parallel mode: array of {agent, task} objects. Each task runs in an isolated process concurrently. Do NOT set agent/task when using this.",
-    }),
-  ),
+  tasks: Type.Array(TaskItem, {
+    minItems: 1,
+    description:
+      "Array of {agent, task} objects. One task behaves like a single-agent delegation; multiple tasks run concurrently.",
+  }),
   mode: Type.Optional(
     Type.String({
       description:
         "Context mode for delegated runs. 'spawn' (default) sends only the task prompt (best for isolated, reproducible runs with lower token/cost and less context leakage). 'fork' adds a snapshot of current session context plus task prompt (best for follow-up work, but usually higher token/cost and may include sensitive context).",
       default: DEFAULT_DELEGATION_MODE,
-    }),
-  ),
-  confirmProjectAgents: Type.Optional(
-    Type.Boolean({
-      description:
-        "Whether to prompt the user before running project-local agents. Default: true.",
-      default: true,
-    }),
-  ),
-  cwd: Type.Optional(
-    Type.String({
-      description: "Working directory for the agent process (single mode only)",
     }),
   ),
 });
@@ -155,6 +135,43 @@ function parseBoolean(raw: unknown): boolean | null {
   if (["1", "true", "yes", "on"].includes(normalized)) return true;
   if (["0", "false", "no", "off"].includes(normalized)) return false;
   return null;
+}
+
+function parseProjectAgentConfirmationSetting(
+  raw: unknown,
+): ProjectAgentConfirmationSetting | null {
+  if (raw === undefined) return DEFAULT_PROJECT_AGENT_CONFIRMATION;
+
+  const parsedBoolean = parseBoolean(raw);
+  if (parsedBoolean === true) return "ask";
+  if (parsedBoolean === false) return "never";
+
+  if (typeof raw !== "string") return null;
+  const normalized = raw.trim().toLowerCase();
+  if (["ask", "prompt", "once"].includes(normalized)) return "ask";
+  if (["never", "allow", "skip"].includes(normalized)) return "never";
+  if (["session", "remember", "yes-for-session"].includes(normalized)) {
+    return "session";
+  }
+  return null;
+}
+
+function resolveProjectAgentConfirmationSetting(
+  raw: unknown,
+): ProjectAgentConfirmationSetting {
+  const parsed = parseProjectAgentConfirmationSetting(raw);
+  if (raw !== undefined && parsed === null) {
+    console.warn(
+      `[pi-subagent] Ignoring invalid ${SUBAGENT_CONFIRM_PROJECT_AGENTS_ENV}="${String(raw)}". Expected one of: true, false, ask, never, session.`,
+    );
+  }
+  return parsed ?? DEFAULT_PROJECT_AGENT_CONFIRMATION;
+}
+
+function getProjectAgentConfirmationSetting(): ProjectAgentConfirmationSetting {
+  return resolveProjectAgentConfirmationSetting(
+    process.env[SUBAGENT_CONFIRM_PROJECT_AGENTS_ENV],
+  );
 }
 
 function parseAgentStack(raw: unknown): string[] | null {
@@ -348,21 +365,28 @@ function getRequestedProjectAgents(
 
 /**
  * Prompt the user to confirm project-local agents if needed.
- * Returns false if the user declines.
  */
 async function confirmProjectAgentsIfNeeded(
   projectAgents: AgentConfig[],
   projectAgentsDir: string | null,
-  ctx: { ui: { confirm: (title: string, body: string) => Promise<boolean> } },
-): Promise<boolean> {
-  if (projectAgents.length === 0) return true;
+  ctx: { ui: { select: (title: string, options: string[]) => Promise<string | undefined> } },
+): Promise<ProjectAgentApproval> {
+  if (projectAgents.length === 0) return "once";
 
   const names = projectAgents.map((a) => a.name).join(", ");
   const dir = projectAgentsDir ?? "(unknown)";
-  return ctx.ui.confirm(
-    "Run project-local agents?",
-    `Agents: ${names}\nSource: ${dir}\n\nProject agents are repo-controlled. Only continue for trusted repositories.`,
+  const selection = await ctx.ui.select(
+    `Run project-local agents?\nAgents: ${names}\nSource: ${dir}\n\nProject agents are repo-controlled. Only continue for trusted repositories.`,
+    ["Yes once", "Yes for this session", "No"],
   );
+
+  if (selection === "Yes once") return "once";
+  if (selection === "Yes for this session") return "session";
+  return "no";
+}
+
+function getProjectAgentSessionKey(projectAgentsDir: string | null): string {
+  return projectAgentsDir ?? "(unknown-project-agents-dir)";
 }
 
 // ---------------------------------------------------------------------------
@@ -385,6 +409,7 @@ export default function (pi: ExtensionAPI) {
     depthConfig;
 
   let discoveredAgents: AgentConfig[] = [];
+  const approvedProjectAgentDirsForSession = new Set<string>();
 
   // Auto-discover agents on session start
   pi.on("session_start", async (_event, ctx) => {
@@ -429,17 +454,19 @@ Context behavior is controlled by optional 'mode':
 - 'spawn' (default): child receives only the provided task prompt. Best for isolated, reproducible tasks with lower token/cost and less context leakage.
 - 'fork': child receives a forked snapshot of current session context plus the task prompt. Best for follow-up tasks that rely on prior context; usually higher token/cost and may include sensitive context.
 
-**Single mode** — delegate one task:
+The tool always accepts a \`tasks\` array:
+- one item = single-agent delegation
+- multiple items = parallel delegation
+
+**Single-task delegation**:
 \`\`\`json
-{ "agent": "agent-name", "task": "Detailed task...", "mode": "spawn" }
+{ "tasks": [{ "agent": "agent-name", "task": "Detailed task..." }], "mode": "spawn" }
 \`\`\`
 
-**Parallel mode** — run multiple tasks concurrently (do NOT also set agent/task):
+**Multi-task delegation**:
 \`\`\`json
 { "tasks": [{ "agent": "agent-name", "task": "..." }, { "agent": "other-agent", "task": "..." }], "mode": "fork" }
 \`\`\`
-
-Use single mode for one task, parallel mode when tasks are independent and can run simultaneously.
 
 ### Runtime delegation guards
 
@@ -458,9 +485,9 @@ Use single mode for one task, parallel mode when tasks are independent and can r
       description: [
         "Delegate work to specialized subagents running in isolated pi processes.",
         "",
-        "IMPORTANT: Use exactly ONE invocation shape:",
-        "  Single mode:   set `agent` and `task` (both required together).",
-        "  Parallel mode: set `tasks` array (do NOT also set `agent`/`task`).",
+        "The tool always accepts a `tasks` array:",
+        "  - one task: single-agent delegation",
+        "  - multiple tasks: parallel delegation",
         "",
         "Optional context mode switch:",
         "  mode: \"spawn\" (default) -> child gets only your task prompt.",
@@ -468,7 +495,7 @@ Use single mode for one task, parallel mode when tasks are independent and can r
         "  mode: \"fork\"            -> child gets current session context + your task prompt.",
         "                             Best for follow-up work that depends on prior context; higher token/cost and may include sensitive context.",
         "",
-        'Example single:   { agent: "writer", task: "Rewrite README.md", mode: "spawn" }',
+        'Example single:   { tasks: [{ agent: "writer", task: "Rewrite README.md" }], mode: "spawn" }',
         'Example parallel: { tasks: [{ agent: "writer", task: "..." }, { agent: "tester", task: "..." }], mode: "fork" }',
       ].join("\n"),
       parameters: SubagentParams,
@@ -519,25 +546,24 @@ Use single mode for one task, parallel mode when tasks are independent and can r
           }
         }
 
-        // Validate: exactly one invocation shape must be specified
-        const hasTasks = (params.tasks?.length ?? 0) > 0;
-        const hasSingle = Boolean(params.agent && params.task);
-        if (Number(hasTasks) + Number(hasSingle) !== 1) {
+        const tasks = params.tasks ?? [];
+        if (tasks.length === 0) {
           return {
             content: [
               {
                 type: "text",
-                text: `Invalid parameters. Provide exactly one invocation shape.\nAvailable agents: ${formatAgentNames(agents)}`,
+                text: `Invalid parameters. Provide a non-empty tasks array.\nAvailable agents: ${formatAgentNames(agents)}`,
               },
             ],
             details: makeDetails("single")([]),
           };
         }
 
+        const executionMode = tasks.length === 1 ? "single" : "parallel";
+
         // Security: guard project-local agents before running
         const requested = new Set<string>();
-        if (params.tasks) for (const t of params.tasks) requested.add(t.agent);
-        if (params.agent) requested.add(params.agent);
+        for (const t of tasks) requested.add(t.agent);
 
         if (preventCycles) {
           const cycleViolations = getCycleViolations(
@@ -559,7 +585,7 @@ Current stack: ${stackText}
 This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A).`,
                 },
               ],
-              details: makeDetails(hasTasks ? "parallel" : "single")([]),
+              details: makeDetails(executionMode)([]),
               isError: true,
             };
           }
@@ -569,15 +595,23 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
           agents,
           requested,
         );
-        const shouldConfirmProjectAgents = params.confirmProjectAgents ?? true;
-        if (requestedProjectAgents.length > 0 && shouldConfirmProjectAgents) {
+        const projectAgentConfirmationSetting =
+          getProjectAgentConfirmationSetting();
+        const projectAgentSessionKey = getProjectAgentSessionKey(
+          discovery.projectAgentsDir,
+        );
+        const shouldConfirmProjectAgents =
+          requestedProjectAgents.length > 0 &&
+          projectAgentConfirmationSetting === "ask" &&
+          !approvedProjectAgentDirsForSession.has(projectAgentSessionKey);
+        if (shouldConfirmProjectAgents) {
           if (ctx.hasUI) {
-            const approved = await confirmProjectAgentsIfNeeded(
+            const approval = await confirmProjectAgentsIfNeeded(
               requestedProjectAgents,
               discovery.projectAgentsDir,
               ctx,
             );
-            if (!approved) {
+            if (approval === "no") {
               return {
                 content: [
                   {
@@ -585,8 +619,11 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
                     text: "Canceled: project-local agents not approved.",
                   },
                 ],
-                details: makeDetails(hasTasks ? "parallel" : "single")([]),
+                details: makeDetails(executionMode)([]),
               };
+            }
+            if (approval === "session") {
+              approvedProjectAgentDirsForSession.add(projectAgentSessionKey);
             }
           } else {
             const names = requestedProjectAgents.map((a) => a.name).join(", ");
@@ -595,35 +632,21 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
               content: [
                 {
                   type: "text",
-                  text: `Blocked: project-local agent confirmation is required in non-UI mode.\nAgents: ${names}\nSource: ${dir}\n\nRe-run with confirmProjectAgents: false only if this repository is trusted.`,
+                  text: `Blocked: project-local agent confirmation is required in non-UI mode.\nAgents: ${names}\nSource: ${dir}\n\nSet ${SUBAGENT_CONFIRM_PROJECT_AGENTS_ENV}=false or =session only if this repository is trusted.`,
                 },
               ],
-              details: makeDetails(hasTasks ? "parallel" : "single")([]),
+              details: makeDetails(executionMode)([]),
               isError: true,
             };
           }
         }
 
-        // ── Parallel mode ──
-        if (params.tasks && params.tasks.length > 0) {
-          return executeParallel(
-            params.tasks,
-            delegationMode,
-            forkSessionSnapshotJsonl,
-            agents,
-            ctx.cwd,
-            signal,
-            onUpdate,
-            makeDetails,
-          );
-        }
-
-        // ── Single mode ──
-        if (params.agent && params.task) {
+        if (tasks.length === 1) {
+          const [task] = tasks;
           return executeSingle(
-            params.agent,
-            params.task,
-            params.cwd,
+            task.agent,
+            task.task,
+            task.cwd,
             delegationMode,
             forkSessionSnapshotJsonl,
             agents,
@@ -634,15 +657,16 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
           );
         }
 
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Invalid parameters. Available agents: ${formatAgentNames(agents)}`,
-            },
-          ],
-          details: makeDetails("single")([]),
-        };
+        return executeParallel(
+          tasks,
+          delegationMode,
+          forkSessionSnapshotJsonl,
+          agents,
+          ctx.cwd,
+          signal,
+          onUpdate,
+          makeDetails,
+        );
       },
 
       renderCall: (args, theme) => renderCall(args, theme),
