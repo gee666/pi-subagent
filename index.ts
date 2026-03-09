@@ -32,8 +32,8 @@ import {
 // Limits
 // ---------------------------------------------------------------------------
 
-const MAX_PARALLEL_TASKS = 8;
-const MAX_CONCURRENCY = 4;
+const DEFAULT_MAX_PARALLEL_TASKS = 16;
+const DEFAULT_MAX_CONCURRENCY = 8;
 const PARALLEL_HEARTBEAT_MS = 1000;
 const DEFAULT_MAX_DELEGATION_DEPTH = 3;
 const DEFAULT_PREVENT_CYCLE_DELEGATION = true;
@@ -41,6 +41,8 @@ const SUBAGENT_DEPTH_ENV = "PI_SUBAGENT_DEPTH";
 const SUBAGENT_MAX_DEPTH_ENV = "PI_SUBAGENT_MAX_DEPTH";
 const SUBAGENT_STACK_ENV = "PI_SUBAGENT_STACK";
 const SUBAGENT_PREVENT_CYCLES_ENV = "PI_SUBAGENT_PREVENT_CYCLES";
+const SUBAGENT_MAX_PARALLEL_TASKS_ENV = "PI_SUBAGENT_MAX_PARALLEL_TASKS";
+const SUBAGENT_MAX_CONCURRENCY_ENV = "PI_SUBAGENT_MAX_CONCURRENCY";
 
 // ---------------------------------------------------------------------------
 // Tool parameter schema
@@ -720,12 +722,30 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
     onUpdate: ((partial: any) => void) | undefined,
     makeDetails: ReturnType<typeof makeDetailsFactory>,
   ) {
-    if (tasks.length > MAX_PARALLEL_TASKS) {
+    const maxParallelTasksRaw = process.env[SUBAGENT_MAX_PARALLEL_TASKS_ENV];
+    const maxParallelTasksParsed = parseNonNegativeInt(maxParallelTasksRaw);
+    if (maxParallelTasksRaw !== undefined && maxParallelTasksParsed === null) {
+      console.warn(
+        `[pi-subagent] Ignoring invalid ${SUBAGENT_MAX_PARALLEL_TASKS_ENV}="${maxParallelTasksRaw}". Expected a non-negative integer.`
+      );
+    }
+    const maxParallelTasks = maxParallelTasksParsed ?? DEFAULT_MAX_PARALLEL_TASKS;
+
+    const maxConcurrencyRaw = process.env[SUBAGENT_MAX_CONCURRENCY_ENV];
+    const maxConcurrencyParsed = parseNonNegativeInt(maxConcurrencyRaw);
+    if (maxConcurrencyRaw !== undefined && maxConcurrencyParsed === null) {
+      console.warn(
+        `[pi-subagent] Ignoring invalid ${SUBAGENT_MAX_CONCURRENCY_ENV}="${maxConcurrencyRaw}". Expected a non-negative integer.`
+      );
+    }
+    const maxConcurrency = maxConcurrencyParsed ?? DEFAULT_MAX_CONCURRENCY;
+
+    if (tasks.length > maxParallelTasks) {
       return {
         content: [
           {
             type: "text" as const,
-            text: `Too many parallel tasks (${tasks.length}). Max is ${MAX_PARALLEL_TASKS}.`,
+            text: `Too many parallel tasks (${tasks.length}). Max is ${maxParallelTasks}.`,
           },
         ],
         details: makeDetails("parallel")([]),
@@ -770,7 +790,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
     try {
       results = await mapConcurrent(
         tasks,
-        MAX_CONCURRENCY,
+        maxConcurrency,
         async (t, index) => {
           const result = await runAgent({
             cwd: defaultCwd,
