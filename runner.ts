@@ -17,6 +17,7 @@ import {
   type SubagentDetails,
   emptyUsage,
   getFinalOutput,
+  getNestedSubagentErrorSummary,
 } from "./types.js";
 
 const SIGKILL_TIMEOUT_MS = 5000;
@@ -291,6 +292,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<SingleResult> {
     });
   };
 
+  emitUpdate();
+
   // Write system prompt to temp file if needed
   let promptTmpDir: string | null = null;
   let promptTmpPath: string | null = null;
@@ -382,6 +385,17 @@ export async function runAgent(opts: RunAgentOptions): Promise<SingleResult> {
       result.errorMessage = "Subagent was aborted.";
       if (!result.stderr.trim()) result.stderr = "Subagent was aborted.";
     }
+
+    if (result.exitCode === 0) {
+      const nestedErrorSummary = getNestedSubagentErrorSummary(result.messages);
+      if (nestedErrorSummary) {
+        result.exitCode = 1;
+        result.stopReason = "error";
+        result.errorMessage = nestedErrorSummary;
+        if (!result.stderr.trim()) result.stderr = nestedErrorSummary;
+      }
+    }
+
     return result;
   } finally {
     cleanupTempDir(promptTmpDir);

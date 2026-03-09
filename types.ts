@@ -133,3 +133,37 @@ export function getNestedSubagentResults(messages: Message[]): NestedSubagentRes
 	}
 	return results;
 }
+
+function collectSubagentErrorLinesFromDetails(
+	details: SubagentDetails,
+	lines: string[],
+	prefix = "",
+): void {
+	for (const result of details.results) {
+		if (isResultError(result)) {
+			const reason = result.errorMessage || result.stderr || result.stopReason || "failed";
+			lines.push(`${prefix}${result.agent}: ${reason}`);
+		}
+		const nested = getNestedSubagentResults(result.messages);
+		for (const child of nested) {
+			if (child.isError) {
+				collectSubagentErrorLinesFromDetails(
+					child.details,
+					lines,
+					`${prefix}${result.agent} -> `,
+				);
+			}
+		}
+	}
+}
+
+/** Summarize nested subagent failures captured in a message history. */
+export function getNestedSubagentErrorSummary(messages: Message[]): string | null {
+	const lines: string[] = [];
+	for (const nested of getNestedSubagentResults(messages)) {
+		if (!nested.isError) continue;
+		collectSubagentErrorLinesFromDetails(nested.details, lines);
+	}
+	if (lines.length === 0) return null;
+	return `Nested subagent failure: ${lines.join("; ")}`;
+}
