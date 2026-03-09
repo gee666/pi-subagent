@@ -25,7 +25,7 @@ pi install npm:oira666_pi-subagent
 ### Option 2: Install via git
 
 ```bash
-pi install git:github.com/mjakl/pi-subagent
+pi install git:github.com/gee666/pi-subagent.git
 ```
 
 ### Option 3: Manual Installation
@@ -34,7 +34,7 @@ Clone this repository to your Pi extensions directory:
 
 ```bash
 cd ~/.pi/agent/extensions
-git clone https://github.com/mjakl/pi-subagent.git
+git clone https://github.com/gee666/pi-subagent.git
 cd pi-subagent
 npm install
 ```
