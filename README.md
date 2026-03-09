@@ -19,7 +19,7 @@ There are many subagent extensions for pi, this one is mine.
 ### Option 1: Install from npm (recommended)
 
 ```bash
-pi install npm:@mjakl/pi-subagent
+pi install npm:oira666_pi-subagent
 ```
 
 ### Option 2: Install via git
