@@ -7,14 +7,17 @@
  * Lookup locations:
  *   - User agents:    ~/.pi/agent/agents/*.md
  *   - Project agents: .pi/agents/*.md  (walks up from cwd)
+ *   - Bundled agents: ./agents/*.md    (fallback only when no user/project agents exist)
  */
 
 import { parseFrontmatter } from "@mariozechner/pi-coding-agent";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 
 export type AgentScope = "user" | "project" | "both";
+export type AgentSource = "user" | "project" | "builtin";
 
 export interface AgentConfig {
 	name: string;
@@ -23,7 +26,7 @@ export interface AgentConfig {
 	model?: string;
 	thinking?: string;
 	systemPrompt: string;
-	source: "user" | "project";
+	source: AgentSource;
 	filePath: string;
 }
 
@@ -32,12 +35,21 @@ export interface AgentDiscoveryResult {
 	projectAgentsDir: string | null;
 }
 
+const BUNDLED_AGENTS_DIR = path.join(
+	path.dirname(fileURLToPath(import.meta.url)),
+	"agents",
+);
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
 function isDirectory(p: string): boolean {
-	try { return fs.statSync(p).isDirectory(); } catch { return false; }
+	try {
+		return fs.statSync(p).isDirectory();
+	} catch {
+		return false;
+	}
 }
 
 /** Walk up from `cwd` looking for a `.pi/agents` directory. */
@@ -53,9 +65,13 @@ function findNearestProjectAgentsDir(cwd: string): string | null {
 }
 
 /** Parse a single agent markdown file into an AgentConfig. Returns null on skip. */
-function parseAgentFile(filePath: string, source: "user" | "project"): AgentConfig | null {
+function parseAgentFile(filePath: string, source: AgentSource): AgentConfig | null {
 	let content: string;
-	try { content = fs.readFileSync(filePath, "utf-8"); } catch { return null; }
+	try {
+		content = fs.readFileSync(filePath, "utf-8");
+	} catch {
+		return null;
+	}
 
 	let parsed: { frontmatter: Record<string, unknown>; body: string };
 	try {
@@ -105,11 +121,17 @@ function parseAgentFile(filePath: string, source: "user" | "project"): AgentConf
 }
 
 /** Load all agent definitions from a directory. */
-function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig[] {
+function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
 	if (!fs.existsSync(dir)) return [];
 
 	let entries: fs.Dirent[];
-	try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return []; }
+	try {
+		entries = fs.readdirSync(dir, { withFileTypes: true });
+	} catch {
+		return [];
+	}
+
+	entries.sort((a, b) => a.name.localeCompare(b.name));
 
 	const agents: AgentConfig[] = [];
 	for (const entry of entries) {
@@ -122,6 +144,16 @@ function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig
 	return agents;
 }
 
+function dedupeAgents(
+	userAgents: AgentConfig[],
+	projectAgents: AgentConfig[],
+): AgentConfig[] {
+	const agentMap = new Map<string, AgentConfig>();
+	for (const agent of userAgents) agentMap.set(agent.name, agent);
+	for (const agent of projectAgents) agentMap.set(agent.name, agent);
+	return Array.from(agentMap.values());
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -130,20 +162,24 @@ function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig
  * Discover all available agents according to the requested scope.
  *
  * When scope is "both", project agents override user agents with the same name.
+ * If no user or project agents exist at all, bundled fallback agents are returned.
  */
 export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryResult {
 	const userDir = path.join(os.homedir(), ".pi", "agent", "agents");
 	const projectAgentsDir = findNearestProjectAgentsDir(cwd);
 
-	const userAgents = scope === "project" ? [] : loadAgentsFromDir(userDir, "user");
-	const projectAgents = scope === "user" || !projectAgentsDir ? [] : loadAgentsFromDir(projectAgentsDir, "project");
+	const userAgents = loadAgentsFromDir(userDir, "user");
+	const projectAgents = projectAgentsDir ? loadAgentsFromDir(projectAgentsDir, "project") : [];
 
-	// Deduplicate by name; project agents win in "both" mode.
-	const agentMap = new Map<string, AgentConfig>();
-	for (const agent of userAgents) agentMap.set(agent.name, agent);
-	if (scope !== "user") {
-		for (const agent of projectAgents) agentMap.set(agent.name, agent);
+	const hasConfiguredAgents = userAgents.length > 0 || projectAgents.length > 0;
+	if (!hasConfiguredAgents) {
+		return {
+			agents: loadAgentsFromDir(BUNDLED_AGENTS_DIR, "builtin"),
+			projectAgentsDir,
+		};
 	}
 
-	return { agents: Array.from(agentMap.values()), projectAgentsDir };
+	if (scope === "user") return { agents: userAgents, projectAgentsDir };
+	if (scope === "project") return { agents: projectAgents, projectAgentsDir };
+	return { agents: dedupeAgents(userAgents, projectAgents), projectAgentsDir };
 }

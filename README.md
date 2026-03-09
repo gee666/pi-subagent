@@ -98,13 +98,13 @@ pi --subagent-max-depth 3 --no-subagent-prevent-cycles
 Single-task example:
 
 ```json
-{ "tasks": [{ "agent": "writer", "task": "Document the API" }], "mode": "spawn" }
+{ "tasks": [{ "agent": "code-writer", "task": "Implement the API change" }], "mode": "spawn" }
 ```
 
 Multi-task example:
 
 ```json
-{ "tasks": [{ "agent": "writer", "task": "Draft release notes" }, { "agent": "reviewer", "task": "Review the draft" }], "mode": "fork" }
+{ "tasks": [{ "agent": "code-writer", "task": "Draft the implementation" }, { "agent": "code-reviwer", "task": "Review the plan" }], "mode": "fork" }
 ```
 
 Each task item supports:
@@ -147,11 +147,11 @@ Quick rule of thumb:
 Examples:
 
 ```json
-{ "tasks": [{ "agent": "writer", "task": "Document the API" }], "mode": "spawn" }
+{ "tasks": [{ "agent": "code-writer", "task": "Implement the migration" }], "mode": "spawn" }
 ```
 
 ```json
-{ "tasks": [{ "agent": "review", "task": "Double-check this migration" }], "mode": "fork" }
+{ "tasks": [{ "agent": "code-reviwer", "task": "Double-check this migration" }], "mode": "fork" }
 ```
 
 If omitted, mode defaults to `spawn`.
@@ -162,8 +162,15 @@ Subagents are defined as Markdown files with YAML frontmatter.
 
 **User Agents:** `~/.pi/agent/agents/*.md`
 **Project Agents:** `.pi/agents/*.md`
+**Bundled Fallback Agents:** `agents/code-writer.md`, `agents/code-reviwer.md`, `agents/code-architect.md`
 
-The extension always loads agents from both locations. If a project agent shares a name with a user agent, the project agent wins. When project agents are requested, Pi can prompt for confirmation before running them, depending on `PI_SUBAGENT_CONFIRM_PROJECT_AGENTS`.
+The extension always loads user and project agents first. If a project agent shares a name with a user agent, the project agent wins. The bundled fallback agents are only discovered when no user or project agents are found at all. If you have any user or project agents configured, the bundled defaults are hidden and not discoverable. When project agents are requested, Pi can prompt for confirmation before running them, depending on `PI_SUBAGENT_CONFIRM_PROJECT_AGENTS`.
+
+If nothing is configured yet, these fallback agents are available by default:
+
+- `code-writer` — implementation and refactoring
+- `code-reviwer` — code review and risk finding
+- `code-architect` — technical design and approach selection
 
 Example agent (`~/.pi/agent/agents/writer.md`):
 
@@ -178,7 +185,7 @@ tools: read, write
 You are an expert technical writer. Your task is to improve the clarity and conciseness of the provided text.
 ```
 
-Note: this repository includes a sample agent in `agents/oracle.md` for reference.
+Note: this repository includes bundled fallback agents in `agents/code-writer.md`, `agents/code-reviwer.md`, and `agents/code-architect.md`.
 
 ### Frontmatter Fields
 
