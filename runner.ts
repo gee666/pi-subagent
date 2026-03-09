@@ -63,6 +63,42 @@ function cleanupTempDir(dir: string | null): void {
   }
 }
 
+function resolveExtensionArg(value: string): string {
+  if (!value) return value;
+  if (value.startsWith("npm:") || value.startsWith("git:")) return value;
+  if (value.startsWith("~/")) return path.join(os.homedir(), value.slice(2));
+  if (path.isAbsolute(value)) return value;
+
+  const resolved = path.resolve(process.cwd(), value);
+  return fs.existsSync(resolved) ? resolved : value;
+}
+
+function getInheritedExtensionArgs(argv: string[]): string[] {
+  const args: string[] = [];
+  for (let i = 2; i < argv.length; i++) {
+    const arg = argv[i];
+
+    if (arg === "--no-extensions" || arg === "-ne") {
+      args.push("--no-extensions");
+      continue;
+    }
+
+    if (arg === "--extension" || arg === "-e") {
+      const value = argv[i + 1];
+      if (value !== undefined) {
+        args.push("--extension", resolveExtensionArg(value));
+        i++;
+      }
+      continue;
+    }
+
+    if (arg.startsWith("--extension=")) {
+      args.push("--extension", resolveExtensionArg(arg.slice("--extension=".length)));
+    }
+  }
+  return args;
+}
+
 // ---------------------------------------------------------------------------
 // JSON-line stream processing
 // ---------------------------------------------------------------------------
@@ -118,7 +154,12 @@ function buildPiArgs(
   delegationMode: DelegationMode,
   forkSessionPath: string | null,
 ): string[] {
-  const args: string[] = ["--mode", "json", "-p"];
+  const args: string[] = [
+    "--mode",
+    "json",
+    ...getInheritedExtensionArgs(process.argv),
+    "-p",
+  ];
 
   if (delegationMode === "spawn") {
     args.push("--no-session");

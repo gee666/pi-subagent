@@ -43,6 +43,13 @@ export interface SubagentDetails {
 	results: SingleResult[];
 }
 
+/** Nested subagent tool result captured from a delegated run. */
+export interface NestedSubagentResult {
+	details: SubagentDetails;
+	isError: boolean;
+	toolCallId: string;
+}
+
 /** A display-friendly representation of a message part. */
 export type DisplayItem =
 	| { type: "text"; text: string }
@@ -70,6 +77,15 @@ export function aggregateUsage(results: SingleResult[]): UsageStats {
 /** Whether a result represents an error. */
 export function isResultError(r: SingleResult): boolean {
 	return r.exitCode > 0 || r.stopReason === "error" || r.stopReason === "aborted";
+}
+
+/** Check whether a value looks like SubagentDetails. */
+export function isSubagentDetails(value: unknown): value is SubagentDetails {
+	if (!value || typeof value !== "object") return false;
+	const maybe = value as Partial<SubagentDetails>;
+	return (maybe.mode === "single" || maybe.mode === "parallel") &&
+		(maybe.delegationMode === "spawn" || maybe.delegationMode === "fork") &&
+		Array.isArray(maybe.results);
 }
 
 /** Extract the last assistant text from a message history. */
@@ -100,4 +116,20 @@ export function getDisplayItems(messages: Message[]): DisplayItem[] {
 		}
 	}
 	return items;
+}
+
+/** Extract nested subagent tool results from a message history. */
+export function getNestedSubagentResults(messages: Message[]): NestedSubagentResult[] {
+	const results: NestedSubagentResult[] = [];
+	for (const msg of messages) {
+		if (msg.role !== "toolResult") continue;
+		if (msg.toolName !== "subagent") continue;
+		if (!isSubagentDetails(msg.details)) continue;
+		results.push({
+			details: msg.details,
+			isError: msg.isError,
+			toolCallId: msg.toolCallId,
+		});
+	}
+	return results;
 }

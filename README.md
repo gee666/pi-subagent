@@ -12,7 +12,7 @@ There are many subagent extensions for pi, this one is mine.
 
 **Parallel Execution** — Run multiple agents at once.
 
-**A Simpler Fork** — This extension intentionally trims features from other implementations (like chaining and scope selectors) to keep the surface area small and predictable. If you want the minimal, “just delegate” experience, this is it.
+**A Simpler Fork** — This extension intentionally keeps the surface area small and predictable compared to heavier implementations. It supports nested delegation with depth/cycle guards, but avoids broader scope-selection complexity. If you want the minimal, “just delegate” experience, this is it.
 
 ## Install
 
@@ -304,7 +304,8 @@ Parallel: 3/3 succeeded
 - **Context Mode Switch** — `spawn` (fresh context) and `fork` (session snapshot + task) per call.
 - **Depth + Cycle Guards** — Depth limiting and ancestry-cycle checks prevent runaway recursive delegation by default.
 - **Streaming Updates** — Watch subagent progress in real-time as tool calls and outputs stream in.
-- **Rich TUI Rendering** — Collapsed/expanded views with usage stats, tool call previews, and markdown output.
+- **Nested Delegation** — Subagents can call `subagent` again, subject to depth and cycle guards.
+- **Rich TUI Rendering** — Collapsed/expanded views with usage stats, nested delegation trees, tool call previews, and markdown output.
 - **Security Confirmation** — Project-local agents can require explicit user approval, with one-time and session-wide approval options.
 
 ## Project Structure
