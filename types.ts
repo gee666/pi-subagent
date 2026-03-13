@@ -21,6 +21,9 @@ export interface UsageStats {
 	turns: number;
 }
 
+/** Tool calls made by an agent: toolName → call count */
+export type ToolCallCounts = Record<string, number>;
+
 /** Result of a single subagent invocation. */
 export interface SingleResult {
 	agent: string;
@@ -30,9 +33,26 @@ export interface SingleResult {
 	messages: Message[];
 	stderr: string;
 	usage: UsageStats;
+	toolCalls: ToolCallCounts;
 	model?: string;
 	stopReason?: string;
 	errorMessage?: string;
+}
+
+/** A node in the per-subagent usage tree (own stats + recursive children) */
+export interface UsageTreeNode {
+  agent: string;
+  task: string;
+  /** Token/cost usage for this agent's own turns only */
+  ownUsage: UsageStats;
+  /** Tool calls this agent made directly (all tools, including "subagent") */
+  ownToolCalls: ToolCallCounts;
+  /** ownUsage summed with all descendants recursively */
+  aggregatedUsage: UsageStats;
+  /** ownToolCalls merged with all descendants recursively */
+  aggregatedToolCalls: ToolCallCounts;
+  /** Nested subagent invocations, recursively populated */
+  children: UsageTreeNode[];
 }
 
 /** Metadata attached to every tool result for rendering. */
@@ -41,6 +61,12 @@ export interface SubagentDetails {
 	delegationMode: DelegationMode;
 	projectAgentsDir: string | null;
 	results: SingleResult[];
+  /** Usage summed across all results and all their nested descendants */
+  aggregatedUsage: UsageStats;
+  /** Tool calls merged across all results and all their nested descendants */
+  aggregatedToolCalls: ToolCallCounts;
+  /** Per-agent recursive usage breakdown */
+  usageTree: UsageTreeNode[];
 }
 
 /** Nested subagent tool result captured from a delegated run. */
@@ -72,6 +98,97 @@ export function aggregateUsage(results: SingleResult[]): UsageStats {
 		total.turns += r.usage.turns;
 	}
 	return total;
+}
+
+/** Add delta into total in-place (contextTokens is a snapshot—not summed, left as-is in total) */
+export function addUsage(total: UsageStats, delta: UsageStats): void {
+  total.input      += delta.input;
+  total.output     += delta.output;
+  total.cacheRead  += delta.cacheRead;
+  total.cacheWrite += delta.cacheWrite;
+  total.cost       += delta.cost;
+  total.turns      += delta.turns;
+}
+
+/** Merge tool call counts from `source` into `target` in-place */
+export function mergeToolCalls(target: ToolCallCounts, source: ToolCallCounts): void {
+  for (const [name, count] of Object.entries(source)) {
+    target[name] = (target[name] ?? 0) + count;
+  }
+}
+
+/** Extract all tool calls made by assistant turns in a message list */
+export function extractToolCalls(messages: Message[]): ToolCallCounts {
+  const counts: ToolCallCounts = {};
+  for (const msg of messages) {
+    if (msg.role !== "assistant") continue;
+    for (const part of (msg.content as any[]) ?? []) {
+      if ((part as any)?.type !== "toolCall") continue;
+      const name: string = typeof (part as any).name === "string" ? (part as any).name : "unknown";
+      counts[name] = (counts[name] ?? 0) + 1;
+    }
+  }
+  return counts;
+}
+
+/** Build a UsageTreeNode for one result, recursing into nested subagent tool results */
+function buildUsageTreeNode(result: SingleResult): UsageTreeNode {
+  const children: UsageTreeNode[] = [];
+  for (const nested of getNestedSubagentResults(result.messages)) {
+    for (const nestedResult of nested.details.results) {
+      children.push(buildUsageTreeNode(nestedResult));
+    }
+  }
+
+  const ownUsage = result.usage;
+  const ownToolCalls: ToolCallCounts = result.toolCalls ?? extractToolCalls(result.messages);
+
+  const aggregatedUsage = emptyUsage();
+  addUsage(aggregatedUsage, ownUsage);
+  for (const child of children) addUsage(aggregatedUsage, child.aggregatedUsage);
+
+  const aggregatedToolCalls: ToolCallCounts = { ...ownToolCalls };
+  for (const child of children) mergeToolCalls(aggregatedToolCalls, child.aggregatedToolCalls);
+
+  return {
+    agent: result.agent,
+    task: result.task,
+    ownUsage,
+    ownToolCalls,
+    aggregatedUsage,
+    aggregatedToolCalls,
+    children,
+  };
+}
+
+/**
+ * Construct a complete SubagentDetails with aggregated stats.
+ * This replaces the plain object literal previously used by makeDetailsFactory.
+ */
+export function buildSubagentDetails(
+  mode: "single" | "parallel",
+  delegationMode: DelegationMode,
+  projectAgentsDir: string | null,
+  results: SingleResult[],
+): SubagentDetails {
+  const usageTree = results.map(buildUsageTreeNode);
+
+  const aggregatedUsage = emptyUsage();
+  const aggregatedToolCalls: ToolCallCounts = {};
+  for (const node of usageTree) {
+    addUsage(aggregatedUsage, node.aggregatedUsage);
+    mergeToolCalls(aggregatedToolCalls, node.aggregatedToolCalls);
+  }
+
+  return {
+    mode,
+    delegationMode,
+    projectAgentsDir,
+    results,
+    aggregatedUsage,
+    aggregatedToolCalls,
+    usageTree,
+  };
 }
 
 /** Whether a result represents an error. */

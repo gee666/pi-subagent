@@ -23,6 +23,7 @@ import {
   type SingleResult,
   type SubagentDetails,
   DEFAULT_DELEGATION_MODE,
+  buildSubagentDetails,
   emptyUsage,
   getFinalOutput,
   isResultError,
@@ -332,12 +333,8 @@ function makeDetailsFactory(
   delegationMode: DelegationMode,
 ) {
   return (mode: "single" | "parallel") =>
-    (results: SingleResult[]): SubagentDetails => ({
-      mode,
-      delegationMode,
-      projectAgentsDir,
-      results,
-    });
+    (results: SingleResult[]): SubagentDetails =>
+      buildSubagentDetails(mode, delegationMode, projectAgentsDir, results);
 }
 
 function formatAgentNames(agents: AgentConfig[]): string {
@@ -785,6 +782,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
       messages: [],
       stderr: "",
       usage: emptyUsage(),
+      toolCalls: {},
     }));
 
     const emitProgress = () => {

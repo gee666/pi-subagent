@@ -271,7 +271,11 @@ function renderTreeLines(
 }
 
 function topLevelSummary(details: SubagentDetails, counts: TreeCounts): string {
-	const totalUsage = formatUsage(aggregateUsage(details.results));
+	// aggregatedUsage includes own agents + all their nested descendants;
+	// fall back to summing only direct results for old serialised data lacking the field.
+	const totalUsage = formatUsage(
+		details.aggregatedUsage ?? aggregateUsage(details.results),
+	);
 	const parts = [
 		`${counts.running} running`,
 		`${counts.finished}/${counts.total} finished`,

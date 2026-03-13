@@ -27,14 +27,6 @@ npm publish --dry-run --access public
 pi -e .
 ```
 
-## Code map
-
-- `index.ts` — extension entry point and tool registration
-- `agents.ts` — agent discovery/parsing
-- `runner.ts` — subagent process execution
-- `render.ts` — TUI rendering for tool calls/results
-- `types.ts` — shared types/helpers
-- `README.md` — user-facing docs
 
 ## Commit format (important)
 
@@ -52,7 +44,4 @@ Examples:
 
 Keep commits focused (one logical change per commit).
 
-## Release notes
 
-- Package name: `@mjakl/pi-subagent`
-- For doc/code changes on npm, publish a new version (`npm version patch|minor|major`), then publish.

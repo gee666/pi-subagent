@@ -16,6 +16,7 @@ import {
   type SingleResult,
   type SubagentDetails,
   emptyUsage,
+  extractToolCalls,
   getFinalOutput,
   getNestedSubagentErrorSummary,
 } from "./types.js";
@@ -74,31 +75,167 @@ function resolveExtensionArg(value: string): string {
   return fs.existsSync(resolved) ? resolved : value;
 }
 
-function getInheritedExtensionArgs(argv: string[]): string[] {
-  const args: string[] = [];
-  for (let i = 2; i < argv.length; i++) {
-    const arg = argv[i];
-
-    if (arg === "--no-extensions" || arg === "-ne") {
-      args.push("--no-extensions");
-      continue;
-    }
-
-    if (arg === "--extension" || arg === "-e") {
-      const value = argv[i + 1];
-      if (value !== undefined) {
-        args.push("--extension", resolveExtensionArg(value));
-        i++;
-      }
-      continue;
-    }
-
-    if (arg.startsWith("--extension=")) {
-      args.push("--extension", resolveExtensionArg(arg.slice("--extension=".length)));
-    }
-  }
-  return args;
+interface InheritedCliArgs {
+  /** --extension/-e and --no-extensions/-ne args (with path resolution) */
+  extensionArgs: string[];
+  /** All other non-blocked flags to forward verbatim to every child */
+  alwaysProxy: string[];
+  /** Parent --model value; used only when agent config doesn't specify model */
+  fallbackModel: string | undefined;
+  /** Parent --thinking value; used only when agent config doesn't specify thinking */
+  fallbackThinking: string | undefined;
+  /** Parent --tools value; used only when agent config doesn't specify tools */
+  fallbackTools: string | undefined;
+  /** Parent passed --no-tools; used only when agent config doesn't specify tools */
+  fallbackNoTools: boolean;
 }
+
+/**
+ * Parse process.argv into categorised groups for child-process arg construction.
+ *
+ * Categories:
+ *  - BLOCKED       : flags the extension manages itself — never forwarded
+ *  - extensionArgs : --extension/-e and --no-extensions/-ne (with path resolution)
+ *  - alwaysProxy   : all other non-blocked flags forwarded verbatim
+ *  - fallback*     : flags the agent config may override
+ *
+ * Handles both "--flag value" and "--flag=value" forms.
+ * Unknown flags use a heuristic: if the next token doesn't start with "-",
+ * it is treated as the flag's value.
+ */
+function parseInheritedCliArgs(argv: string[]): InheritedCliArgs {
+  const extensionArgs: string[] = [];
+  const alwaysProxy: string[] = [];
+  let fallbackModel: string | undefined;
+  let fallbackThinking: string | undefined;
+  let fallbackTools: string | undefined;
+  let fallbackNoTools = false;
+
+  let i = 2; // skip "node" and "pi"
+  while (i < argv.length) {
+    const raw = argv[i];
+    // Positional args (prompt text, @file refs) — skip, not proxied to children
+    if (!raw.startsWith("-")) { i++; continue; }
+
+    // Normalise: detect --flag=value inline form
+    const eqIdx = raw.indexOf("=");
+    const flagName = eqIdx !== -1 ? raw.slice(0, eqIdx) : raw;
+    const inlineValue: string | undefined = eqIdx !== -1 ? raw.slice(eqIdx + 1) : undefined;
+
+    const nextToken = argv[i + 1];
+    const nextIsValue = nextToken !== undefined && !nextToken.startsWith("-");
+
+    // Returns [resolvedValue | undefined, tokensToConsume]
+    const getVal = (): [string | undefined, number] => {
+      if (inlineValue !== undefined) return [inlineValue, 1];
+      if (nextIsValue) return [nextToken, 2];
+      return [undefined, 1];
+    };
+
+    // ── BLOCKED: value flags ─────────────────────────────────────────────────
+    // Extension manages these; consume flag + value, never proxy.
+    if ([
+      "--mode", "--session", "--append-system-prompt",
+      "--export", "--subagent-max-depth",
+    ].includes(flagName)) {
+      const [, skip] = getVal();
+      i += skip; continue;
+    }
+
+    // --subagent-prevent-cycles takes an optional value
+    if (flagName === "--subagent-prevent-cycles") {
+      if (inlineValue !== undefined || nextIsValue) { i += inlineValue !== undefined ? 1 : 2; }
+      else { i++; }
+      continue;
+    }
+
+    // --list-models has an optional search term
+    if (flagName === "--list-models") {
+      if (inlineValue !== undefined || nextIsValue) { i += inlineValue !== undefined ? 1 : 2; }
+      else { i++; }
+      continue;
+    }
+
+    // ── BLOCKED: boolean flags ────────────────────────────────────────────────
+    if ([
+      "--print", "-p", "--no-session",
+      "--continue", "-c", "--resume", "-r",
+      "--offline", "--help", "-h", "--version", "-v",
+      "--no-subagent-prevent-cycles",
+    ].includes(flagName)) {
+      i++; continue;
+    }
+
+    // ── EXTENSION FLAGS: handled separately with path resolution ─────────────
+    if (flagName === "--no-extensions" || flagName === "-ne") {
+      extensionArgs.push(flagName);
+      i++; continue;
+    }
+    if (flagName === "--extension" || flagName === "-e") {
+      const [value, skip] = getVal();
+      if (value !== undefined) extensionArgs.push(flagName, resolveExtensionArg(value));
+      i += skip; continue;
+    }
+
+    // ── ALWAYS-PROXY: known value flags ──────────────────────────────────────
+    if ([
+      "--provider", "--api-key", "--system-prompt", "--session-dir",
+      "--models", "--skill", "--prompt-template", "--theme",
+    ].includes(flagName)) {
+      const [value, skip] = getVal();
+      if (value !== undefined) alwaysProxy.push(flagName, value);
+      i += skip; continue;
+    }
+
+    // ── ALWAYS-PROXY: known boolean flags ────────────────────────────────────
+    if ([
+      "--no-skills", "-ns", "--no-prompt-templates", "-np",
+      "--no-themes", "--verbose",
+    ].includes(flagName)) {
+      alwaysProxy.push(flagName);
+      i++; continue;
+    }
+
+    // ── FALLBACK: agent config may override ───────────────────────────────────
+    if (flagName === "--model") {
+      const [value, skip] = getVal();
+      if (value !== undefined) fallbackModel = value;
+      i += skip; continue;
+    }
+    if (flagName === "--thinking") {
+      const [value, skip] = getVal();
+      if (value !== undefined) fallbackThinking = value;
+      i += skip; continue;
+    }
+    if (flagName === "--tools") {
+      const [value, skip] = getVal();
+      if (value !== undefined) fallbackTools = value;
+      i += skip; continue;
+    }
+    if (flagName === "--no-tools") {
+      fallbackNoTools = true;
+      i++; continue;
+    }
+
+    // ── UNKNOWN: heuristic passthrough ───────────────────────────────────────
+    // Likely a custom extension flag. Forward with value if next token looks like one.
+    if (inlineValue !== undefined) {
+      alwaysProxy.push(flagName, inlineValue);
+      i++; continue;
+    }
+    if (nextIsValue) {
+      alwaysProxy.push(flagName, nextToken);
+      i += 2; continue;
+    }
+    alwaysProxy.push(flagName);
+    i++;
+  }
+
+  return { extensionArgs, alwaysProxy, fallbackModel, fallbackThinking, fallbackTools, fallbackNoTools };
+}
+
+/** Cached once — process.argv is immutable at runtime */
+const _inheritedCliArgs = parseInheritedCliArgs(process.argv);
 
 // ---------------------------------------------------------------------------
 // JSON-line stream processing
@@ -158,7 +295,8 @@ function buildPiArgs(
   const args: string[] = [
     "--mode",
     "json",
-    ...getInheritedExtensionArgs(process.argv),
+    ..._inheritedCliArgs.extensionArgs,
+    ..._inheritedCliArgs.alwaysProxy,
     "-p",
   ];
 
@@ -168,10 +306,25 @@ function buildPiArgs(
     args.push("--session", forkSessionPath);
   }
 
-  if (agent.model) args.push("--model", agent.model);
-  if (agent.thinking) args.push("--thinking", agent.thinking);
-  if (agent.tools && agent.tools.length > 0)
+  // Agent config takes priority; fall back to parent CLI value
+  const model = agent.model ?? _inheritedCliArgs.fallbackModel;
+  if (model) args.push("--model", model);
+
+  const thinking = agent.thinking ?? _inheritedCliArgs.fallbackThinking;
+  if (thinking) args.push("--thinking", thinking);
+
+  // agent.tools is set only when the agent file specifies tools (length > 0)
+  if (agent.tools && agent.tools.length > 0) {
     args.push("--tools", agent.tools.join(","));
+  } else if (agent.tools === undefined) {
+    // Agent didn't restrict tools — inherit parent's preference
+    if (_inheritedCliArgs.fallbackTools !== undefined) {
+      args.push("--tools", _inheritedCliArgs.fallbackTools);
+    } else if (_inheritedCliArgs.fallbackNoTools) {
+      args.push("--no-tools");
+    }
+  }
+
   if (systemPromptPath) args.push("--append-system-prompt", systemPromptPath);
   args.push(`Task: ${task}`);
   return args;
@@ -246,6 +399,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<SingleResult> {
       messages: [],
       stderr: `Unknown agent: "${agentName}". Available agents: ${available}.`,
       usage: emptyUsage(),
+      toolCalls: {},
     };
   }
 
@@ -262,6 +416,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<SingleResult> {
       stderr:
         "Cannot run in fork mode: missing parent session snapshot context.",
       usage: emptyUsage(),
+      toolCalls: {},
       model: agent.model,
       stopReason: "error",
       errorMessage:
@@ -277,6 +432,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<SingleResult> {
     messages: [],
     stderr: "",
     usage: emptyUsage(),
+    toolCalls: {},
     model: agent.model,
   };
 
@@ -379,6 +535,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<SingleResult> {
     });
 
     result.exitCode = exitCode;
+    result.toolCalls = extractToolCalls(result.messages); // populate from parsed messages
     if (wasAborted) {
       result.exitCode = 130;
       result.stopReason = "aborted";
