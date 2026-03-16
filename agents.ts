@@ -6,8 +6,9 @@
  *
  * Lookup locations:
  *   - User agents:    ~/.pi/agent/agents/*.md
+ *   - Env agents:     $PI_CODING_AGENT_DIR/agents/*.md  (when env var is set)
  *   - Project agents: .pi/agents/*.md  (walks up from cwd)
- *   - Bundled agents: ./agents/*.md    (fallback only when no user/project agents exist)
+ *   - Bundled agents: ./agents/*.md    (fallback only when all other sources are empty)
  */
 
 import { parseFrontmatter } from "@mariozechner/pi-coding-agent";
@@ -17,7 +18,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
 export type AgentScope = "user" | "project" | "both";
-export type AgentSource = "user" | "project" | "builtin";
+export type AgentSource = "user" | "env" | "project" | "builtin";
 
 export interface AgentConfig {
 	name: string;
@@ -144,12 +145,25 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
 	return agents;
 }
 
+/** Returns the agents directory derived from $PI_CODING_AGENT_DIR, or null if unset/empty. */
+function getEnvAgentsDir(): string | null {
+	const raw = process.env["PI_CODING_AGENT_DIR"];
+	if (!raw || !raw.trim()) return null;
+	return path.join(raw.trim(), "agents");
+}
+
+/**
+ * Merge agents with last-write-wins deduplication by name.
+ * Priority (lowest → highest): user < env < project.
+ */
 function dedupeAgents(
 	userAgents: AgentConfig[],
+	envAgents: AgentConfig[],
 	projectAgents: AgentConfig[],
 ): AgentConfig[] {
 	const agentMap = new Map<string, AgentConfig>();
 	for (const agent of userAgents) agentMap.set(agent.name, agent);
+	for (const agent of envAgents) agentMap.set(agent.name, agent);
 	for (const agent of projectAgents) agentMap.set(agent.name, agent);
 	return Array.from(agentMap.values());
 }
@@ -167,11 +181,14 @@ function dedupeAgents(
 export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryResult {
 	const userDir = path.join(os.homedir(), ".pi", "agent", "agents");
 	const projectAgentsDir = findNearestProjectAgentsDir(cwd);
+	const envAgentsDir = getEnvAgentsDir();
 
 	const userAgents = loadAgentsFromDir(userDir, "user");
+	const envAgents = envAgentsDir ? loadAgentsFromDir(envAgentsDir, "env") : [];
 	const projectAgents = projectAgentsDir ? loadAgentsFromDir(projectAgentsDir, "project") : [];
 
-	const hasConfiguredAgents = userAgents.length > 0 || projectAgents.length > 0;
+	const hasConfiguredAgents =
+		userAgents.length > 0 || envAgents.length > 0 || projectAgents.length > 0;
 	if (!hasConfiguredAgents) {
 		return {
 			agents: loadAgentsFromDir(BUNDLED_AGENTS_DIR, "builtin"),
@@ -181,5 +198,5 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 
 	if (scope === "user") return { agents: userAgents, projectAgentsDir };
 	if (scope === "project") return { agents: projectAgents, projectAgentsDir };
-	return { agents: dedupeAgents(userAgents, projectAgents), projectAgentsDir };
+	return { agents: dedupeAgents(userAgents, envAgents, projectAgents), projectAgentsDir };
 }

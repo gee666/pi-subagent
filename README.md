@@ -62,7 +62,11 @@ Three fallback agents ship with the extension (used when no user/project agents 
 Create Markdown files with YAML frontmatter:
 
 - **User agents:** `~/.pi/agent/agents/*.md`
+- **Env agents:** `$PI_CODING_AGENT_DIR/agents/*.md` *(when `PI_CODING_AGENT_DIR` is set)*
 - **Project agents:** `.pi/agents/*.md` *(may prompt for confirmation — see `PI_SUBAGENT_CONFIRM_PROJECT_AGENTS`)*
+
+Agent discovery priority (highest wins on name collision): project > env > user.
+Built-in agents are only used as a fallback when **all three** locations are empty.
 
 ```markdown
 ---
@@ -111,6 +115,12 @@ pi --no-subagent-prevent-cycles   # allow cycles (not recommended)
 | -------------------------------- | ------- | ---------------------------------------- |
 | `PI_SUBAGENT_MAX_PARALLEL_TASKS` | `16`    | Max tasks per single call                |
 | `PI_SUBAGENT_MAX_CONCURRENCY`    | `8`     | Max subagents running simultaneously     |
+
+## Agent Discovery
+
+| Env Var                 | Description                                                  |
+| ----------------------- | ------------------------------------------------------------ |
+| `PI_CODING_AGENT_DIR`   | Base path for an additional agents directory (`$PI_CODING_AGENT_DIR/agents/*.md`). Agents here override user agents but are overridden by project agents. Built-in agents are only used when user, env, and project locations all yield zero agents. |
 
 ## CLI Argument Proxying
 
