@@ -482,7 +482,13 @@ export async function runAgent(opts: RunAgentOptions): Promise<SingleResult> {
       const nextDepth = Math.max(0, Math.floor(parentDepth)) + 1;
       const propagatedMaxDepth = Math.max(0, Math.floor(maxDepth));
       const propagatedStack = [...parentAgentStack, agentName];
-      const proc = spawn("pi", piArgs, {
+      // On Windows, `pi` is a .CMD shim that requires the shell to execute,
+      // but shell:true splits arguments on whitespace — breaking task strings.
+      // Fix: reuse the running node binary + the pi CLI script path directly,
+      // so the child is spawned without a shell and args are passed safely.
+      const spawnCmd = process.platform === "win32" ? process.execPath : "pi";
+      const spawnArgs = process.platform === "win32" ? [process.argv[1], ...piArgs] : piArgs;
+      const proc = spawn(spawnCmd, spawnArgs, {
         cwd: taskCwd ?? cwd,
         shell: false,
         stdio: ["ignore", "pipe", "pipe"],
