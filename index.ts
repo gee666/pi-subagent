@@ -411,33 +411,37 @@ export default function (pi: ExtensionAPI) {
   // Auto-discover agents on session start
   pi.on("session_start", async (_event, ctx) => {
     if (!canDelegate) return;
+    try {
+      const discovery = discoverAgents(ctx.cwd, "both");
+      discoveredAgents = discovery.agents;
 
-    const discovery = discoverAgents(ctx.cwd, "both");
-    discoveredAgents = discovery.agents;
-
-    if (discoveredAgents.length > 0 && ctx.hasUI) {
-      const list = discoveredAgents
-        .map((a) => `  - ${a.name} (${a.source})`)
-        .join("\n");
-      ctx.ui.notify(
-        `Found ${discoveredAgents.length} subagent(s):\n${list}`,
-        "info",
-      );
+      if (discoveredAgents.length > 0 && ctx.hasUI) {
+        const list = discoveredAgents
+          .map((a) => `  - ${a.name} (${a.source})`)
+          .join("\n");
+        ctx.ui.notify(
+          `Found ${discoveredAgents.length} subagent(s):\n${list}`,
+          "info",
+        );
+      }
+    } catch (err) {
+      console.error("[pi-subagent] Error in session_start:", err);
     }
   });
 
   // Inject available agents into the system prompt
   pi.on("before_agent_start", async (event) => {
-    if (!canDelegate) return;
-    if (discoveredAgents.length === 0) return;
+    try {
+      if (!canDelegate) return;
+      if (discoveredAgents.length === 0) return;
 
-    const agentList = discoveredAgents
-      .map((a) => `- **${a.name}**: ${a.description}`)
-      .join("\n");
-    return {
-      systemPrompt:
-        event.systemPrompt +
-        `\n\n## Available Subagents
+      const agentList = discoveredAgents
+        .map((a) => `- **${a.name}**: ${a.description}`)
+        .join("\n");
+      return {
+        systemPrompt:
+          event.systemPrompt +
+          `\n\n## Available Subagents
 
 The following subagents are available via the \`subagent\` tool:
 
@@ -471,7 +475,10 @@ The tool always accepts a \`tasks\` array:
 - Cycle prevention: ${preventCycles ? "enabled" : "disabled"}
 - Current delegation stack: ${ancestorAgentStack.length > 0 ? ancestorAgentStack.join(" -> ") : "(root)"}
 `,
-    };
+      };
+    } catch (err) {
+      console.error("[pi-subagent] Error in before_agent_start:", err);
+    }
   });
 
   // Register the subagent tool
@@ -498,152 +505,165 @@ The tool always accepts a \`tasks\` array:
       parameters: SubagentParams,
 
       async execute(_toolCallId, params, signal, onUpdate, ctx) {
-        const discovery = discoverAgents(ctx.cwd, "both");
-        const { agents } = discovery;
+        try {
+          const discovery = discoverAgents(ctx.cwd, "both");
+          const { agents } = discovery;
 
-        const delegationMode = parseDelegationMode(params.mode);
-        if (!delegationMode) {
-          const fallbackDetails = makeDetailsFactory(
-            discovery.projectAgentsDir,
-            DEFAULT_DELEGATION_MODE,
-          );
-          return {
-            content: [
-              {
-                type: "text",
-                text: `Invalid mode \"${String(params.mode)}\". Expected \"spawn\" or \"fork\".\nAvailable agents: ${formatAgentNames(agents)}`,
-              },
-            ],
-            details: fallbackDetails("single")([]),
-            isError: true,
-          };
-        }
-
-        const makeDetails = makeDetailsFactory(
-          discovery.projectAgentsDir,
-          delegationMode,
-        );
-
-        let forkSessionSnapshotJsonl: string | undefined;
-        if (delegationMode === "fork") {
-          forkSessionSnapshotJsonl = buildForkSessionSnapshotJsonl(
-            ctx.sessionManager,
-          );
-          if (!forkSessionSnapshotJsonl) {
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: "Cannot use mode=\"fork\": failed to snapshot current session context.",
-                },
-              ],
-              details: makeDetails("single")([]),
-              isError: true,
-            };
-          }
-        }
-
-        const tasks = params.tasks ?? [];
-        if (tasks.length === 0) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `Invalid parameters. Provide a non-empty tasks array.\nAvailable agents: ${formatAgentNames(agents)}`,
-              },
-            ],
-            details: makeDetails("single")([]),
-          };
-        }
-
-        const executionMode = tasks.length === 1 ? "single" : "parallel";
-
-        // Security: guard project-local agents before running
-        const requested = new Set<string>();
-        for (const t of tasks) requested.add(t.agent);
-
-        if (preventCycles) {
-          const cycleViolations = getCycleViolations(
-            requested,
-            ancestorAgentStack,
-          );
-          if (cycleViolations.length > 0) {
-            const stackText =
-              ancestorAgentStack.length > 0
-                ? ancestorAgentStack.join(" -> ")
-                : "(root)";
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: `Blocked: delegation cycle detected. Requested agent(s) already in the delegation stack: ${cycleViolations.join(", ")}.
-Current stack: ${stackText}
-
-This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A).`,
-                },
-              ],
-              details: makeDetails(executionMode)([]),
-              isError: true,
-            };
-          }
-        }
-
-        const requestedProjectAgents = getRequestedProjectAgents(
-          agents,
-          requested,
-        );
-        const projectAgentConfirmationSetting =
-          getProjectAgentConfirmationSetting();
-        const projectAgentSessionKey = getProjectAgentSessionKey(
-          discovery.projectAgentsDir,
-        );
-        const shouldConfirmProjectAgents =
-          requestedProjectAgents.length > 0 &&
-          projectAgentConfirmationSetting === "ask" &&
-          !approvedProjectAgentDirsForSession.has(projectAgentSessionKey);
-        if (shouldConfirmProjectAgents) {
-          if (ctx.hasUI) {
-            const approval = await confirmProjectAgentsIfNeeded(
-              requestedProjectAgents,
+          const delegationMode = parseDelegationMode(params.mode);
+          if (!delegationMode) {
+            const fallbackDetails = makeDetailsFactory(
               discovery.projectAgentsDir,
-              ctx,
+              DEFAULT_DELEGATION_MODE,
             );
-            if (approval === "no") {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Invalid mode \"${String(params.mode)}\". Expected \"spawn\" or \"fork\".\nAvailable agents: ${formatAgentNames(agents)}`,
+                },
+              ],
+              details: fallbackDetails("single")([]),
+              isError: true,
+            };
+          }
+
+          const makeDetails = makeDetailsFactory(
+            discovery.projectAgentsDir,
+            delegationMode,
+          );
+
+          let forkSessionSnapshotJsonl: string | undefined;
+          if (delegationMode === "fork") {
+            forkSessionSnapshotJsonl = buildForkSessionSnapshotJsonl(
+              ctx.sessionManager,
+            );
+            if (!forkSessionSnapshotJsonl) {
               return {
                 content: [
                   {
                     type: "text",
-                    text: "Canceled: project-local agents not approved.",
+                    text: "Cannot use mode=\"fork\": failed to snapshot current session context.",
                   },
                 ],
-                details: makeDetails(executionMode)([]),
+                details: makeDetails("single")([]),
+                isError: true,
               };
             }
-            if (approval === "session") {
-              approvedProjectAgentDirsForSession.add(projectAgentSessionKey);
-            }
-          } else {
-            const names = requestedProjectAgents.map((a) => a.name).join(", ");
-            const dir = discovery.projectAgentsDir ?? "(unknown)";
+          }
+
+          const tasks = params.tasks ?? [];
+          if (tasks.length === 0) {
             return {
               content: [
                 {
                   type: "text",
-                  text: `Blocked: project-local agent confirmation is required in non-UI mode.\nAgents: ${names}\nSource: ${dir}\n\nSet ${SUBAGENT_CONFIRM_PROJECT_AGENTS_ENV}=false or =session only if this repository is trusted.`,
+                  text: `Invalid parameters. Provide a non-empty tasks array.\nAvailable agents: ${formatAgentNames(agents)}`,
                 },
               ],
-              details: makeDetails(executionMode)([]),
-              isError: true,
+              details: makeDetails("single")([]),
             };
           }
-        }
 
-        if (tasks.length === 1) {
-          const [task] = tasks;
-          return executeSingle(
-            task.agent,
-            task.task,
-            task.cwd,
+          const executionMode = tasks.length === 1 ? "single" : "parallel";
+
+          // Security: guard project-local agents before running
+          const requested = new Set<string>();
+          for (const t of tasks) requested.add(t.agent);
+
+          if (preventCycles) {
+            const cycleViolations = getCycleViolations(
+              requested,
+              ancestorAgentStack,
+            );
+            if (cycleViolations.length > 0) {
+              const stackText =
+                ancestorAgentStack.length > 0
+                  ? ancestorAgentStack.join(" -> ")
+                  : "(root)";
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: `Blocked: delegation cycle detected. Requested agent(s) already in the delegation stack: ${cycleViolations.join(", ")}.
+Current stack: ${stackText}
+
+This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A).`,
+                  },
+                ],
+                details: makeDetails(executionMode)([]),
+                isError: true,
+              };
+            }
+          }
+
+          const requestedProjectAgents = getRequestedProjectAgents(
+            agents,
+            requested,
+          );
+          const projectAgentConfirmationSetting =
+            getProjectAgentConfirmationSetting();
+          const projectAgentSessionKey = getProjectAgentSessionKey(
+            discovery.projectAgentsDir,
+          );
+          const shouldConfirmProjectAgents =
+            requestedProjectAgents.length > 0 &&
+            projectAgentConfirmationSetting === "ask" &&
+            !approvedProjectAgentDirsForSession.has(projectAgentSessionKey);
+          if (shouldConfirmProjectAgents) {
+            if (ctx.hasUI) {
+              const approval = await confirmProjectAgentsIfNeeded(
+                requestedProjectAgents,
+                discovery.projectAgentsDir,
+                ctx,
+              );
+              if (approval === "no") {
+                return {
+                  content: [
+                    {
+                      type: "text",
+                      text: "Canceled: project-local agents not approved.",
+                    },
+                  ],
+                  details: makeDetails(executionMode)([]),
+                };
+              }
+              if (approval === "session") {
+                approvedProjectAgentDirsForSession.add(projectAgentSessionKey);
+              }
+            } else {
+              const names = requestedProjectAgents.map((a) => a.name).join(", ");
+              const dir = discovery.projectAgentsDir ?? "(unknown)";
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: `Blocked: project-local agent confirmation is required in non-UI mode.\nAgents: ${names}\nSource: ${dir}\n\nSet ${SUBAGENT_CONFIRM_PROJECT_AGENTS_ENV}=false or =session only if this repository is trusted.`,
+                  },
+                ],
+                details: makeDetails(executionMode)([]),
+                isError: true,
+              };
+            }
+          }
+
+          if (tasks.length === 1) {
+            const [task] = tasks;
+            return executeSingle(
+              task.agent,
+              task.task,
+              task.cwd,
+              delegationMode,
+              forkSessionSnapshotJsonl,
+              agents,
+              ctx.cwd,
+              signal,
+              onUpdate,
+              makeDetails,
+            );
+          }
+
+          return await executeParallel(
+            tasks,
             delegationMode,
             forkSessionSnapshotJsonl,
             agents,
@@ -652,18 +672,15 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
             onUpdate,
             makeDetails,
           );
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          const stack = err instanceof Error && err.stack ? `\n\n${err.stack}` : "";
+          return {
+            content: [{ type: "text" as const, text: `[pi-subagent] Unexpected error: ${msg}${stack}` }],
+            details: buildSubagentDetails("single", DEFAULT_DELEGATION_MODE, null, []),
+            isError: true,
+          };
         }
-
-        return executeParallel(
-          tasks,
-          delegationMode,
-          forkSessionSnapshotJsonl,
-          agents,
-          ctx.cwd,
-          signal,
-          onUpdate,
-          makeDetails,
-        );
       },
 
       renderCall: (args, theme) => renderCall(args, theme),

@@ -241,7 +241,7 @@ const _inheritedCliArgs = parseInheritedCliArgs(process.argv);
 // JSON-line stream processing
 // ---------------------------------------------------------------------------
 
-function processJsonLine(line: string, result: SingleResult): boolean {
+export function processJsonLine(line: string, result: SingleResult): boolean {
   if (!line.trim()) return false;
 
   let event: any;
@@ -250,6 +250,9 @@ function processJsonLine(line: string, result: SingleResult): boolean {
   } catch {
     return false;
   }
+
+  // Guard: JSON.parse can return null, a number, boolean, or array — none of which have .type
+  if (!event || typeof event !== "object" || Array.isArray(event)) return false;
 
   if (event.type === "message_end" && event.message) {
     const msg = event.message as Message;
@@ -524,7 +527,12 @@ export async function runAgent(opts: RunAgentOptions): Promise<SingleResult> {
         resolve(code ?? 0);
       });
 
-      proc.on("error", () => resolve(1));
+      proc.on("error", (err) => {
+        result.stderr += `Spawn error: ${err.message}`;
+        result.stopReason = "error";
+        result.errorMessage = `Failed to spawn pi process: ${err.message}`;
+        resolve(1);
+      });
 
       // Abort handling
       if (signal) {
@@ -559,6 +567,13 @@ export async function runAgent(opts: RunAgentOptions): Promise<SingleResult> {
       }
     }
 
+    return result;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    result.exitCode = result.exitCode === -1 ? 1 : result.exitCode;
+    result.stopReason = result.stopReason ?? "error";
+    result.errorMessage = result.errorMessage ?? msg;
+    if (!result.stderr.trim()) result.stderr = msg;
     return result;
   } finally {
     cleanupTempDir(promptTmpDir);
