@@ -1,6 +1,6 @@
 {
   "name": "oira666_pi-subagent",
-  "version": "0.1.5",
+  "version": "0.1.7",
   "description": "Subagent extension for Pi coding agent. Delegate tasks to specialized agents.",
   "type": "module",
   "main": "index.ts",
@@ -42,6 +42,9 @@
     "access": "public"
   },
   "license": "MIT",
+  "scripts": {
+    "test": "node --import tsx --test test/*.test.ts"
+  },
   "devDependencies": {
     "@types/node": "^25.2.3",
     "tsx": "^4.21.0",

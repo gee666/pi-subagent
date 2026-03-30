@@ -251,7 +251,7 @@ const _inheritedCliArgs = parseInheritedCliArgs(process.argv);
 // JSON-line stream processing
 // ---------------------------------------------------------------------------
 
-function processJsonLine(line: string, result: SingleResult): boolean {
+export function processJsonLine(line: string, result: SingleResult): boolean {
   if (!line.trim()) return false;
 
   let event: any;
@@ -260,6 +260,9 @@ function processJsonLine(line: string, result: SingleResult): boolean {
   } catch {
     return false;
   }
+
+  // Guard: JSON.parse can return null, a number, boolean, or array — none of which have .type
+  if (!event || typeof event !== "object" || Array.isArray(event)) return false;
 
   if (event.type === "message_end" && event.message) {
     const msg = event.message as Message;
@@ -492,7 +495,13 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       const nextDepth = Math.max(0, Math.floor(parentDepth)) + 1;
       const propagatedMaxDepth = Math.max(0, Math.floor(maxDepth));
       const propagatedStack = [...parentAgentStack, agentName];
-      const proc = spawn("pi", piArgs, {
+      // On Windows, `pi` is a .CMD shim that requires the shell to execute,
+      // but shell:true splits arguments on whitespace — breaking task strings.
+      // Fix: reuse the running node binary + the pi CLI script path directly,
+      // so the child is spawned without a shell and args are passed safely.
+      const spawnCmd = process.platform === "win32" ? process.execPath : "pi";
+      const spawnArgs = process.platform === "win32" ? [process.argv[1], ...piArgs] : piArgs;
+      const proc = spawn(spawnCmd, spawnArgs, {
         cwd: taskCwd ?? cwd,
         shell: false,
         stdio: ["ignore", "pipe", "pipe"],
@@ -528,7 +537,12 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
         resolve(code ?? 0);
       });
 
-      proc.on("error", () => resolve(1));
+      proc.on("error", (err) => {
+        result.stderr += `Spawn error: ${err.message}`;
+        result.stopReason = "error";
+        result.errorMessage = `Failed to spawn pi process: ${err.message}`;
+        resolve(1);
+      });
 
       // Abort handling
       if (signal) {
@@ -563,6 +577,13 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       }
     }
 
+    return result;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    result.exitCode = result.exitCode === -1 ? 1 : result.exitCode;
+    result.stopReason = result.stopReason ?? "error";
+    result.errorMessage = result.errorMessage ?? msg;
+    if (!result.stderr.trim()) result.stderr = msg;
     return result;
   } finally {
     cleanupTempDir(promptTmpDir);

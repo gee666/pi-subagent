@@ -582,6 +582,15 @@ export async function runAgentSameProcess(
 		}
 
 		return result;
+	} catch (err: any) {
+		// Outer safety net: catches anything thrown by loader.reload(),
+		// createAgentSession(), or other setup code outside the inner try/catch.
+		const msg = err instanceof Error ? err.message : String(err);
+		result.exitCode = result.exitCode === -1 ? 1 : result.exitCode;
+		result.stopReason = result.stopReason ?? "error";
+		result.errorMessage = result.errorMessage ?? msg;
+		if (!result.stderr.trim()) result.stderr = msg;
+		return result;
 	} finally {
 		cleanupTempDir(forkTmpDir);
 	}
