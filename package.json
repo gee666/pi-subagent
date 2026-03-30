@@ -1,11 +1,11 @@
 {
   "name": "oira666_pi-subagent",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Subagent extension for Pi coding agent. Delegate tasks to specialized agents.",
   "type": "module",
   "main": "index.ts",
   "scripts": {
-    "test": "node --import tsx/esm --test tests/*.test.ts"
+    "test": "node --import tsx/esm --test tests/*.test.ts test/*.test.ts"
   },
   "files": [
     "index.ts",
