@@ -1,8 +1,14 @@
 /**
  * Pi Subagent Extension
  *
- * Delegates tasks to specialized subagents, each running as an isolated `pi`
- * process.
+ * Delegates tasks to specialized subagents running as in-process AgentSessions
+ * (via the pi SDK) rather than spawning separate `pi` processes.
+ *
+ * Environment variables (PI_SUBAGENT_DEPTH, PI_SUBAGENT_MAX_DEPTH,
+ * PI_SUBAGENT_STACK, PI_SUBAGENT_PREVENT_CYCLES, PI_SUBAGENT_MAX_PARALLEL_TASKS,
+ * PI_SUBAGENT_MAX_CONCURRENCY, PI_SUBAGENT_CONFIRM_PROJECT_AGENTS) are read
+ * here at root startup exactly as before.  Depth/stack propagate to nested
+ * sessions via closure in runner-sdk.ts instead of via subprocess env vars.
  *
  * The tool always accepts a `tasks` array:
  *   - One task: treated as a single-agent delegation.
@@ -17,7 +23,10 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { type AgentConfig, discoverAgents } from "./agents.js";
 import { renderCall, renderResult } from "./render.js";
-import { mapConcurrent, runAgent } from "./runner.js";
+import { runAgentSubprocess, executeParallelSubprocess } from "./runner.js";
+import { runAgentSameProcess, executeParallelSameProcess } from "./runner-sdk.js";
+import { parseNonNegativeInt } from "./shared.js";
+
 import {
   type DelegationMode,
   type SingleResult,
@@ -33,9 +42,6 @@ import {
 // Limits
 // ---------------------------------------------------------------------------
 
-const DEFAULT_MAX_PARALLEL_TASKS = 16;
-const DEFAULT_MAX_CONCURRENCY = 8;
-const PARALLEL_HEARTBEAT_MS = 1000;
 const DEFAULT_MAX_DELEGATION_DEPTH = 3;
 const DEFAULT_PREVENT_CYCLE_DELEGATION = false;
 const DEFAULT_PROJECT_AGENT_CONFIRMATION = "ask";
@@ -43,9 +49,8 @@ const SUBAGENT_DEPTH_ENV = "PI_SUBAGENT_DEPTH";
 const SUBAGENT_MAX_DEPTH_ENV = "PI_SUBAGENT_MAX_DEPTH";
 const SUBAGENT_STACK_ENV = "PI_SUBAGENT_STACK";
 const SUBAGENT_PREVENT_CYCLES_ENV = "PI_SUBAGENT_PREVENT_CYCLES";
-const SUBAGENT_MAX_PARALLEL_TASKS_ENV = "PI_SUBAGENT_MAX_PARALLEL_TASKS";
-const SUBAGENT_MAX_CONCURRENCY_ENV = "PI_SUBAGENT_MAX_CONCURRENCY";
 const SUBAGENT_CONFIRM_PROJECT_AGENTS_ENV = "PI_SUBAGENT_CONFIRM_PROJECT_AGENTS";
+const SUBAGENTS_MODE_ENV = "PI_SUBAGENTS_MODE";
 
 type ProjectAgentConfirmationSetting = "ask" | "never" | "session";
 type ProjectAgentApproval = "once" | "session" | "no";
@@ -121,13 +126,6 @@ function buildForkSessionSnapshotJsonl(
   return `${lines.join("\n")}\n`;
 }
 
-function parseNonNegativeInt(raw: unknown): number | null {
-  if (typeof raw !== "string") return null;
-  const trimmed = raw.trim();
-  if (!/^\d+$/.test(trimmed)) return null;
-  const parsed = Number(trimmed);
-  return Number.isSafeInteger(parsed) ? parsed : null;
-}
 
 function parseBoolean(raw: unknown): boolean | null {
   if (typeof raw === "boolean") return raw;
@@ -387,6 +385,38 @@ function getProjectAgentSessionKey(projectAgentsDir: string | null): string {
 }
 
 // ---------------------------------------------------------------------------
+// Subagent mode helpers (exported for testing and external consumers)
+// ---------------------------------------------------------------------------
+
+/** The two supported subagent execution modes. */
+export type SubagentMode = "subprocess" | "sdk";
+
+/** Default subagent execution mode. */
+export const DEFAULT_SUBAGENTS_MODE: SubagentMode = "subprocess";
+
+/**
+ * Parse a raw value into a SubagentMode.
+ * Returns null for invalid/unrecognized values, the default mode for undefined.
+ */
+export function parseSubagentMode(raw: unknown): SubagentMode | null {
+  if (raw === undefined) return DEFAULT_SUBAGENTS_MODE;
+  if (typeof raw !== "string") return null;
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "subprocess") return "subprocess";
+  if (normalized === "sdk") return "sdk";
+  return null;
+}
+
+/**
+ * Read the subagent mode from PI_SUBAGENTS_MODE env var.
+ * Falls back to DEFAULT_SUBAGENTS_MODE if the env var is absent or invalid.
+ */
+export function getSubagentMode(): SubagentMode {
+  const parsed = parseSubagentMode(process.env["PI_SUBAGENTS_MODE"]);
+  return parsed ?? DEFAULT_SUBAGENTS_MODE;
+}
+
+// ---------------------------------------------------------------------------
 // Extension entry point
 // ---------------------------------------------------------------------------
 
@@ -404,6 +434,7 @@ export default function (pi: ExtensionAPI) {
   const depthConfig = resolveDelegationDepthConfig(pi);
   const { currentDepth, maxDepth, canDelegate, ancestorAgentStack, preventCycles } =
     depthConfig;
+  const subagentMode = getSubagentMode();
 
   let discoveredAgents: AgentConfig[] = [];
   const approvedProjectAgentDirsForSession = new Set<string>();
@@ -470,6 +501,7 @@ The tool always accepts a \`tasks\` array:
 - Max depth: current depth ${currentDepth}, max depth ${maxDepth}
 - Cycle prevention: ${preventCycles ? "enabled" : "disabled"}
 - Current delegation stack: ${ancestorAgentStack.length > 0 ? ancestorAgentStack.join(" -> ") : "(root)"}
+- Execution mode: ${subagentMode === "sdk" ? "in-process SDK" : "subprocess"}
 `,
     };
   });
@@ -480,7 +512,9 @@ The tool always accepts a \`tasks\` array:
       name: "subagent",
       label: "Subagent",
       description: [
-        "Delegate work to specialized subagents running in isolated pi processes.",
+        `Delegate work to specialized subagents running as ${
+          subagentMode === "sdk" ? "in-process SDK sessions" : "isolated pi processes"
+        }.`,
         "",
         "The tool always accepts a `tasks` array:",
         "  - one task: single-agent delegation",
@@ -651,6 +685,8 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
             signal,
             onUpdate,
             makeDetails,
+            ctx.modelRegistry,
+            ctx.model,
           );
         }
 
@@ -663,6 +699,8 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
           signal,
           onUpdate,
           makeDetails,
+          ctx.modelRegistry,
+          ctx.model,
         );
       },
 
@@ -687,23 +725,45 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
     signal: AbortSignal | undefined,
     onUpdate: ((partial: any) => void) | undefined,
     makeDetails: ReturnType<typeof makeDetailsFactory>,
+    modelRegistry: any,
+    parentModel: any,
   ) {
-    const result = await runAgent({
-      cwd: defaultCwd,
-      agents,
-      agentName,
-      task,
-      taskCwd: cwd,
-      delegationMode,
-      forkSessionSnapshotJsonl,
-      parentDepth: currentDepth,
-      parentAgentStack: ancestorAgentStack,
-      maxDepth,
-      preventCycles,
-      signal,
-      onUpdate,
-      makeDetails: makeDetails("single"),
-    });
+    const result =
+      subagentMode === "sdk"
+        ? await runAgentSameProcess({
+            cwd: defaultCwd,
+            agents,
+            agentName,
+            task,
+            taskCwd: cwd,
+            delegationMode,
+            forkSessionSnapshotJsonl,
+            parentDepth: currentDepth,
+            parentAgentStack: ancestorAgentStack,
+            maxDepth,
+            preventCycles,
+            modelRegistry,
+            parentModel,
+            signal,
+            onUpdate,
+            makeDetails: makeDetails("single"),
+          })
+        : await runAgentSubprocess({
+            cwd: defaultCwd,
+            agents,
+            agentName,
+            task,
+            taskCwd: cwd,
+            delegationMode,
+            forkSessionSnapshotJsonl,
+            parentDepth: currentDepth,
+            parentAgentStack: ancestorAgentStack,
+            maxDepth,
+            preventCycles,
+            signal,
+            onUpdate,
+            makeDetails: makeDetails("single"),
+          });
 
     if (isResultError(result)) {
       const errorMsg =
@@ -742,122 +802,40 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
     signal: AbortSignal | undefined,
     onUpdate: ((partial: any) => void) | undefined,
     makeDetails: ReturnType<typeof makeDetailsFactory>,
+    modelRegistry: any,
+    parentModel: any,
   ) {
-    const maxParallelTasksRaw = process.env[SUBAGENT_MAX_PARALLEL_TASKS_ENV];
-    const maxParallelTasksParsed = parseNonNegativeInt(maxParallelTasksRaw);
-    if (maxParallelTasksRaw !== undefined && maxParallelTasksParsed === null) {
-      console.warn(
-        `[pi-subagent] Ignoring invalid ${SUBAGENT_MAX_PARALLEL_TASKS_ENV}="${maxParallelTasksRaw}". Expected a non-negative integer.`
-      );
-    }
-    const maxParallelTasks = maxParallelTasksParsed ?? DEFAULT_MAX_PARALLEL_TASKS;
-
-    const maxConcurrencyRaw = process.env[SUBAGENT_MAX_CONCURRENCY_ENV];
-    const maxConcurrencyParsed = parseNonNegativeInt(maxConcurrencyRaw);
-    if (maxConcurrencyRaw !== undefined && maxConcurrencyParsed === null) {
-      console.warn(
-        `[pi-subagent] Ignoring invalid ${SUBAGENT_MAX_CONCURRENCY_ENV}="${maxConcurrencyRaw}". Expected a non-negative integer.`
-      );
-    }
-    const maxConcurrency = maxConcurrencyParsed ?? DEFAULT_MAX_CONCURRENCY;
-
-    if (tasks.length > maxParallelTasks) {
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: `Too many parallel tasks (${tasks.length}). Max is ${maxParallelTasks}.`,
-          },
-        ],
-        details: makeDetails("parallel")([]),
-      };
-    }
-
-    // Initialize placeholder results for streaming
-    const allResults: SingleResult[] = tasks.map((t) => ({
-      agent: t.agent,
-      agentSource: "unknown" as const,
-      task: t.task,
-      exitCode: -1,
-      messages: [],
-      stderr: "",
-      usage: emptyUsage(),
-      toolCalls: {},
-    }));
-
-    const emitProgress = () => {
-      if (!onUpdate) return;
-      const running = allResults.filter((r) => r.exitCode === -1).length;
-      const done = allResults.filter((r) => r.exitCode !== -1).length;
-      onUpdate({
-        content: [
-          {
-            type: "text",
-            text: `Parallel: ${done}/${allResults.length} done, ${running} running...`,
-          },
-        ],
-        details: makeDetails("parallel")([...allResults]),
-      });
-    };
-
-    let heartbeat: NodeJS.Timeout | undefined;
-    if (onUpdate) {
-      emitProgress();
-      heartbeat = setInterval(() => {
-        if (allResults.some((r) => r.exitCode === -1)) emitProgress();
-      }, PARALLEL_HEARTBEAT_MS);
-    }
-
-    let results: SingleResult[];
-    try {
-      results = await mapConcurrent(
+    if (subagentMode === "sdk") {
+      return executeParallelSameProcess(
         tasks,
-        maxConcurrency,
-        async (t, index) => {
-          const result = await runAgent({
-            cwd: defaultCwd,
-            agents,
-            agentName: t.agent,
-            task: t.task,
-            taskCwd: t.cwd,
-            delegationMode,
-            forkSessionSnapshotJsonl,
-            parentDepth: currentDepth,
-            parentAgentStack: ancestorAgentStack,
-            maxDepth,
-            preventCycles,
-            signal,
-            onUpdate: (partial) => {
-              if (partial.details?.results[0]) {
-                allResults[index] = partial.details.results[0];
-                emitProgress();
-              }
-            },
-            makeDetails: makeDetails("parallel"),
-          });
-          allResults[index] = result;
-          emitProgress();
-          return result;
-        },
+        delegationMode,
+        forkSessionSnapshotJsonl,
+        agents,
+        defaultCwd,
+        currentDepth,
+        maxDepth,
+        ancestorAgentStack,
+        preventCycles,
+        modelRegistry,
+        parentModel,
+        signal,
+        onUpdate,
+        makeDetails("parallel"),
       );
-    } finally {
-      if (heartbeat) clearInterval(heartbeat);
     }
-
-    const successCount = results.filter((r) => r.exitCode === 0).length;
-    const summaries = results.map((r) => {
-      const output = getFinalOutput(r.messages);
-      return `[${r.agent}] ${r.exitCode === 0 ? "completed" : "failed"}: ${output || "(no output)"}`;
-    });
-
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: `Parallel: ${successCount}/${results.length} succeeded\n\n${summaries.join("\n\n")}`,
-        },
-      ],
-      details: makeDetails("parallel")(results),
-    };
+    return executeParallelSubprocess(
+      tasks,
+      delegationMode,
+      forkSessionSnapshotJsonl,
+      agents,
+      defaultCwd,
+      currentDepth,
+      maxDepth,
+      ancestorAgentStack,
+      preventCycles,
+      signal,
+      onUpdate,
+      makeDetails("parallel"),
+    );
   }
 }

@@ -15,11 +15,21 @@ import {
   type DelegationMode,
   type SingleResult,
   type SubagentDetails,
+  buildSubagentDetails,
   emptyUsage,
   extractToolCalls,
   getFinalOutput,
   getNestedSubagentErrorSummary,
 } from "./types.js";
+import {
+  DEFAULT_MAX_PARALLEL_TASKS,
+  DEFAULT_MAX_CONCURRENCY,
+  PARALLEL_HEARTBEAT_MS,
+  SUBAGENT_MAX_PARALLEL_TASKS_ENV,
+  SUBAGENT_MAX_CONCURRENCY_ENV,
+  parseNonNegativeInt,
+  mapConcurrent,
+} from "./shared.js";
 
 const SIGKILL_TIMEOUT_MS = 5000;
 const SUBAGENT_DEPTH_ENV = "PI_SUBAGENT_DEPTH";
@@ -370,7 +380,7 @@ export interface RunAgentOptions {
  *
  * Returns a SingleResult even on failure (exitCode > 0, stderr populated).
  */
-export async function runAgent(opts: RunAgentOptions): Promise<SingleResult> {
+export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleResult> {
   const {
     cwd,
     agents,
@@ -560,31 +570,139 @@ export async function runAgent(opts: RunAgentOptions): Promise<SingleResult> {
   }
 }
 
+
 // ---------------------------------------------------------------------------
-// Concurrency helper
+// Parallel execution (subprocess flavour)
+// Symmetric to executeParallelSameProcess in runner-sdk.ts but uses runAgentSubprocess().
 // ---------------------------------------------------------------------------
 
-/**
- * Map over items with a bounded number of concurrent workers.
- */
-export async function mapConcurrent<TIn, TOut>(
-  items: TIn[],
-  concurrency: number,
-  fn: (item: TIn, index: number) => Promise<TOut>,
-): Promise<TOut[]> {
-  if (items.length === 0) return [];
-  const limit = Math.max(1, Math.min(concurrency, items.length));
-  const results: TOut[] = new Array(items.length);
-  let nextIndex = 0;
 
-  const worker = async () => {
-    while (true) {
-      const i = nextIndex++;
-      if (i >= items.length) return;
-      results[i] = await fn(items[i], i);
-    }
+export async function executeParallelSubprocess(
+  tasks: Array<{ agent: string; task: string; cwd?: string }>,
+  delegationMode: DelegationMode,
+  forkSessionSnapshotJsonl: string | undefined,
+  agents: AgentConfig[],
+  defaultCwd: string,
+  parentDepth: number,
+  maxDepth: number,
+  parentAgentStack: string[],
+  preventCycles: boolean,
+  signal: AbortSignal | undefined,
+  onUpdate: OnUpdateCallback | undefined,
+  makeDetails: (results: SingleResult[]) => SubagentDetails,
+): Promise<{
+  content: Array<{ type: "text"; text: string }>;
+  details: SubagentDetails;
+}> {
+  const maxParallelTasksRaw = process.env[SUBAGENT_MAX_PARALLEL_TASKS_ENV];
+  const maxParallelTasksParsed = parseNonNegativeInt(maxParallelTasksRaw);
+  if (maxParallelTasksRaw !== undefined && maxParallelTasksParsed === null) {
+    console.warn(
+      `[pi-subagent] Ignoring invalid ${SUBAGENT_MAX_PARALLEL_TASKS_ENV}="${maxParallelTasksRaw}". Expected a non-negative integer.`,
+    );
+  }
+  const maxParallelTasks = maxParallelTasksParsed ?? DEFAULT_MAX_PARALLEL_TASKS;
+
+  const maxConcurrencyRaw = process.env[SUBAGENT_MAX_CONCURRENCY_ENV];
+  const maxConcurrencyParsed = parseNonNegativeInt(maxConcurrencyRaw);
+  if (maxConcurrencyRaw !== undefined && maxConcurrencyParsed === null) {
+    console.warn(
+      `[pi-subagent] Ignoring invalid ${SUBAGENT_MAX_CONCURRENCY_ENV}="${maxConcurrencyRaw}". Expected a non-negative integer.`,
+    );
+  }
+  const maxConcurrency = maxConcurrencyParsed ?? DEFAULT_MAX_CONCURRENCY;
+
+  if (tasks.length > maxParallelTasks) {
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `Too many parallel tasks (${tasks.length}). Max is ${maxParallelTasks}.`,
+        },
+      ],
+      details: makeDetails([]),
+    };
+  }
+
+  const allResults: SingleResult[] = tasks.map((t) => ({
+    agent: t.agent,
+    agentSource: "unknown" as const,
+    task: t.task,
+    exitCode: -1,
+    messages: [],
+    stderr: "",
+    usage: emptyUsage(),
+    toolCalls: {},
+  }));
+
+  const emitProgress = () => {
+    if (!onUpdate) return;
+    const running = allResults.filter((r) => r.exitCode === -1).length;
+    const done = allResults.filter((r) => r.exitCode !== -1).length;
+    onUpdate({
+      content: [
+        {
+          type: "text",
+          text: `Parallel: ${done}/${allResults.length} done, ${running} running...`,
+        },
+      ],
+      details: makeDetails([...allResults]),
+    });
   };
 
-  await Promise.all(Array.from({ length: limit }, () => worker()));
-  return results;
+  let heartbeat: NodeJS.Timeout | undefined;
+  if (onUpdate) {
+    emitProgress();
+    heartbeat = setInterval(() => {
+      if (allResults.some((r) => r.exitCode === -1)) emitProgress();
+    }, PARALLEL_HEARTBEAT_MS);
+  }
+
+  let results: SingleResult[];
+  try {
+    results = await mapConcurrent(tasks, maxConcurrency, async (t, index) => {
+      const result = await runAgentSubprocess({
+        cwd: defaultCwd,
+        agents,
+        agentName: t.agent,
+        task: t.task,
+        taskCwd: t.cwd,
+        delegationMode,
+        forkSessionSnapshotJsonl,
+        parentDepth,
+        parentAgentStack,
+        maxDepth,
+        preventCycles,
+        signal,
+        onUpdate: (partial) => {
+          if (partial.details?.results[0]) {
+            allResults[index] = partial.details.results[0];
+            emitProgress();
+          }
+        },
+        makeDetails,
+      });
+      allResults[index] = result;
+      emitProgress();
+      return result;
+    });
+  } finally {
+    if (heartbeat) clearInterval(heartbeat);
+  }
+
+  const successCount = results.filter((r) => r.exitCode === 0).length;
+  const summaries = results.map((r) => {
+    const output = getFinalOutput(r.messages);
+    return `[${r.agent}] ${r.exitCode === 0 ? "completed" : "failed"}: ${output || "(no output)"}`;
+  });
+
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: `Parallel: ${successCount}/${results.length} succeeded\n\n${summaries.join("\n\n")}`,
+      },
+    ],
+    details: makeDetails(results),
+  };
 }
