@@ -516,9 +516,49 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       });
 
       let buffer = "";
+      let resolved = false;
+      let hangTimer: ReturnType<typeof setTimeout> | undefined;
+
+      const doResolve = (code: number) => {
+        if (resolved) return;
+        resolved = true;
+        if (hangTimer) { clearTimeout(hangTimer); hangTimer = undefined; }
+        if (buffer.trim()) flushLine(buffer);
+        resolve(code);
+      };
+
+      /**
+       * Schedule a hang guard: if the child process produced a terminal
+       * stopReason (agent finished) but doesn't exit on its own (due to
+       * open handles like MCP connections, dangling timers, etc.),
+       * force-kill it so the parent doesn't hang forever.
+       */
+      const scheduleHangGuard = () => {
+        if (resolved || hangTimer) return;
+        hangTimer = setTimeout(() => {
+          if (resolved) return;
+          // Process produced all output but won't exit — force-kill it
+          try { proc.kill("SIGTERM"); } catch { /* already dead */ }
+          setTimeout(() => {
+            if (!resolved) {
+              try { proc.kill("SIGKILL"); } catch { /* already dead */ }
+            }
+          }, SIGKILL_TIMEOUT_MS);
+        }, 2000);
+      };
 
       const flushLine = (line: string) => {
-        if (processJsonLine(line, result)) emitUpdate();
+        const accepted = processJsonLine(line, result);
+        if (accepted) {
+          emitUpdate();
+          // Check if the agent reached a terminal state. A stopReason on
+          // an assistant message_end means the agent has finished (end_turn,
+          // max_tokens, error, etc.).  After this point the child pi
+          // process should exit, but sometimes it hangs due to open handles.
+          if (result.stopReason) {
+            scheduleHangGuard();
+          }
+        }
       };
 
       proc.stdout.on("data", (chunk: Buffer) => {
@@ -533,15 +573,20 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       });
 
       proc.on("close", (code) => {
-        if (buffer.trim()) flushLine(buffer);
-        resolve(code ?? 0);
+        doResolve(code ?? 0);
+      });
+
+      proc.on("exit", (code) => {
+        // If the process exits, resolve as soon as possible.
+        // Give a tiny grace period for any remaining buffered stdout data.
+        setTimeout(() => doResolve(code ?? 0), 100);
       });
 
       proc.on("error", (err) => {
         result.stderr += `Spawn error: ${err.message}`;
         result.stopReason = "error";
         result.errorMessage = `Failed to spawn pi process: ${err.message}`;
-        resolve(1);
+        doResolve(1);
       });
 
       // Abort handling
