@@ -303,7 +303,7 @@ describe("runAgent resilience", () => {
     assert.ok(result.stderr.includes("Unknown agent"));
   });
 
-  test("returns error result when pi binary is not found", async () => {
+  test("startup timeout kills a hung process and returns a result", async () => {
     const { runAgentSubprocess: runAgent } = await import("../runner.js");
 
     // Use a fake agent
@@ -315,33 +315,44 @@ describe("runAgent resilience", () => {
       filePath: "/fake/agent.md",
     };
 
-    const result = await runAgent({
-      cwd: "/tmp",
-      agents: [fakeAgent],
-      agentName: "fake",
-      task: "do something",
-      delegationMode: "spawn",
-      parentDepth: 0,
-      parentAgentStack: [],
-      maxDepth: 3,
-      preventCycles: false,
-      makeDetails: (results) => ({
-        mode: "single",
-        delegationMode: "spawn",
-        projectAgentsDir: null,
-        results,
-        aggregatedUsage: emptyUsage(),
-        aggregatedToolCalls: {},
-        usageTree: [],
-      }),
-    });
+    // Use a short startup timeout so the extension kills the hung
+    // process itself — no external abort needed.
+    const origTimeout = process.env.PI_SUBAGENT_STARTUP_TIMEOUT;
+    process.env.PI_SUBAGENT_STARTUP_TIMEOUT = "3000";
 
-    // pi binary likely exists on this system, but if it doesn't or fails,
-    // the extension should not crash – it returns a result with exitCode > 0
-    // We just check it returns a SingleResult (no throw)
+    let result;
+    try {
+      result = await runAgent({
+        cwd: "/tmp",
+        agents: [fakeAgent],
+        agentName: "fake",
+        task: "do something",
+        delegationMode: "spawn",
+        parentDepth: 0,
+        parentAgentStack: [],
+        maxDepth: 3,
+        preventCycles: false,
+        makeDetails: (results) => ({
+          mode: "single",
+          delegationMode: "spawn",
+          projectAgentsDir: null,
+          results,
+          aggregatedUsage: emptyUsage(),
+          aggregatedToolCalls: {},
+          usageTree: [],
+        }),
+      });
+    } finally {
+      if (origTimeout === undefined) delete process.env.PI_SUBAGENT_STARTUP_TIMEOUT;
+      else process.env.PI_SUBAGENT_STARTUP_TIMEOUT = origTimeout;
+    }
+
+    // The extension must have killed the process and returned a valid
+    // SingleResult (not hung forever).
     assert.ok(typeof result.exitCode === "number");
     assert.ok(typeof result.stderr === "string");
     assert.ok(Array.isArray(result.messages));
+    assert.ok(result.stderr.includes("startup timeout"));
   });
 
   test("handles fork mode with missing snapshot gracefully", async () => {

@@ -32,6 +32,19 @@ import {
 } from "./shared.js";
 
 const SIGKILL_TIMEOUT_MS = 5000;
+const HANG_GUARD_DELAY_MS = 5000;
+const DEFAULT_STARTUP_TIMEOUT_MS = 3000; // only for startup
+const SUBAGENT_STARTUP_TIMEOUT_ENV = "PI_SUBAGENT_STARTUP_TIMEOUT";
+
+/**
+ * Stop reasons that indicate the agent has truly finished its work.
+ * "tool_use" is NOT terminal — the agent is still working (calling a tool).
+ */
+const TERMINAL_STOP_REASONS = new Set(["end_turn", "max_tokens", "error", "stop_sequence"]);
+
+function isTerminalStopReason(reason: string | undefined): boolean {
+  return reason !== undefined && TERMINAL_STOP_REASONS.has(reason);
+}
 const SUBAGENT_DEPTH_ENV = "PI_SUBAGENT_DEPTH";
 const SUBAGENT_MAX_DEPTH_ENV = "PI_SUBAGENT_MAX_DEPTH";
 const SUBAGENT_STACK_ENV = "PI_SUBAGENT_STACK";
@@ -518,13 +531,35 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       let buffer = "";
       let resolved = false;
       let hangTimer: ReturnType<typeof setTimeout> | undefined;
+      let startupTimer: ReturnType<typeof setTimeout> | undefined;
+      let receivedFirstEvent = false;
+
+      // Startup timeout: kill the process if it never produces its first
+      // JSON event. Once the first event arrives, this timer is permanently
+      // disabled — from that point, tool calls can run for as long as they
+      // need, and only the terminal-stopReason hang guard applies.
+      const startupTimeoutMs = (() => {
+        const raw = process.env[SUBAGENT_STARTUP_TIMEOUT_ENV];
+        if (raw === undefined) return DEFAULT_STARTUP_TIMEOUT_MS;
+        const parsed = parseNonNegativeInt(raw);
+        return parsed !== null ? parsed : DEFAULT_STARTUP_TIMEOUT_MS;
+      })();
 
       const doResolve = (code: number) => {
         if (resolved) return;
         resolved = true;
         if (hangTimer) { clearTimeout(hangTimer); hangTimer = undefined; }
+        if (startupTimer) { clearTimeout(startupTimer); startupTimer = undefined; }
         if (buffer.trim()) flushLine(buffer);
         resolve(code);
+      };
+
+      /**
+       * Cancel any pending hang guard timer.
+       * Called on every new activity to prove the child is still working.
+       */
+      const cancelHangGuard = () => {
+        if (hangTimer) { clearTimeout(hangTimer); hangTimer = undefined; }
       };
 
       /**
@@ -532,9 +567,13 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
        * stopReason (agent finished) but doesn't exit on its own (due to
        * open handles like MCP connections, dangling timers, etc.),
        * force-kill it so the parent doesn't hang forever.
+       *
+       * The guard is reset on every new activity and only armed for
+       * truly terminal stop reasons (not "tool_use").
        */
       const scheduleHangGuard = () => {
-        if (resolved || hangTimer) return;
+        if (resolved) return;
+        cancelHangGuard();
         hangTimer = setTimeout(() => {
           if (resolved) return;
           // Process produced all output but won't exit — force-kill it
@@ -544,22 +583,49 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
               try { proc.kill("SIGKILL"); } catch { /* already dead */ }
             }
           }, SIGKILL_TIMEOUT_MS);
-        }, 2000);
+        }, HANG_GUARD_DELAY_MS);
       };
 
       const flushLine = (line: string) => {
         const accepted = processJsonLine(line, result);
         if (accepted) {
+          // An assistant turn (turns > 0) means the API responded and the
+          // agent is actually working.  Permanently disable the startup
+          // timer; from here on only the terminal-stopReason hang guard
+          // applies.  User message echoes don't count — the process could
+          // still be stuck waiting for the API.
+          if (!receivedFirstEvent && result.usage.turns > 0) {
+            receivedFirstEvent = true;
+            if (startupTimer) { clearTimeout(startupTimer); startupTimer = undefined; }
+          }
           emitUpdate();
-          // Check if the agent reached a terminal state. A stopReason on
-          // an assistant message_end means the agent has finished (end_turn,
-          // max_tokens, error, etc.).  After this point the child pi
-          // process should exit, but sometimes it hangs due to open handles.
-          if (result.stopReason) {
+          // Any accepted message means the child is alive and producing
+          // output — cancel any pending hang guard so we don't kill it
+          // while it's still working (e.g. during tool execution).
+          cancelHangGuard();
+          // Only arm the hang guard when the agent has truly finished.
+          // "tool_use" means the agent is still working — NOT terminal.
+          if (isTerminalStopReason(result.stopReason)) {
             scheduleHangGuard();
           }
         }
       };
+
+      // Start the startup timer — if the child process never produces its
+      // first JSON event (hung during init, broken binary, etc.), kill it.
+      // This timer is cancelled permanently once the first event arrives.
+      if (startupTimeoutMs > 0) {
+        startupTimer = setTimeout(() => {
+          if (resolved || receivedFirstEvent) return;
+          result.stderr += `\n[pi-subagent] Killed: no JSON output after ${startupTimeoutMs}ms (startup timeout).`;
+          try { proc.kill("SIGTERM"); } catch { /* already dead */ }
+          setTimeout(() => {
+            if (!resolved) {
+              try { proc.kill("SIGKILL"); } catch { /* already dead */ }
+            }
+          }, SIGKILL_TIMEOUT_MS);
+        }, startupTimeoutMs);
+      }
 
       proc.stdout.on("data", (chunk: Buffer) => {
         buffer += chunk.toString();

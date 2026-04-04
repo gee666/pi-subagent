@@ -78,10 +78,9 @@ describe("processJsonLine: never throws", () => {
 // ---------------------------------------------------------------------------
 
 describe("runAgent: catch block covers spawn errors", async () => {
-  test("reports spawn failure via result, does not throw", async () => {
+  test("startup timeout kills a hung subprocess", async () => {
     const { runAgentSubprocess: runAgent } = await import("../runner.js");
 
-    // Pass a task with special characters that could cause issues
     const specialTask = 'Fix "quoted" bug in path /var/www/project & handle <tags> with \'quotes\'';
 
     const fakeAgent = {
@@ -92,33 +91,41 @@ describe("runAgent: catch block covers spawn errors", async () => {
       filePath: "/fake/path.md",
     };
 
-    // runAgent should not throw even with a complex task string
+    // Use a short startup timeout so the extension itself kills the
+    // hung process — not an external abort signal.
+    const origTimeout = process.env.PI_SUBAGENT_STARTUP_TIMEOUT;
+    process.env.PI_SUBAGENT_STARTUP_TIMEOUT = "3000"; // 3 seconds
+
     let result: SingleResult;
-    assert.doesNotThrow(() => {
-      result = makeResult(); // placeholder
-    });
+    try {
+      result = await runAgent({
+        cwd: "/tmp",
+        agents: [fakeAgent],
+        agentName: "fake-agent",
+        task: specialTask,
+        delegationMode: "spawn",
+        parentDepth: 0,
+        parentAgentStack: [],
+        maxDepth: 3,
+        preventCycles: false,
+        makeDetails: (results) => buildSubagentDetails("single", "spawn", null, results),
+      });
+    } finally {
+      if (origTimeout === undefined) delete process.env.PI_SUBAGENT_STARTUP_TIMEOUT;
+      else process.env.PI_SUBAGENT_STARTUP_TIMEOUT = origTimeout;
+    }
 
-    result = await runAgent({
-      cwd: "/tmp",
-      agents: [fakeAgent],
-      agentName: "fake-agent",
-      task: specialTask,
-      delegationMode: "spawn",
-      parentDepth: 0,
-      parentAgentStack: [],
-      maxDepth: 3,
-      preventCycles: false,
-      makeDetails: (results) => buildSubagentDetails("single", "spawn", null, results),
-    });
-
-    // Should return a result object, not throw
-    assert.ok(result !== undefined);
-    assert.ok(typeof result.exitCode === "number");
-    assert.ok(typeof result.stderr === "string");
-    assert.ok(Array.isArray(result.messages));
+    // The extension must have killed the process and returned a result
+    // (not hung forever). Verify it's a valid SingleResult.
+    assert.ok(result! !== undefined);
+    assert.ok(typeof result!.exitCode === "number");
+    assert.ok(typeof result!.stderr === "string");
+    assert.ok(Array.isArray(result!.messages));
+    // Should mention startup timeout in stderr
+    assert.ok(result!.stderr.includes("startup timeout"), `Expected startup timeout in stderr, got: ${result!.stderr.slice(0, 200)}`);
   });
 
-  test("reports spawn failure for task with newlines", async () => {
+  test("startup timeout works with special characters in task", async () => {
     const { runAgentSubprocess: runAgent } = await import("../runner.js");
 
     const taskWithNewlines = "Fix the bug:\n- Step 1: find it\n- Step 2: fix it\n- Step 3: test it";
@@ -131,21 +138,31 @@ describe("runAgent: catch block covers spawn errors", async () => {
       filePath: "/fake/path.md",
     };
 
-    const result = await runAgent({
-      cwd: "/tmp",
-      agents: [fakeAgent],
-      agentName: "fake-agent",
-      task: taskWithNewlines,
-      delegationMode: "spawn",
-      parentDepth: 0,
-      parentAgentStack: [],
-      maxDepth: 3,
-      preventCycles: false,
-      makeDetails: (results) => buildSubagentDetails("single", "spawn", null, results),
-    });
+    const origTimeout = process.env.PI_SUBAGENT_STARTUP_TIMEOUT;
+    process.env.PI_SUBAGENT_STARTUP_TIMEOUT = "3000";
 
-    assert.ok(result !== undefined);
-    assert.ok(typeof result.exitCode === "number");
+    let result: SingleResult;
+    try {
+      result = await runAgent({
+        cwd: "/tmp",
+        agents: [fakeAgent],
+        agentName: "fake-agent",
+        task: taskWithNewlines,
+        delegationMode: "spawn",
+        parentDepth: 0,
+        parentAgentStack: [],
+        maxDepth: 3,
+        preventCycles: false,
+        makeDetails: (results) => buildSubagentDetails("single", "spawn", null, results),
+      });
+    } finally {
+      if (origTimeout === undefined) delete process.env.PI_SUBAGENT_STARTUP_TIMEOUT;
+      else process.env.PI_SUBAGENT_STARTUP_TIMEOUT = origTimeout;
+    }
+
+    assert.ok(result! !== undefined);
+    assert.ok(typeof result!.exitCode === "number");
+    assert.ok(result!.stderr.includes("startup timeout"));
   });
 
   test("unknown agent returns structured error result", async () => {
