@@ -33,14 +33,16 @@ import {
 
 const SIGKILL_TIMEOUT_MS = 5000;
 const HANG_GUARD_DELAY_MS = 5000;
-const DEFAULT_STARTUP_TIMEOUT_MS = 3000; // only for startup
+const DEFAULT_STARTUP_TIMEOUT_MS = 120_000; // only for startup (before first assistant turn)
 const SUBAGENT_STARTUP_TIMEOUT_ENV = "PI_SUBAGENT_STARTUP_TIMEOUT";
 
 /**
  * Stop reasons that indicate the agent has truly finished its work.
  * "tool_use" is NOT terminal — the agent is still working (calling a tool).
  */
-const TERMINAL_STOP_REASONS = new Set(["end_turn", "max_tokens", "error", "stop_sequence"]);
+// pi emits "stop" (and occasionally "end_turn") as the terminal reason; include both.
+// "toolUse"/"tool_use" are NOT terminal — the agent is still mid-turn calling a tool.
+const TERMINAL_STOP_REASONS = new Set(["end_turn", "stop", "max_tokens", "error", "stop_sequence"]);
 
 function isTerminalStopReason(reason: string | undefined): boolean {
   return reason !== undefined && TERMINAL_STOP_REASONS.has(reason);
@@ -49,7 +51,9 @@ const SUBAGENT_DEPTH_ENV = "PI_SUBAGENT_DEPTH";
 const SUBAGENT_MAX_DEPTH_ENV = "PI_SUBAGENT_MAX_DEPTH";
 const SUBAGENT_STACK_ENV = "PI_SUBAGENT_STACK";
 const SUBAGENT_PREVENT_CYCLES_ENV = "PI_SUBAGENT_PREVENT_CYCLES";
-const PI_OFFLINE_ENV = "PI_OFFLINE";
+// PI_OFFLINE intentionally removed: setting it on child processes blocks all API
+// calls and renders subagents unable to do any LLM work. Children inherit the
+// parent's PI_OFFLINE value via process.env spread if needed.
 
 type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
 
@@ -524,7 +528,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
           [SUBAGENT_MAX_DEPTH_ENV]: String(propagatedMaxDepth),
           [SUBAGENT_STACK_ENV]: JSON.stringify(propagatedStack),
           [SUBAGENT_PREVENT_CYCLES_ENV]: preventCycles ? "1" : "0",
-          [PI_OFFLINE_ENV]: "1",
+          // PI_OFFLINE is NOT forced here — see explanation near PI_OFFLINE_ENV.
         },
       });
 
