@@ -24,6 +24,14 @@ export interface UsageStats {
 /** Tool calls made by an agent: toolName → call count */
 export type ToolCallCounts = Record<string, number>;
 
+export type LiveLogEntry =
+	| { kind: "turn_start" }
+	| { kind: "turn_end";   turn: number; inputTokens: number; outputTokens: number }
+	| { kind: "tool_start"; toolName: string; args: Record<string, unknown> }
+	| { kind: "tool_end";   toolName: string };
+
+export const MAX_LIVE_LOG_ENTRIES = 6;
+
 /** Result of a single subagent invocation. */
 export interface SingleResult {
 	agent: string;
@@ -37,6 +45,21 @@ export interface SingleResult {
 	model?: string;
 	stopReason?: string;
 	errorMessage?: string;
+	/** Number of LLM turns completed so far in this agent run. */
+	completedTurns: number;
+	/** True while an LLM call is currently in flight (between turn_start and turn_end). */
+	turnInProgress: boolean;
+	/**
+	 * Tools actively executing right now, keyed by toolCallId.
+	 * Present only while at least one tool is running; entries are added on
+	 * tool_execution_start and removed on tool_execution_end.
+	 */
+	liveToolExecutions?: Record<string, { toolName: string; args: Record<string, unknown> }>;
+	/**
+	 * Rolling buffer of the last MAX_LIVE_LOG_ENTRIES events for TUI display.
+	 * Populated while the agent is running; each entry is one display line.
+	 */
+	liveLog: LiveLogEntry[];
 }
 
 /** A node in the per-subagent usage tree (own stats + recursive children) */

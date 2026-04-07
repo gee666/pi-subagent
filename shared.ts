@@ -5,6 +5,28 @@
  * that both runners need. Change a value here and it propagates everywhere.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
+
+// ---------------------------------------------------------------------------
+// In-process child session context
+// ---------------------------------------------------------------------------
+
+/**
+ * Depth and delegation config for an in-process child AgentSession.
+ *
+ * Stored via AsyncLocalStorage so each nested session sees its own correct
+ * values without mutating process.env. index.ts reads this first; if absent
+ * it falls back to env vars (subprocess mode).
+ */
+export interface SubagentSessionContext {
+	depth: number;
+	maxDepth: number;
+	stack: string[];
+	preventCycles: boolean;
+}
+
+export const subagentContext = new AsyncLocalStorage<SubagentSessionContext>();
+
 // ---------------------------------------------------------------------------
 // Parallel execution limits
 // ---------------------------------------------------------------------------

@@ -24,20 +24,18 @@ import {
 	createGrepTool,
 	createFindTool,
 	createLsTool,
-	type ExtensionFactory,
 	type ToolDefinition,
 } from "@mariozechner/pi-coding-agent";
-import { Type } from "@sinclair/typebox";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentConfig } from "./agents.js";
 import {
 	type DelegationMode,
+	type LiveLogEntry,
 	type SingleResult,
 	type SubagentDetails,
-	DEFAULT_DELEGATION_MODE,
-	buildSubagentDetails,
+	MAX_LIVE_LOG_ENTRIES,
 	emptyUsage,
 	extractToolCalls,
 	getFinalOutput,
@@ -53,36 +51,14 @@ import {
 	SUBAGENT_MAX_CONCURRENCY_ENV,
 	parseNonNegativeInt,
 	mapConcurrent,
+	subagentContext,
+	type SubagentSessionContext,
 } from "./shared.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-function parseDelegationMode(raw: unknown): DelegationMode | null {
-	if (raw === undefined) return DEFAULT_DELEGATION_MODE;
-	if (typeof raw !== "string") return null;
-	const normalized = raw.trim().toLowerCase();
-	if (normalized === "spawn" || normalized === "fork") return normalized;
-	return null;
-}
-
-/**
- * Serialise a ReadonlySessionManager's current branch to JSONL.
- * Mirrors buildForkSessionSnapshotJsonl() in index.ts — kept here so child
- * extension factories can snapshot their own session for grandchild fork mode.
- */
-function buildForkSnapshotJsonl(sessionManager: {
-	getHeader: () => unknown;
-	getBranch: () => unknown[];
-}): string | null {
-	const header = sessionManager.getHeader();
-	if (!header || typeof header !== "object") return null;
-	const branchEntries = sessionManager.getBranch();
-	const lines = [JSON.stringify(header)];
-	for (const entry of branchEntries) lines.push(JSON.stringify(entry));
-	return `${lines.join("\n")}\n`;
-}
 
 function writeForkSessionToTempFile(
 	agentName: string,
@@ -139,210 +115,6 @@ function resolveModelByName(modelName: string, modelRegistry: any): any {
 	} catch {
 		return undefined;
 	}
-}
-
-// ---------------------------------------------------------------------------
-// Child subagent extension factory
-// ---------------------------------------------------------------------------
-
-interface ChildExtensionOpts {
-	depth: number;
-	maxDepth: number;
-	stack: string[];
-	preventCycles: boolean;
-	agents: AgentConfig[];
-}
-
-/**
- * Returns an ExtensionFactory that injects a depth-aware `subagent` tool into
- * a child AgentSession.  Depth, max-depth, ancestor stack, and cycle-prevention
- * flag are captured in the closure — not read from environment variables — so
- * every nested level gets the correct values regardless of process.env.
- */
-export function makeChildSubagentExtension(opts: ChildExtensionOpts): ExtensionFactory {
-	const { depth, maxDepth, stack, preventCycles, agents } = opts;
-
-	const ChildTaskItem = Type.Object({
-		agent: Type.String({ description: "Name of an available agent (must match exactly)" }),
-		task: Type.String({
-			description:
-				"Task description. In spawn mode include all required context; in fork mode the subagent also sees this session's context.",
-		}),
-		cwd: Type.Optional(Type.String({ description: "Working directory for this agent" })),
-	});
-	const ChildSubagentParams = Type.Object({
-		tasks: Type.Array(ChildTaskItem, { minItems: 1 }),
-		mode: Type.Optional(
-			Type.String({
-				description: "'spawn' (default) or 'fork'",
-				default: DEFAULT_DELEGATION_MODE,
-			}),
-		),
-	});
-
-	const agentList = agents.map((a) => `- **${a.name}**: ${a.description}`).join("\n");
-
-	return (pi: any) => {
-		// Append available-agents list and delegation context to child system prompt
-		pi.on("before_agent_start", async (event: any) => ({
-			systemPrompt:
-				event.systemPrompt +
-				`\n\n## Available Subagents\n\n${agentList}\n\n` +
-				`### Delegation depth\nCurrent depth: ${depth}, max: ${maxDepth}\n` +
-				`Ancestor stack: ${stack.length > 0 ? stack.join(" -> ") : "(root)"}`,
-		}));
-
-		pi.registerTool({
-			name: "subagent",
-			label: "Subagent",
-			description: [
-				"Delegate work to specialized subagents.",
-				"",
-				`Current delegation depth: ${depth}, max: ${maxDepth}.`,
-				`Ancestor stack: ${stack.length > 0 ? stack.join(" -> ") : "(root)"}`,
-			].join("\n"),
-			parameters: ChildSubagentParams,
-
-			async execute(
-				_toolCallId: string,
-				params: any,
-				signal: AbortSignal | undefined,
-				onUpdate: any,
-				ctx: any,
-			) {
-				const tasks: Array<{ agent: string; task: string; cwd?: string }> =
-					params.tasks ?? [];
-				if (tasks.length === 0) {
-					return {
-						content: [{ type: "text", text: "No tasks provided." }],
-						isError: true,
-					};
-				}
-
-				const delegationMode = parseDelegationMode(params.mode);
-				if (!delegationMode) {
-					return {
-						content: [
-							{
-								type: "text",
-								text: `Invalid mode "${params.mode}". Expected "spawn" or "fork".`,
-							},
-						],
-						isError: true,
-					};
-				}
-
-				// Cycle check
-				if (preventCycles && stack.length > 0) {
-					const stackSet = new Set(stack);
-					const cycles = tasks.map((t) => t.agent).filter((n) => stackSet.has(n));
-					if (cycles.length > 0) {
-						return {
-							content: [
-								{
-									type: "text",
-									text: `Blocked: delegation cycle detected. Agents already in stack: ${cycles.join(", ")}. Stack: ${stack.join(" -> ")}`,
-								},
-							],
-							isError: true,
-						};
-					}
-				}
-
-				// Fork mode: snapshot THIS child's session for its own children
-				let forkSessionSnapshotJsonl: string | undefined;
-				if (delegationMode === "fork") {
-					const snap = buildForkSnapshotJsonl(ctx.sessionManager);
-					if (!snap) {
-						return {
-							content: [
-								{
-									type: "text",
-									text: 'Cannot use mode="fork": failed to snapshot current session context.',
-								},
-							],
-							isError: true,
-						};
-					}
-					forkSessionSnapshotJsonl = snap;
-				}
-
-				const executionMode = tasks.length === 1 ? "single" : "parallel";
-				const makeDetails = (results: SingleResult[]) =>
-					buildSubagentDetails(executionMode, delegationMode, null, results);
-
-				if (tasks.length === 1) {
-					const [t] = tasks;
-					const result = await runAgentSameProcess({
-						cwd: ctx.cwd,
-						agents,
-						agentName: t.agent,
-						task: t.task,
-						taskCwd: t.cwd,
-						delegationMode,
-						forkSessionSnapshotJsonl,
-						parentDepth: depth,
-						parentAgentStack: stack,
-						maxDepth,
-						preventCycles,
-						modelRegistry: ctx.modelRegistry,
-						parentModel: ctx.model,
-						signal,
-						onUpdate,
-						makeDetails,
-					});
-
-					if (isResultError(result)) {
-						const errMsg =
-							result.errorMessage ||
-							result.stderr ||
-							getFinalOutput(result.messages) ||
-							"(no output)";
-						return {
-							content: [
-								{
-									type: "text",
-									text: `Agent ${result.stopReason || "failed"}: ${errMsg}`,
-								},
-							],
-							details: makeDetails([result]),
-							isError: true,
-						};
-					}
-					return {
-						content: [
-							{
-								type: "text",
-								text: getFinalOutput(result.messages) || "(no output)",
-							},
-						],
-						details: makeDetails([result]),
-					};
-				}
-
-				return executeParallelSameProcess(
-					tasks,
-					delegationMode,
-					forkSessionSnapshotJsonl,
-					agents,
-					ctx.cwd,
-					depth,
-					maxDepth,
-					stack,
-					preventCycles,
-					ctx.modelRegistry,
-					ctx.model,
-					signal,
-					onUpdate,
-					makeDetails,
-				);
-			},
-
-			renderCall: (args: any, theme: any) => renderCall(args, theme),
-			renderResult: (result: any, opts: any, theme: any) =>
-				renderResult(result, opts.expanded, theme),
-		} as ToolDefinition);
-	};
 }
 
 // ---------------------------------------------------------------------------
@@ -416,6 +188,9 @@ export async function runAgentSameProcess(
 			stderr: `Unknown agent: "${agentName}". Available agents: ${available}.`,
 			usage: emptyUsage(),
 			toolCalls: {},
+			completedTurns: 0,
+			turnInProgress: false,
+			liveLog: [],
 		};
 	}
 
@@ -435,12 +210,14 @@ export async function runAgentSameProcess(
 			model: agent.model,
 			stopReason: "error",
 			errorMessage: "Cannot run in fork mode: missing parent session snapshot context.",
+			completedTurns: 0,
+			turnInProgress: false,
+			liveLog: [],
 		};
 	}
 
 	const childDepth = Math.max(0, Math.floor(parentDepth)) + 1;
 	const childStack = [...parentAgentStack, agentName];
-	const canChildDelegate = childDepth < maxDepth;
 	const effectiveCwd = taskCwd ?? cwd;
 
 	const result: SingleResult = {
@@ -453,6 +230,9 @@ export async function runAgentSameProcess(
 		usage: emptyUsage(),
 		toolCalls: {},
 		model: agent.model,
+		completedTurns: 0,
+		turnInProgress: false,
+		liveLog: [],
 	};
 
 	const emitUpdate = () =>
@@ -473,33 +253,28 @@ export async function runAgentSameProcess(
 		forkTmpPath = tmp.filePath;
 	}
 
-	try {
-		// noExtensions: true prevents auto-loading of the subagent extension (and all
-		// others) inside child sessions.  Without this, the extension would be loaded
-		// again and would read PI_SUBAGENT_DEPTH=0 from process.env — the root value —
-		// making every child think it is unconstrained.  We inject our own depth-aware
-		// subagent tool via extensionFactories instead.
-		const extensionFactories: ExtensionFactory[] = canChildDelegate
-			? [
-					makeChildSubagentExtension({
-						depth: childDepth,
-						maxDepth,
-						stack: childStack,
-						preventCycles,
-						agents,
-					}),
-				]
-			: [];
+	const childCtx: SubagentSessionContext = {
+		depth: childDepth,
+		maxDepth,
+		stack: childStack,
+		preventCycles,
+	};
 
-		const loader = new DefaultResourceLoader({
-			cwd: effectiveCwd,
-			noExtensions: true,
-			// Append agent system prompt on top of the base pi prompt —
-			// matches the --append-system-prompt behaviour of the subprocess runner
-			...(agent.systemPrompt.trim() ? { appendSystemPrompt: agent.systemPrompt } : {}),
-			extensionFactories,
+	try {
+		// Run the child session inside an AsyncLocalStorage context so that all
+		// extensions loaded within it — including the subagent extension itself —
+		// see the correct depth/stack/limits for this nesting level rather than
+		// the stale root values that live in process.env.
+		const loader = await subagentContext.run(childCtx, async () => {
+			const l = new DefaultResourceLoader({
+				cwd: effectiveCwd,
+				// Append agent system prompt on top of the base pi prompt —
+				// matches the --append-system-prompt behaviour of the subprocess runner
+				...(agent.systemPrompt.trim() ? { appendSystemPrompt: agent.systemPrompt } : {}),
+			});
+			await l.reload();
+			return l;
 		});
-		await loader.reload();
 
 		// Resolve model: agent config overrides parent fallback
 		const model = agent.model
@@ -513,18 +288,26 @@ export async function runAgentSameProcess(
 			? SessionManager.open(forkTmpPath)
 			: SessionManager.inMemory();
 
-		const { session } = await createAgentSession({
-			cwd: effectiveCwd,
-			sessionManager,
-			resourceLoader: loader,
-			tools: buildAgentTools(agent, effectiveCwd),
-			...(model ? { model } : {}),
-			...(thinkingLevel ? { thinkingLevel } : {}),
-		});
+		const { session } = await subagentContext.run(childCtx, () =>
+			createAgentSession({
+				cwd: effectiveCwd,
+				sessionManager,
+				resourceLoader: loader,
+				tools: buildAgentTools(agent, effectiveCwd),
+				modelRegistry,
+				...(model ? { model } : {}),
+				...(thinkingLevel ? { thinkingLevel } : {}),
+			})
+		);
 
 		// Forward abort signal to the child session
 		const onAbort = () => session.abort();
 		signal?.addEventListener("abort", onAbort, { once: true });
+
+		const pushLiveLog = (entry: LiveLogEntry) => {
+			result.liveLog.push(entry);
+			if (result.liveLog.length > MAX_LIVE_LOG_ENTRIES) result.liveLog.shift();
+		};
 
 		const unsub = session.subscribe((event: any) => {
 			if (event.type === "message_end" && event.message) {
@@ -545,6 +328,39 @@ export async function runAgentSameProcess(
 						result.errorMessage = event.message.errorMessage;
 					if (!result.model && event.message.model) result.model = event.message.model;
 				}
+				emitUpdate();
+
+			} else if (event.type === "turn_start") {
+				result.turnInProgress = true;
+				pushLiveLog({ kind: "turn_start" });
+				emitUpdate();
+
+			} else if (event.type === "turn_end") {
+				result.completedTurns++;
+				result.turnInProgress = false;
+				const u = (event.message as any)?.usage;
+				pushLiveLog({
+					kind: "turn_end",
+					turn: result.completedTurns,
+					inputTokens: u?.input ?? 0,
+					outputTokens: u?.output ?? 0,
+				});
+				emitUpdate();
+
+			} else if (event.type === "tool_execution_start") {
+				result.liveToolExecutions ??= {};
+				result.liveToolExecutions[event.toolCallId] = {
+					toolName: event.toolName,
+					args: event.args,
+				};
+				pushLiveLog({ kind: "tool_start", toolName: event.toolName, args: event.args });
+				emitUpdate();
+
+			} else if (event.type === "tool_execution_end") {
+				if (result.liveToolExecutions) {
+					delete result.liveToolExecutions[event.toolCallId];
+				}
+				pushLiveLog({ kind: "tool_end", toolName: event.toolName });
 				emitUpdate();
 			}
 		});
@@ -656,6 +472,9 @@ export async function executeParallelSameProcess(
 		stderr: "",
 		usage: emptyUsage(),
 		toolCalls: {},
+		completedTurns: 0,
+		turnInProgress: false,
+		liveLog: [],
 	}));
 
 	const emitProgress = () => {

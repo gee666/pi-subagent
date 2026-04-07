@@ -2,9 +2,11 @@
  * TUI rendering for subagent tool calls and results.
  */
 
+import * as os from "node:os";
 import { Container, Spacer, Text } from "@mariozechner/pi-tui";
 import {
 	type DelegationMode,
+	type LiveLogEntry,
 	type NestedSubagentResult,
 	type SingleResult,
 	type SubagentDetails,
@@ -29,6 +31,7 @@ interface TreeNode {
 	meta?: string;
 	task?: string;
 	outputPreview?: string[];
+	liveActivity?: LiveLogEntry[];
 	children: TreeNode[];
 }
 
@@ -203,6 +206,78 @@ function buildNestedChildren(result: SingleResult): TreeNode[] {
 	return nodes;
 }
 
+function formatToolArgPreview(toolName: string, args: Record<string, unknown>): string {
+	const shorten = (p: string) => {
+		const home = os.homedir();
+		return p.startsWith(home) ? `~${p.slice(home.length)}` : p;
+	};
+	const truncateTo = (s: string, n: number) =>
+		s.length > n ? s.slice(0, n) + "\u2026" : s;
+
+	switch (toolName) {
+		case "bash": {
+			const cmd = (args.command as string) || "";
+			return truncateTo(cmd.replace(/\s+/g, " "), 52);
+		}
+		case "read":
+		case "write":
+		case "edit":
+			return shorten(truncateTo((args.path ?? args.file_path ?? "") as string, 52));
+		case "grep":
+			return truncateTo(`/${args.pattern}/`, 30) +
+				   (args.path ? ` in ${shorten(args.path as string)}` : "");
+		case "find":
+			return truncateTo((args.pattern ?? "*") as string, 30) +
+				   (args.path ? ` in ${shorten(args.path as string)}` : "");
+		case "subagent": {
+			const tasks = (args.tasks as any[]) ?? [];
+			return tasks.map((t: any) => t.agent).join(", ");
+		}
+		default:
+			return "";
+	}
+}
+
+function formatLiveLogEntry(
+	entry: LiveLogEntry,
+	theme: { fg: ThemeFg },
+): string {
+	switch (entry.kind) {
+		case "turn_start":
+			return theme.fg("muted", "\u27f3") + " " + theme.fg("dim", "thinking\u2026");
+
+		case "turn_end": {
+			const tokens = entry.inputTokens || entry.outputTokens
+				? " " + theme.fg("dim",
+					`\u2191${formatTokens(entry.inputTokens)} \u2193${formatTokens(entry.outputTokens)}`)
+				: "";
+			return (
+				theme.fg("success", "\u2713") +
+				" " +
+				theme.fg("muted", `turn ${entry.turn}`) +
+				tokens
+			);
+		}
+
+		case "tool_start": {
+			const argPreview = formatToolArgPreview(entry.toolName, entry.args);
+			return (
+				theme.fg("muted", "\u2192") +
+				" " +
+				theme.fg("accent", entry.toolName) +
+				(argPreview ? "  " + theme.fg("dim", argPreview) : "")
+			);
+		}
+
+		case "tool_end":
+			return (
+				theme.fg("success", "\u2713") +
+				" " +
+				theme.fg("accent", entry.toolName)
+			);
+	}
+}
+
 function buildLeafPreview(result: SingleResult): string[] | undefined {
 	const items = getDisplayItems(result.messages);
 	const lines: string[] = [];
@@ -228,12 +303,14 @@ function buildResultNode(result: SingleResult, delegationMode: DelegationMode): 
 	}
 
 	const children = buildNestedChildren(result);
+	const isRunning = status === "running";
 	return {
 		label: result.agent,
 		status,
 		meta: metaParts.join(" • "),
 		task: result.task,
-		outputPreview: children.length === 0 ? buildLeafPreview(result) : undefined,
+		liveActivity: isRunning && result.liveLog?.length > 0 ? result.liveLog : undefined,
+		outputPreview: !isRunning && children.length === 0 ? buildLeafPreview(result) : undefined,
 		children,
 	};
 }
@@ -259,6 +336,12 @@ function renderTreeLines(
 		if (showOutputPreview && node.outputPreview && node.outputPreview.length > 0) {
 			for (const outputLine of node.outputPreview) {
 				lines.push(`${indent}  ${theme.fg("toolOutput", outputLine)}`);
+			}
+		}
+
+		if (showOutputPreview && node.liveActivity && node.liveActivity.length > 0) {
+			for (const entry of node.liveActivity) {
+				lines.push(`${indent}  ${formatLiveLogEntry(entry, theme)}`);
 			}
 		}
 

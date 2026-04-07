@@ -13,8 +13,10 @@ import type { Message } from "@mariozechner/pi-ai";
 import type { AgentConfig } from "./agents.js";
 import {
   type DelegationMode,
+  type LiveLogEntry,
   type SingleResult,
   type SubagentDetails,
+  MAX_LIVE_LOG_ENTRIES,
   buildSubagentDetails,
   emptyUsage,
   extractToolCalls,
@@ -268,6 +270,11 @@ const _inheritedCliArgs = parseInheritedCliArgs(process.argv);
 // JSON-line stream processing
 // ---------------------------------------------------------------------------
 
+function pushLiveLog(result: SingleResult, entry: LiveLogEntry): void {
+  result.liveLog.push(entry);
+  if (result.liveLog.length > MAX_LIVE_LOG_ENTRIES) result.liveLog.shift();
+}
+
 export function processJsonLine(line: string, result: SingleResult): boolean {
   if (!line.trim()) return false;
 
@@ -305,6 +312,43 @@ export function processJsonLine(line: string, result: SingleResult): boolean {
 
   if (event.type === "tool_result_end" && event.message) {
     result.messages.push(event.message as Message);
+    return true;
+  }
+
+  if (event.type === "turn_start") {
+    result.turnInProgress = true;
+    pushLiveLog(result, { kind: "turn_start" });
+    return true;
+  }
+
+  if (event.type === "turn_end") {
+    result.completedTurns++;
+    result.turnInProgress = false;
+    const u = event.message?.usage;
+    pushLiveLog(result, {
+      kind: "turn_end",
+      turn: result.completedTurns,
+      inputTokens: u?.input ?? 0,
+      outputTokens: u?.output ?? 0,
+    });
+    return true;
+  }
+
+  if (event.type === "tool_execution_start") {
+    result.liveToolExecutions ??= {};
+    result.liveToolExecutions[event.toolCallId] = {
+      toolName: event.toolName,
+      args: event.args,
+    };
+    pushLiveLog(result, { kind: "tool_start", toolName: event.toolName, args: event.args });
+    return true;
+  }
+
+  if (event.type === "tool_execution_end") {
+    if (result.liveToolExecutions) {
+      delete result.liveToolExecutions[event.toolCallId];
+    }
+    pushLiveLog(result, { kind: "tool_end", toolName: event.toolName });
     return true;
   }
 
@@ -430,6 +474,9 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       stderr: `Unknown agent: "${agentName}". Available agents: ${available}.`,
       usage: emptyUsage(),
       toolCalls: {},
+      completedTurns: 0,
+      turnInProgress: false,
+      liveLog: [],
     };
   }
 
@@ -451,6 +498,9 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       stopReason: "error",
       errorMessage:
         "Cannot run in fork mode: missing parent session snapshot context.",
+      completedTurns: 0,
+      turnInProgress: false,
+      liveLog: [],
     };
   }
 
@@ -464,6 +514,9 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
     usage: emptyUsage(),
     toolCalls: {},
     model: agent.model,
+    completedTurns: 0,
+    turnInProgress: false,
+    liveLog: [],
   };
 
   const emitUpdate = () => {
@@ -769,6 +822,9 @@ export async function executeParallelSubprocess(
     stderr: "",
     usage: emptyUsage(),
     toolCalls: {},
+    completedTurns: 0,
+    turnInProgress: false,
+    liveLog: [],
   }));
 
   const emitProgress = () => {
