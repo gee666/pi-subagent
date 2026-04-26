@@ -12,12 +12,10 @@ import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { Message } from "@mariozechner/pi-ai";
 import type { AgentConfig } from "./agents.js";
 import {
-  type DelegationMode,
   type LiveLogEntry,
   type SingleResult,
   type SubagentDetails,
   MAX_LIVE_LOG_ENTRIES,
-  buildSubagentDetails,
   emptyUsage,
   extractToolCalls,
   getFinalOutput,
@@ -71,17 +69,6 @@ function writePromptToTempFile(
   const safeName = agentName.replace(/[^\w.-]+/g, "_");
   const filePath = path.join(tmpDir, `prompt-${safeName}.md`);
   fs.writeFileSync(filePath, prompt, { encoding: "utf-8", mode: 0o600 });
-  return { dir: tmpDir, filePath };
-}
-
-function writeForkSessionToTempFile(
-  agentName: string,
-  sessionJsonl: string,
-): { dir: string; filePath: string } {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-"));
-  const safeName = agentName.replace(/[^\w.-]+/g, "_");
-  const filePath = path.join(tmpDir, `fork-${safeName}.jsonl`);
-  fs.writeFileSync(filePath, sessionJsonl, { encoding: "utf-8", mode: 0o600 });
   return { dir: tmpDir, filePath };
 }
 
@@ -363,8 +350,6 @@ function buildPiArgs(
   agent: AgentConfig,
   systemPromptPath: string | null,
   task: string,
-  delegationMode: DelegationMode,
-  forkSessionPath: string | null,
 ): string[] {
   const args: string[] = [
     "--mode",
@@ -372,13 +357,8 @@ function buildPiArgs(
     ..._inheritedCliArgs.extensionArgs,
     ..._inheritedCliArgs.alwaysProxy,
     "-p",
+    "--no-session",
   ];
-
-  if (delegationMode === "spawn") {
-    args.push("--no-session");
-  } else if (forkSessionPath) {
-    args.push("--session", forkSessionPath);
-  }
 
   // Agent config takes priority; fall back to parent CLI value
   const model = agent.model ?? _inheritedCliArgs.fallbackModel;
@@ -425,10 +405,6 @@ export interface RunAgentOptions {
   task: string;
   /** Optional override working directory. */
   taskCwd?: string;
-  /** Context mode: spawn (fresh) or fork (session snapshot + task). */
-  delegationMode: DelegationMode;
-  /** Serialized parent session snapshot used when delegationMode is "fork". */
-  forkSessionSnapshotJsonl?: string;
   /** Current delegation depth of the caller process. */
   parentDepth: number;
   /** Delegation stack from the caller process (ancestor agent names). */
@@ -457,8 +433,6 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
     agentName,
     task,
     taskCwd,
-    delegationMode,
-    forkSessionSnapshotJsonl,
     parentDepth,
     parentAgentStack,
     maxDepth,
@@ -480,30 +454,6 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       stderr: `Unknown agent: "${agentName}". Available agents: ${available}.`,
       usage: emptyUsage(),
       toolCalls: {},
-      completedTurns: 0,
-      turnInProgress: false,
-      liveLog: [],
-    };
-  }
-
-  if (
-    delegationMode === "fork" &&
-    (!forkSessionSnapshotJsonl || !forkSessionSnapshotJsonl.trim())
-  ) {
-    return {
-      agent: agentName,
-      agentSource: agent.source,
-      task,
-      exitCode: 1,
-      messages: [],
-      stderr:
-        "Cannot run in fork mode: missing parent session snapshot context.",
-      usage: emptyUsage(),
-      toolCalls: {},
-      model: agent.model,
-      stopReason: "error",
-      errorMessage:
-        "Cannot run in fork mode: missing parent session snapshot context.",
       completedTurns: 0,
       turnInProgress: false,
       liveLog: [],
@@ -548,22 +498,11 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
     promptTmpPath = tmp.filePath;
   }
 
-  // Write forked session snapshot if needed
-  let forkSessionTmpDir: string | null = null;
-  let forkSessionTmpPath: string | null = null;
-  if (delegationMode === "fork" && forkSessionSnapshotJsonl) {
-    const tmp = writeForkSessionToTempFile(agent.name, forkSessionSnapshotJsonl);
-    forkSessionTmpDir = tmp.dir;
-    forkSessionTmpPath = tmp.filePath;
-  }
-
   try {
     const piArgs = buildPiArgs(
       agent,
       promptTmpPath,
       task,
-      delegationMode,
-      forkSessionTmpPath,
     );
     let wasAborted = false;
 
@@ -761,7 +700,6 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
     return result;
   } finally {
     cleanupTempDir(promptTmpDir);
-    cleanupTempDir(forkSessionTmpDir);
   }
 }
 
@@ -774,8 +712,6 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
 
 export async function executeParallelSubprocess(
   tasks: Array<{ agent: string; task: string; cwd?: string }>,
-  delegationMode: DelegationMode,
-  forkSessionSnapshotJsonl: string | undefined,
   agents: AgentConfig[],
   defaultCwd: string,
   parentDepth: number,
@@ -865,8 +801,6 @@ export async function executeParallelSubprocess(
         agentName: t.agent,
         task: t.task,
         taskCwd: t.cwd,
-        delegationMode,
-        forkSessionSnapshotJsonl,
         parentDepth,
         parentAgentStack,
         maxDepth,

@@ -103,7 +103,6 @@ describe("runAgent: catch block covers spawn errors", async () => {
         agents: [fakeAgent],
         agentName: "fake-agent",
         task: specialTask,
-        delegationMode: "spawn",
         parentDepth: 0,
         parentAgentStack: [],
         maxDepth: 3,
@@ -148,7 +147,6 @@ describe("runAgent: catch block covers spawn errors", async () => {
         agents: [fakeAgent],
         agentName: "fake-agent",
         task: taskWithNewlines,
-        delegationMode: "spawn",
         parentDepth: 0,
         parentAgentStack: [],
         maxDepth: 3,
@@ -173,7 +171,6 @@ describe("runAgent: catch block covers spawn errors", async () => {
       agents: [],
       agentName: "does-not-exist",
       task: "task",
-      delegationMode: "spawn",
       parentDepth: 0,
       parentAgentStack: [],
       maxDepth: 3,
@@ -213,9 +210,9 @@ describe("execute top-level error handling", () => {
 
   test("catch block details builder: parallel mode", () => {
     assert.doesNotThrow(() => {
-      const d = buildSubagentDetails("parallel", "fork", "/some/dir", []);
+      const d = buildSubagentDetails("parallel", "spawn", "/some/dir", []);
       assert.ok(d.mode === "parallel");
-      assert.ok(d.delegationMode === "fork");
+      assert.ok(d.delegationMode === "spawn");
     });
   });
 
@@ -247,41 +244,6 @@ describe("execute top-level error handling", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Session snapshot building is safe for unusual inputs
-// ---------------------------------------------------------------------------
-
-describe("fork session snapshot safety", () => {
-  test("JSON.stringify on nested objects does not throw for normal objects", () => {
-    const header = { type: "session_header", version: 1, model: "claude-3-5-sonnet" };
-    const branch = [
-      { role: "user", content: [{ type: "text", text: "Hello" }] },
-      { role: "assistant", content: [{ type: "text", text: "Hi there! How can I help?" }] },
-    ];
-
-    assert.doesNotThrow(() => {
-      const lines = [JSON.stringify(header)];
-      for (const entry of branch) lines.push(JSON.stringify(entry));
-      const jsonl = `${lines.join("\n")}\n`;
-      assert.ok(jsonl.length > 0);
-    });
-  });
-
-  test("JSON.stringify handles special characters in content", () => {
-    const obj = {
-      role: "user",
-      content: [{ type: "text", text: 'Task: Fix "bug" in {key: "val"} with <tags> & \'quotes\'\n\nCode:\n```\nif (x > 0) { return true; }\n```' }],
-    };
-
-    assert.doesNotThrow(() => {
-      const serialized = JSON.stringify(obj);
-      // Must be parseable back
-      const parsed = JSON.parse(serialized);
-      assert.ok(parsed.content[0].text.includes("Fix"));
-    });
-  });
-});
-
-// ---------------------------------------------------------------------------
 // Abort signal handling
 // ---------------------------------------------------------------------------
 
@@ -305,7 +267,6 @@ describe("abort signal", () => {
       agents: [fakeAgent],
       agentName: "fake-agent",
       task: "task",
-      delegationMode: "spawn",
       parentDepth: 0,
       parentAgentStack: [],
       maxDepth: 3,

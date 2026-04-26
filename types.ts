@@ -5,7 +5,7 @@
 import type { Message } from "@mariozechner/pi-ai";
 
 /** Context mode for delegated runs. */
-export type DelegationMode = "spawn" | "fork";
+export type DelegationMode = "spawn";
 
 /** Default context mode for delegated runs. */
 export const DEFAULT_DELEGATION_MODE: DelegationMode = "spawn";
@@ -224,7 +224,7 @@ export function isSubagentDetails(value: unknown): value is SubagentDetails {
 	if (!value || typeof value !== "object") return false;
 	const maybe = value as Partial<SubagentDetails>;
 	return (maybe.mode === "single" || maybe.mode === "parallel") &&
-		(maybe.delegationMode === "spawn" || maybe.delegationMode === "fork") &&
+		maybe.delegationMode === "spawn" &&
 		Array.isArray(maybe.results);
 }
 

@@ -283,7 +283,6 @@ describe("runAgent resilience", () => {
       agents: [],
       agentName: "nonexistent",
       task: "do something",
-      delegationMode: "spawn",
       parentDepth: 0,
       parentAgentStack: [],
       maxDepth: 3,
@@ -327,7 +326,6 @@ describe("runAgent resilience", () => {
         agents: [fakeAgent],
         agentName: "fake",
         task: "do something",
-        delegationMode: "spawn",
         parentDepth: 0,
         parentAgentStack: [],
         maxDepth: 3,
@@ -355,40 +353,4 @@ describe("runAgent resilience", () => {
     assert.ok(result.stderr.includes("startup timeout"));
   });
 
-  test("handles fork mode with missing snapshot gracefully", async () => {
-    const { runAgentSubprocess: runAgent } = await import("../runner.js");
-
-    const fakeAgent = {
-      name: "fake",
-      description: "fake",
-      systemPrompt: "",
-      source: "user" as const,
-      filePath: "/fake/agent.md",
-    };
-
-    const result = await runAgent({
-      cwd: "/tmp",
-      agents: [fakeAgent],
-      agentName: "fake",
-      task: "task",
-      delegationMode: "fork",
-      forkSessionSnapshotJsonl: "",  // empty — should fail gracefully
-      parentDepth: 0,
-      parentAgentStack: [],
-      maxDepth: 3,
-      preventCycles: false,
-      makeDetails: (results) => ({
-        mode: "single",
-        delegationMode: "fork",
-        projectAgentsDir: null,
-        results,
-        aggregatedUsage: emptyUsage(),
-        aggregatedToolCalls: {},
-        usageTree: [],
-      }),
-    });
-
-    assert.equal(result.exitCode, 1);
-    assert.ok(result.errorMessage?.includes("fork mode"));
-  });
 });

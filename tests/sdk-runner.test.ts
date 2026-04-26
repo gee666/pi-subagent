@@ -19,7 +19,6 @@ const fakeAgent: AgentConfig = {
 const baseOpts = {
   cwd: process.cwd(),
   task: "test",
-  delegationMode: "spawn" as const,
   parentDepth: 0,
   parentAgentStack: [] as string[],
   maxDepth: 3,
@@ -79,21 +78,6 @@ describe("runAgentSameProcess — unknown agent", () => {
   });
 });
 
-describe("runAgentSameProcess — fork mode without snapshot", () => {
-  test("returns exitCode 1 and stopReason error", async () => {
-    const result = await runAgentSameProcess({
-      ...baseOpts,
-      agents: [fakeAgent],
-      agentName: "test-agent",
-      delegationMode: "fork",
-      forkSessionSnapshotJsonl: undefined,
-    });
-
-    assert.equal(result.exitCode, 1);
-    assert.equal(result.stopReason, "error");
-  });
-});
-
 describe("runAgentSameProcess vs runAgentSubprocess — structural parity", () => {
   test("both runners return identical structure for unknown agent", async () => {
     const sameProcessResult = await runAgentSameProcess({
@@ -107,7 +91,6 @@ describe("runAgentSameProcess vs runAgentSubprocess — structural parity", () =
       agents: [],
       agentName: "nonexistent",
       task: "test",
-      delegationMode: "spawn",
       parentDepth: 0,
       parentAgentStack: [],
       maxDepth: 3,

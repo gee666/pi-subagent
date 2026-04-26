@@ -13,10 +13,6 @@
  * The tool always accepts a `tasks` array:
  *   - One task: treated as a single-agent delegation.
  *   - Multiple tasks: treated as a parallel delegation.
- *
- * And two context modes:
- *   - spawn (default): child gets only the task prompt.
- *   - fork: child gets a forked snapshot of current session context + task prompt.
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
@@ -33,7 +29,6 @@ import {
   type SubagentDetails,
   DEFAULT_DELEGATION_MODE,
   buildSubagentDetails,
-  emptyUsage,
   getFinalOutput,
   isResultError,
 } from "./types.js";
@@ -65,7 +60,7 @@ const TaskItem = Type.Object({
   }),
   task: Type.String({
     description:
-      "Task description for this delegated run. In spawn mode include all required context; in fork mode the subagent also sees your current session context.",
+      "Task description for this delegated run. Include all required context; the subagent receives only this prompt.",
   }),
   cwd: Type.Optional(
     Type.String({ description: "Working directory for this agent's process" }),
@@ -78,13 +73,6 @@ const SubagentParams = Type.Object({
     description:
       "Array of {agent, task} objects. One task behaves like a single-agent delegation; multiple tasks run concurrently.",
   }),
-  mode: Type.Optional(
-    Type.String({
-      description:
-        "Context mode for delegated runs. 'spawn' (default) sends only the task prompt (best for isolated, reproducible runs with lower token/cost and less context leakage). 'fork' adds a snapshot of current session context plus task prompt (best for follow-up work, but usually higher token/cost and may include sensitive context).",
-      default: DEFAULT_DELEGATION_MODE,
-    }),
-  ),
 });
 
 // ---------------------------------------------------------------------------
@@ -98,34 +86,6 @@ interface DelegationDepthConfig {
   ancestorAgentStack: string[];
   preventCycles: boolean;
 }
-
-interface SessionSnapshotSource {
-  getHeader: () => unknown;
-  getBranch: () => unknown[];
-}
-
-function parseDelegationMode(raw: unknown): DelegationMode | null {
-  if (raw === undefined) return DEFAULT_DELEGATION_MODE;
-  if (typeof raw !== "string") return null;
-  const normalized = raw.trim().toLowerCase();
-  if (normalized === "spawn" || normalized === "fork") {
-    return normalized;
-  }
-  return null;
-}
-
-function buildForkSessionSnapshotJsonl(
-  sessionManager: SessionSnapshotSource,
-): string | null {
-  const header = sessionManager.getHeader();
-  if (!header || typeof header !== "object") return null;
-
-  const branchEntries = sessionManager.getBranch();
-  const lines = [JSON.stringify(header)];
-  for (const entry of branchEntries) lines.push(JSON.stringify(entry));
-  return `${lines.join("\n")}\n`;
-}
-
 
 function parseBoolean(raw: unknown): boolean | null {
   if (typeof raw === "boolean") return raw;
@@ -496,22 +456,18 @@ ${agentList}
 
 Each subagent runs in an **isolated process**.
 
-Context behavior is controlled by optional 'mode':
-- 'spawn' (default): child receives only the provided task prompt. Best for isolated, reproducible tasks with lower token/cost and less context leakage.
-- 'fork': child receives a forked snapshot of current session context plus the task prompt. Best for follow-up tasks that rely on prior context; usually higher token/cost and may include sensitive context.
-
 The tool always accepts a \`tasks\` array:
 - one item = single-agent delegation
 - multiple items = parallel delegation
 
 **Single-task delegation**:
 \`\`\`json
-{ "tasks": [{ "agent": "agent-name", "task": "Detailed task..." }], "mode": "spawn" }
+{ "tasks": [{ "agent": "agent-name", "task": "Detailed task..." }] }
 \`\`\`
 
 **Multi-task delegation**:
 \`\`\`json
-{ "tasks": [{ "agent": "agent-name", "task": "..." }, { "agent": "other-agent", "task": "..." }], "mode": "fork" }
+{ "tasks": [{ "agent": "agent-name", "task": "..." }, { "agent": "other-agent", "task": "..." }] }
 \`\`\`
 
 ### Runtime delegation guards
@@ -541,14 +497,8 @@ The tool always accepts a \`tasks\` array:
         "  - one task: single-agent delegation",
         "  - multiple tasks: parallel delegation",
         "",
-        "Optional context mode switch:",
-        "  mode: \"spawn\" (default) -> child gets only your task prompt.",
-        "                             Best for isolated/reproducible work; lower token/cost and less context leakage.",
-        "  mode: \"fork\"            -> child gets current session context + your task prompt.",
-        "                             Best for follow-up work that depends on prior context; higher token/cost and may include sensitive context.",
-        "",
-        'Example single:   { tasks: [{ agent: "writer", task: "Rewrite README.md" }], mode: "spawn" }',
-        'Example parallel: { tasks: [{ agent: "writer", task: "..." }, { agent: "tester", task: "..." }], mode: "fork" }',
+        'Example single:   { tasks: [{ agent: "writer", task: "Rewrite README.md" }] }',
+        'Example parallel: { tasks: [{ agent: "writer", task: "..." }, { agent: "tester", task: "..." }] }',
       ].join("\n"),
       parameters: SubagentParams,
 
@@ -557,47 +507,10 @@ The tool always accepts a \`tasks\` array:
           const discovery = discoverAgents(ctx.cwd, "both");
           const { agents } = discovery;
 
-          const delegationMode = parseDelegationMode(params.mode);
-          if (!delegationMode) {
-            const fallbackDetails = makeDetailsFactory(
-              discovery.projectAgentsDir,
-              DEFAULT_DELEGATION_MODE,
-            );
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: `Invalid mode \"${String(params.mode)}\". Expected \"spawn\" or \"fork\".\nAvailable agents: ${formatAgentNames(agents)}`,
-                },
-              ],
-              details: fallbackDetails("single")([]),
-              isError: true,
-            };
-          }
-
           const makeDetails = makeDetailsFactory(
             discovery.projectAgentsDir,
-            delegationMode,
+            DEFAULT_DELEGATION_MODE,
           );
-
-          let forkSessionSnapshotJsonl: string | undefined;
-          if (delegationMode === "fork") {
-            forkSessionSnapshotJsonl = buildForkSessionSnapshotJsonl(
-              ctx.sessionManager,
-            );
-            if (!forkSessionSnapshotJsonl) {
-              return {
-                content: [
-                  {
-                    type: "text",
-                    text: "Cannot use mode=\"fork\": failed to snapshot current session context.",
-                  },
-                ],
-                details: makeDetails("single")([]),
-                isError: true,
-              };
-            }
-          }
 
           const tasks = params.tasks ?? [];
           if (tasks.length === 0) {
@@ -700,8 +613,6 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
               task.agent,
               task.task,
               task.cwd,
-              delegationMode,
-              forkSessionSnapshotJsonl,
               agents,
               ctx.cwd,
               signal,
@@ -714,8 +625,6 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
 
           return await executeParallel(
             tasks,
-            delegationMode,
-            forkSessionSnapshotJsonl,
             agents,
             ctx.cwd,
             signal,
@@ -750,8 +659,6 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
     agentName: string,
     task: string,
     cwd: string | undefined,
-    delegationMode: DelegationMode,
-    forkSessionSnapshotJsonl: string | undefined,
     agents: AgentConfig[],
     defaultCwd: string,
     signal: AbortSignal | undefined,
@@ -768,8 +675,6 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
             agentName,
             task,
             taskCwd: cwd,
-            delegationMode,
-            forkSessionSnapshotJsonl,
             parentDepth: currentDepth,
             parentAgentStack: ancestorAgentStack,
             maxDepth,
@@ -786,8 +691,6 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
             agentName,
             task,
             taskCwd: cwd,
-            delegationMode,
-            forkSessionSnapshotJsonl,
             parentDepth: currentDepth,
             parentAgentStack: ancestorAgentStack,
             maxDepth,
@@ -827,8 +730,6 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
 
   async function executeParallel(
     tasks: Array<{ agent: string; task: string; cwd?: string }>,
-    delegationMode: DelegationMode,
-    forkSessionSnapshotJsonl: string | undefined,
     agents: AgentConfig[],
     defaultCwd: string,
     signal: AbortSignal | undefined,
@@ -840,8 +741,6 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
     if (subagentMode === "sdk") {
       return executeParallelSameProcess(
         tasks,
-        delegationMode,
-        forkSessionSnapshotJsonl,
         agents,
         defaultCwd,
         currentDepth,
@@ -857,8 +756,6 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
     }
     return executeParallelSubprocess(
       tasks,
-      delegationMode,
-      forkSessionSnapshotJsonl,
       agents,
       defaultCwd,
       currentDepth,

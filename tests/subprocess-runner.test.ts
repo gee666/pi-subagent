@@ -18,7 +18,6 @@ const fakeAgent: AgentConfig = {
 const baseOpts = {
   cwd: process.cwd(),
   task: "test",
-  delegationMode: "spawn" as const,
   parentDepth: 0,
   parentAgentStack: [] as string[],
   maxDepth: 3,
@@ -73,20 +72,5 @@ describe("runAgentSubprocess — unknown agent", () => {
       result.stderr.includes("beta"),
       `Expected stderr to include 'beta', got: ${result.stderr}`,
     );
-  });
-});
-
-describe("runAgentSubprocess — fork mode without snapshot", () => {
-  test("returns exitCode 1 and stopReason error", async () => {
-    const result = await runAgentSubprocess({
-      ...baseOpts,
-      agents: [fakeAgent],
-      agentName: "test-agent",
-      delegationMode: "fork",
-      forkSessionSnapshotJsonl: undefined,
-    });
-
-    assert.equal(result.exitCode, 1);
-    assert.equal(result.stopReason, "error");
   });
 });

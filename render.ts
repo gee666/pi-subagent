@@ -5,13 +5,11 @@
 import * as os from "node:os";
 import { Container, Spacer, Text } from "@mariozechner/pi-tui";
 import {
-	type DelegationMode,
 	type LiveLogEntry,
 	type NestedSubagentResult,
 	type SingleResult,
 	type SubagentDetails,
 	type UsageStats,
-	DEFAULT_DELEGATION_MODE,
 	aggregateUsage,
 	getDisplayItems,
 	getFinalOutput,
@@ -35,6 +33,7 @@ interface TreeNode {
 	children: TreeNode[];
 }
 
+
 interface TreeCounts {
 	total: number;
 	running: number;
@@ -45,7 +44,6 @@ interface TreeCounts {
 
 interface PendingSubagentCall {
 	toolCallId: string;
-	mode: DelegationMode;
 	tasks: Array<{ agent: string; task?: string }>;
 }
 
@@ -81,10 +79,6 @@ function formatUsage(usage: Partial<UsageStats>, model?: string): string {
 
 function truncate(text: string, maxLen: number): string {
 	return text.length > maxLen ? `${text.slice(0, maxLen)}...` : text;
-}
-
-function normalizeDelegationMode(raw: unknown): DelegationMode {
-	return raw === "fork" ? "fork" : DEFAULT_DELEGATION_MODE;
 }
 
 function splitOutputLines(text: string): string[] {
@@ -166,7 +160,6 @@ function extractPendingSubagentCalls(messages: SingleResult["messages"]): Pendin
 						: typeof part.id === "string"
 							? part.id
 							: `${messageIndex}:${partIndex}`,
-				mode: normalizeDelegationMode((args as any).mode),
 				tasks,
 			});
 		}
@@ -178,14 +171,13 @@ function buildPendingNodes(call: PendingSubagentCall): TreeNode[] {
 	return call.tasks.map((task) => ({
 		label: task.agent,
 		status: "running",
-		meta: call.mode === "fork" ? "fork" : "spawn",
 		task: task.task,
 		children: [],
 	}));
 }
 
 function buildNodesFromNestedResult(nested: NestedSubagentResult): TreeNode[] {
-	return nested.details.results.map((result) => buildResultNode(result, nested.details.delegationMode));
+	return nested.details.results.map((result) => buildResultNode(result));
 }
 
 function buildNestedChildren(result: SingleResult): TreeNode[] {
@@ -292,10 +284,10 @@ function buildLeafPreview(result: SingleResult): string[] | undefined {
 	return unique.length > 0 ? unique.slice(-OUTPUT_PREVIEW_LINE_COUNT) : undefined;
 }
 
-function buildResultNode(result: SingleResult, delegationMode: DelegationMode): TreeNode {
+function buildResultNode(result: SingleResult): TreeNode {
 	const status = statusFromResult(result);
 	const usage = formatUsage(result.usage, result.model);
-	const metaParts: string[] = [result.agentSource, delegationMode];
+	const metaParts: string[] = [result.agentSource];
 	if (usage) metaParts.push(usage);
 	if (status === "error") {
 		const errorText = result.errorMessage || result.stderr || result.stopReason;
@@ -316,7 +308,7 @@ function buildResultNode(result: SingleResult, delegationMode: DelegationMode): 
 }
 
 function buildTopLevelNodes(details: SubagentDetails): TreeNode[] {
-	return details.results.map((result) => buildResultNode(result, details.delegationMode));
+	return details.results.map((result) => buildResultNode(result));
 }
 
 function renderTreeLines(
@@ -374,10 +366,9 @@ function topLevelSummary(details: SubagentDetails, counts: TreeCounts): string {
 // ---------------------------------------------------------------------------
 
 export function renderCall(args: Record<string, any>, theme: { fg: ThemeFg; bold: (s: string) => string }): Text {
-	const delegationMode = normalizeDelegationMode(args.mode);
 	const tasks = Array.isArray(args.tasks) ? args.tasks : [];
 	const count = tasks.length;
-	let text = `${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("muted", `[${delegationMode}]`)} ${theme.fg("accent", `${count} task${count === 1 ? "" : "s"}`)}`;
+	let text = `${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", `${count} task${count === 1 ? "" : "s"}`)}`;
 	for (const task of tasks.slice(0, 6)) {
 		const agent = typeof task?.agent === "string" ? task.agent : "...";
 		const preview = typeof task?.task === "string" ? ` ${truncate(task.task, 56)}` : "";
@@ -414,7 +405,7 @@ export function renderResult(
 	const container = new Container();
 	container.addChild(
 		new Text(
-			`${icon} ${theme.fg("toolTitle", theme.bold("subagent tree "))}${theme.fg("muted", `[${details.delegationMode}]`)} ${theme.fg("dim", topLevelSummary(details, counts))}`,
+			`${icon} ${theme.fg("toolTitle", theme.bold("subagent tree "))}${theme.fg("dim", topLevelSummary(details, counts))}`,
 			0,
 			0,
 		),

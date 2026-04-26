@@ -8,8 +8,6 @@
  * read at the root level exactly as before — they're just propagated to nested
  * sessions via closure parameters rather than via subprocess env inheritance.
  *
- * Fork mode still writes a JSONL snapshot to a temp file; the child session
- * opens it with SessionManager.open() instead of receiving it via --session.
  */
 
 import {
@@ -26,12 +24,8 @@ import {
 	createLsTool,
 	type ToolDefinition,
 } from "@mariozechner/pi-coding-agent";
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
 import type { AgentConfig } from "./agents.js";
 import {
-	type DelegationMode,
 	type LiveLogEntry,
 	type SingleResult,
 	type SubagentDetails,
@@ -59,26 +53,6 @@ import {
 // Helpers
 // ---------------------------------------------------------------------------
 
-
-function writeForkSessionToTempFile(
-	agentName: string,
-	sessionJsonl: string,
-): { dir: string; filePath: string } {
-	const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-"));
-	const safeName = agentName.replace(/[^\w.-]+/g, "_");
-	const filePath = path.join(tmpDir, `fork-${safeName}.jsonl`);
-	fs.writeFileSync(filePath, sessionJsonl, { encoding: "utf-8", mode: 0o600 });
-	return { dir: tmpDir, filePath };
-}
-
-function cleanupTempDir(dir: string | null): void {
-	if (!dir) return;
-	try {
-		fs.rmSync(dir, { recursive: true, force: true });
-	} catch {
-		/* ignore */
-	}
-}
 
 /**
  * Build the tool list for a child agent.
@@ -127,9 +101,6 @@ export interface RunAgentSameProcessOptions {
 	agentName: string;
 	task: string;
 	taskCwd?: string;
-	delegationMode: DelegationMode;
-	/** JSONL session snapshot for fork mode — same format as subprocess runner */
-	forkSessionSnapshotJsonl?: string;
 	parentDepth: number;
 	parentAgentStack: string[];
 	maxDepth: number;
@@ -163,8 +134,6 @@ export async function runAgentSameProcess(
 		agentName,
 		task,
 		taskCwd,
-		delegationMode,
-		forkSessionSnapshotJsonl,
 		parentDepth,
 		parentAgentStack,
 		maxDepth,
@@ -188,28 +157,6 @@ export async function runAgentSameProcess(
 			stderr: `Unknown agent: "${agentName}". Available agents: ${available}.`,
 			usage: emptyUsage(),
 			toolCalls: {},
-			completedTurns: 0,
-			turnInProgress: false,
-			liveLog: [],
-		};
-	}
-
-	if (
-		delegationMode === "fork" &&
-		(!forkSessionSnapshotJsonl || !forkSessionSnapshotJsonl.trim())
-	) {
-		return {
-			agent: agentName,
-			agentSource: agent.source,
-			task,
-			exitCode: 1,
-			messages: [],
-			stderr: "Cannot run in fork mode: missing parent session snapshot context.",
-			usage: emptyUsage(),
-			toolCalls: {},
-			model: agent.model,
-			stopReason: "error",
-			errorMessage: "Cannot run in fork mode: missing parent session snapshot context.",
 			completedTurns: 0,
 			turnInProgress: false,
 			liveLog: [],
@@ -243,16 +190,6 @@ export async function runAgentSameProcess(
 
 	emitUpdate();
 
-	// Fork mode: write JSONL to a temp file; opened via SessionManager.open()
-	// (same serialisation format as the subprocess runner — backward-compatible)
-	let forkTmpDir: string | null = null;
-	let forkTmpPath: string | null = null;
-	if (delegationMode === "fork" && forkSessionSnapshotJsonl) {
-		const tmp = writeForkSessionToTempFile(agentName, forkSessionSnapshotJsonl);
-		forkTmpDir = tmp.dir;
-		forkTmpPath = tmp.filePath;
-	}
-
 	const childCtx: SubagentSessionContext = {
 		depth: childDepth,
 		maxDepth,
@@ -284,9 +221,7 @@ export async function runAgentSameProcess(
 		// Thinking level from agent config (same string values as --thinking flag)
 		const thinkingLevel = agent.thinking as any | undefined;
 
-		const sessionManager = forkTmpPath
-			? SessionManager.open(forkTmpPath)
-			: SessionManager.inMemory();
+		const sessionManager = SessionManager.inMemory();
 
 		const { session } = await subagentContext.run(childCtx, () =>
 			createAgentSession({
@@ -407,8 +342,6 @@ export async function runAgentSameProcess(
 		result.errorMessage = result.errorMessage ?? msg;
 		if (!result.stderr.trim()) result.stderr = msg;
 		return result;
-	} finally {
-		cleanupTempDir(forkTmpDir);
 	}
 }
 
@@ -418,8 +351,6 @@ export async function runAgentSameProcess(
 
 export async function executeParallelSameProcess(
 	tasks: Array<{ agent: string; task: string; cwd?: string }>,
-	delegationMode: DelegationMode,
-	forkSessionSnapshotJsonl: string | undefined,
 	agents: AgentConfig[],
 	defaultCwd: string,
 	depth: number,
@@ -509,8 +440,6 @@ export async function executeParallelSameProcess(
 				agentName: t.agent,
 				task: t.task,
 				taskCwd: t.cwd,
-				delegationMode,
-				forkSessionSnapshotJsonl,
 				parentDepth: depth,
 				parentAgentStack: stack,
 				maxDepth,

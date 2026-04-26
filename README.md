@@ -1,6 +1,6 @@
 # Pi Subagent
 
-Delegate tasks to specialized subagents with configurable context modes (`spawn` / `fork`).
+Delegate tasks to specialized subagents.
 
 ## Install
 
@@ -39,21 +39,17 @@ Processes are spawned via the operating system and communicate through JSON-line
 Each subagent runs as an **in-process `AgentSession`** created via the pi SDK — no new process is spawned.
 
 - No spawn overhead — sessions start in milliseconds
-- No temp files for system prompts or fork snapshots
+- No temp files for system prompts
 - Concurrency through the Node.js event loop (fine for I/O-bound LLM work)
 - All sessions share the same memory and event loop
 
-### Context modes
-
-**`spawn` (default)** — Child receives only the task string. Best for isolated work, lower cost.  
-**`fork`** — Child receives a snapshot of the current session context + task. Best for follow-up work.
-
-The main agent receives only the **final text output** from subagents (no tool calls, no reasoning).
+Each subagent receives only the task string. The main agent in turn receives
+only the **final text output** from subagents (no tool calls, no reasoning).
 
 ## Tool Call Shape
 
 ```json
-{ "tasks": [{ "agent": "code-writer", "task": "Implement the API" }], "mode": "spawn" }
+{ "tasks": [{ "agent": "code-writer", "task": "Implement the API" }] }
 ```
 
 Multiple tasks run in parallel:
@@ -63,8 +59,7 @@ Multiple tasks run in parallel:
   "tasks": [
     { "agent": "code-writer", "task": "Draft the implementation" },
     { "agent": "code-reviwer", "task": "Review the plan" }
-  ],
-  "mode": "fork"
+  ]
 }
 ```
 
@@ -136,7 +131,6 @@ PI_SUBAGENTS_MODE=subprocess pi
 | Session isolation | Full OS-level | Shared memory/event loop |
 | Startup overhead | ~200–500 ms per agent | ~10–50 ms per agent |
 | Parallelism | True OS parallelism | Event-loop concurrency |
-| Fork mode context | Temp JSONL file | Temp JSONL file (same format) |
 | Depth tracking | Env vars in child process | Closure parameters |
 | `pi` binary required | Yes | No |
 | Crash isolation | Yes — subprocess crash is contained | No — exception bubbles up |
@@ -236,7 +230,7 @@ tool_result_end
 interface SubagentDetails {
   // Execution metadata
   mode: "single" | "parallel";          // one task vs multiple parallel tasks
-  delegationMode: "spawn" | "fork";     // context mode used
+  delegationMode: "spawn";              // always "spawn" (kept for backward-compatible serialization)
   projectAgentsDir: string | null;      // path to .pi/agents/ dir if used
 
   // Individual agent results (one per task)
