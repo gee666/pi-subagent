@@ -25,7 +25,7 @@ import { type AgentConfig, discoverAgents } from "./agents.js";
 import { renderCall, renderResult } from "./render.js";
 import { runAgentSubprocess, executeParallelSubprocess } from "./runner.js";
 import { runAgentSameProcess, executeParallelSameProcess } from "./runner-sdk.js";
-import { parseNonNegativeInt } from "./shared.js";
+import { parseNonNegativeInt, subagentContext } from "./shared.js";
 
 import {
   type DelegationMode,
@@ -226,6 +226,20 @@ function getPreventCyclesFlagFromArgv(
 }
 
 function resolveDelegationDepthConfig(pi: ExtensionAPI): DelegationDepthConfig {
+  // When loaded inside an in-process child session (SDK mode), the correct
+  // depth/stack/limits are provided via AsyncLocalStorage rather than
+  // process.env (which still holds the root process values).
+  const inProcessCtx = subagentContext.getStore();
+  if (inProcessCtx) {
+    return {
+      currentDepth: inProcessCtx.depth,
+      maxDepth: inProcessCtx.maxDepth,
+      canDelegate: inProcessCtx.depth < inProcessCtx.maxDepth,
+      ancestorAgentStack: inProcessCtx.stack,
+      preventCycles: inProcessCtx.preventCycles,
+    };
+  }
+
   const depthRaw = process.env[SUBAGENT_DEPTH_ENV];
   const parsedDepth = parseNonNegativeInt(depthRaw);
   if (depthRaw !== undefined && parsedDepth === null) {
@@ -693,6 +707,8 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
               signal,
               onUpdate,
               makeDetails,
+              ctx.modelRegistry,
+              ctx.model,
             );
           }
 
