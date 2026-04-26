@@ -345,7 +345,13 @@ function buildPiArgs(
 
   // agent.tools is set only when the agent file specifies tools (length > 0)
   if (agent.tools && agent.tools.length > 0) {
-    args.push("--tools", agent.tools.join(","));
+    // Always include "subagent" so children can re-delegate when depth allows.
+    // The child extension only registers the tool when canDelegate is true,
+    // so listing it here is harmless when nested delegation is disabled.
+    const toolsWithSubagent = agent.tools.includes("subagent")
+      ? agent.tools
+      : [...agent.tools, "subagent"];
+    args.push("--tools", toolsWithSubagent.join(","));
   } else if (agent.tools === undefined) {
     // Agent didn't restrict tools — inherit parent's preference
     if (_inheritedCliArgs.fallbackTools !== undefined) {
