@@ -21,7 +21,12 @@ import { type AgentConfig, discoverAgents } from "./agents.js";
 import { renderCall, renderResult } from "./render.js";
 import { runAgentSubprocess, executeParallelSubprocess } from "./runner.js";
 import { runAgentSameProcess, executeParallelSameProcess } from "./runner-sdk.js";
-import { parseNonNegativeInt, subagentContext } from "./shared.js";
+import {
+  DEFAULT_MAX_PARALLEL_TASKS,
+  SUBAGENT_MAX_PARALLEL_TASKS_ENV,
+  parseNonNegativeInt,
+  subagentContext,
+} from "./shared.js";
 
 import {
   type DelegationMode,
@@ -409,6 +414,9 @@ export default function (pi: ExtensionAPI) {
   const { currentDepth, maxDepth, canDelegate, ancestorAgentStack, preventCycles } =
     depthConfig;
   const subagentMode = getSubagentMode();
+  const maxParallelTasks =
+    parseNonNegativeInt(process.env[SUBAGENT_MAX_PARALLEL_TASKS_ENV]) ??
+    DEFAULT_MAX_PARALLEL_TASKS;
 
   let discoveredAgents: AgentConfig[] = [];
   const approvedProjectAgentDirsForSession = new Set<string>();
@@ -456,26 +464,25 @@ ${agentList}
 
 Each subagent runs in an **isolated process**.
 
-The tool always accepts a \`tasks\` array:
-- one item = single-agent delegation
-- multiple items = parallel delegation
+Pass a \`tasks\` array. **Every task in the same call runs in parallel.**
+- 1 task  -> single delegation
+- N tasks -> all N run concurrently in one call
 
-**Single-task delegation**:
+For **sequential** work (task B needs task A's output), make separate tool
+calls one after another. Do NOT put dependent tasks in the same array.
+
+**Single (1 agent)**:
 \`\`\`json
 { "tasks": [{ "agent": "agent-name", "task": "Detailed task..." }] }
 \`\`\`
 
-**Multi-task delegation**:
+**Parallel (N agents at once)**:
 \`\`\`json
-{ "tasks": [{ "agent": "agent-name", "task": "..." }, { "agent": "other-agent", "task": "..." }] }
+{ "tasks": [{ "agent": "agent-a", "task": "..." }, { "agent": "agent-b", "task": "..." }] }
 \`\`\`
 
-### Runtime delegation guards
-
 - Max depth: current depth ${currentDepth}, max depth ${maxDepth}
-- Cycle prevention: ${preventCycles ? "enabled" : "disabled"}
-- Current delegation stack: ${ancestorAgentStack.length > 0 ? ancestorAgentStack.join(" -> ") : "(root)"}
-- Execution mode: ${subagentMode === "sdk" ? "in-process SDK" : "subprocess"}
+- Max subagents per tool call: ${maxParallelTasks}
 `,
       };
     } catch (err) {
@@ -493,12 +500,15 @@ The tool always accepts a \`tasks\` array:
           subagentMode === "sdk" ? "in-process SDK sessions" : "isolated pi processes"
         }.`,
         "",
-        "The tool always accepts a `tasks` array:",
-        "  - one task: single-agent delegation",
-        "  - multiple tasks: parallel delegation",
+        "Pass a `tasks` array. Every task in the same call runs IN PARALLEL.",
+        "  - 1 task  -> single delegation",
+        "  - N tasks -> all N run concurrently in one call",
         "",
-        'Example single:   { tasks: [{ agent: "writer", task: "Rewrite README.md" }] }',
-        'Example parallel: { tasks: [{ agent: "writer", task: "..." }, { agent: "tester", task: "..." }] }',
+        "For sequential work (task B depends on task A's output), make separate",
+        "tool calls one after another. Do NOT put dependent tasks in the same array.",
+        "",
+        'Single:   { tasks: [{ agent: "writer", task: "Rewrite README.md" }] }',
+        'Parallel: { tasks: [{ agent: "writer", task: "..." }, { agent: "tester", task: "..." }] }',
       ].join("\n"),
       parameters: SubagentParams,
 

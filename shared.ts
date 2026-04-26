@@ -31,7 +31,7 @@ export const subagentContext = new AsyncLocalStorage<SubagentSessionContext>();
 // Parallel execution limits
 // ---------------------------------------------------------------------------
 
-export const DEFAULT_MAX_PARALLEL_TASKS = 16;
+export const DEFAULT_MAX_PARALLEL_TASKS = 30;
 export const DEFAULT_MAX_CONCURRENCY = 8;
 export const PARALLEL_HEARTBEAT_MS = 1000;
 export const SUBAGENT_MAX_PARALLEL_TASKS_ENV = "PI_SUBAGENT_MAX_PARALLEL_TASKS";
