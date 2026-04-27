@@ -9,7 +9,6 @@
     "agents.ts",
     "runner.ts",
     "shared.ts",
-    "runner-sdk.ts",
     "render.ts",
     "types.ts",
     "agents/*.md",

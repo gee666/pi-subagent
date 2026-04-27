@@ -22,26 +22,13 @@ pi remove npm:oira666_pi-subagent
 
 ## How It Works
 
-The extension supports two execution modes, selectable via `PI_SUBAGENTS_MODE`.
-
-### Execution mode: `subprocess` (default)
-
 Each subagent runs as a **separate `pi` process** — fully isolated memory, its own model/tool loop.
 Processes are spawned via the operating system and communicate through JSON-line stdout.
 
 - Full OS-level isolation — a crashed subagent cannot affect the parent
 - True parallel execution across all CPU cores
-- Each subprocess boots a fresh Node.js runtime (adds ~200–500 ms per subagent)
-- Requires the `pi` binary on `PATH`
-
-### Execution mode: `sdk`
-
-Each subagent runs as an **in-process `AgentSession`** created via the pi SDK — no new process is spawned.
-
-- No spawn overhead — sessions start in milliseconds
-- No temp files for system prompts
-- Concurrency through the Node.js event loop (fine for I/O-bound LLM work)
-- All sessions share the same memory and event loop
+- Each subprocess boots a fresh Node.js runtime
+- Uses the same Pi CLI entrypoint as the parent process when available
 
 Each subagent receives only the task string. The main agent in turn receives
 only the **final text output** from subagents (no tool calls, no reasoning).
@@ -110,31 +97,6 @@ Available tools: `read`, `bash`, `edit`, `write`.
 
 The Markdown body becomes the agent's system prompt (appended to Pi's default, not replacing it).
 
-## Execution Mode
-
-| Env Var               | Default      | Values               | Description                            |
-| --------------------- | ------------ | -------------------- | -------------------------------------- |
-| `PI_SUBAGENTS_MODE`   | `subprocess` | `subprocess` / `sdk` | How subagent sessions are created      |
-
-```bash
-# Run subagents as in-process SDK sessions (faster startup, no spawn overhead)
-PI_SUBAGENTS_MODE=sdk pi
-
-# Run subagents as isolated subprocess pi instances (default, full isolation)
-PI_SUBAGENTS_MODE=subprocess pi
-```
-
-### Comparison
-
-| | `subprocess` | `sdk` |
-|---|---|---|
-| Session isolation | Full OS-level | Shared memory/event loop |
-| Startup overhead | ~200–500 ms per agent | ~10–50 ms per agent |
-| Parallelism | True OS parallelism | Event-loop concurrency |
-| Depth tracking | Env vars in child process | Closure parameters |
-| `pi` binary required | Yes | No |
-| Crash isolation | Yes — subprocess crash is contained | No — exception bubbles up |
-
 ## Delegation Guards
 
 Depth and cycle guards prevent runaway recursive delegation.
@@ -165,11 +127,7 @@ pi --no-subagent-prevent-cycles   # allow cycles (not recommended)
 
 ## CLI Argument Proxying
 
-> **Note:** CLI argument proxying only applies to `subprocess` mode. In `sdk` mode, subagents
-> inherit provider and model configuration directly from the calling session's model registry
-> and API keys from environment variables, so no forwarding is needed.
-
-In `subprocess` mode, all flags passed to the parent `pi` process are forwarded to subagent child
+Flags passed to the parent `pi` process are forwarded to subagent child
 processes, so they inherit the same provider, API key, model, and other runtime settings. Flags the
 extension manages itself are blocked from being forwarded.
 
@@ -466,7 +424,7 @@ for await (const line of jsonLines) {
 
 Note: if you also track the main agent's own usage from `message_end` events, make sure **not** to
 double-count the subagent costs there — the main agent's own token usage (from its own `message_end`
-events) does not include subagent work (whether subprocess or SDK-mode).
+events) does not include subagent work.
 
 ---
 

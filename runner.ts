@@ -81,6 +81,21 @@ function cleanupTempDir(dir: string | null): void {
   }
 }
 
+function getCurrentPiCliScript(): string | null {
+  const script = process.argv[1];
+  if (!script) return null;
+
+  // When this extension is loaded by pi, process.argv[1] is the pi CLI JS
+  // entrypoint. Reusing it with process.execPath avoids relying on PATH while
+  // still running the exact same pi installation as the parent process.
+  const normalized = script.replace(/\\/g, "/");
+  if (!normalized.includes("/pi-coding-agent/") || !normalized.endsWith("/dist/cli.js")) {
+    return null;
+  }
+
+  return script;
+}
+
 function resolveExtensionArg(value: string): string {
   if (!value) return value;
   if (value.startsWith("npm:") || value.startsWith("git:")) return value;
@@ -514,8 +529,9 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       // but shell:true splits arguments on whitespace — breaking task strings.
       // Fix: reuse the running node binary + the pi CLI script path directly,
       // so the child is spawned without a shell and args are passed safely.
-      const spawnCmd = process.platform === "win32" ? process.execPath : "pi";
-      const spawnArgs = process.platform === "win32" ? [process.argv[1], ...piArgs] : piArgs;
+      const currentPiCli = getCurrentPiCliScript();
+      const spawnCmd = currentPiCli ? process.execPath : "pi";
+      const spawnArgs = currentPiCli ? [currentPiCli, ...piArgs] : piArgs;
       const proc = spawn(spawnCmd, spawnArgs, {
         cwd: taskCwd ?? cwd,
         shell: false,
@@ -705,8 +721,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
 
 
 // ---------------------------------------------------------------------------
-// Parallel execution (subprocess flavour)
-// Symmetric to executeParallelSameProcess in runner-sdk.ts but uses runAgentSubprocess().
+// Parallel execution (subprocess runner).
 // ---------------------------------------------------------------------------
 
 

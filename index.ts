@@ -1,14 +1,7 @@
 /**
  * Pi Subagent Extension
  *
- * Delegates tasks to specialized subagents running as in-process AgentSessions
- * (via the pi SDK) rather than spawning separate `pi` processes.
- *
- * Environment variables (PI_SUBAGENT_DEPTH, PI_SUBAGENT_MAX_DEPTH,
- * PI_SUBAGENT_STACK, PI_SUBAGENT_PREVENT_CYCLES, PI_SUBAGENT_MAX_PARALLEL_TASKS,
- * PI_SUBAGENT_MAX_CONCURRENCY, PI_SUBAGENT_CONFIRM_PROJECT_AGENTS) are read
- * here at root startup exactly as before.  Depth/stack propagate to nested
- * sessions via closure in runner-sdk.ts instead of via subprocess env vars.
+ * Delegates tasks to specialized subagents running as isolated `pi` processes.
  *
  * The tool always accepts a `tasks` array:
  *   - One task: treated as a single-agent delegation.
@@ -20,12 +13,10 @@ import { Type } from "@sinclair/typebox";
 import { type AgentConfig, discoverAgents } from "./agents.js";
 import { renderCall, renderResult } from "./render.js";
 import { runAgentSubprocess, executeParallelSubprocess } from "./runner.js";
-import { runAgentSameProcess, executeParallelSameProcess } from "./runner-sdk.js";
 import {
   DEFAULT_MAX_PARALLEL_TASKS,
   SUBAGENT_MAX_PARALLEL_TASKS_ENV,
   parseNonNegativeInt,
-  subagentContext,
 } from "./shared.js";
 
 import {
@@ -50,7 +41,6 @@ const SUBAGENT_MAX_DEPTH_ENV = "PI_SUBAGENT_MAX_DEPTH";
 const SUBAGENT_STACK_ENV = "PI_SUBAGENT_STACK";
 const SUBAGENT_PREVENT_CYCLES_ENV = "PI_SUBAGENT_PREVENT_CYCLES";
 const SUBAGENT_CONFIRM_PROJECT_AGENTS_ENV = "PI_SUBAGENT_CONFIRM_PROJECT_AGENTS";
-const SUBAGENTS_MODE_ENV = "PI_SUBAGENTS_MODE";
 
 type ProjectAgentConfirmationSetting = "ask" | "never" | "session";
 type ProjectAgentApproval = "once" | "session" | "no";
@@ -191,20 +181,6 @@ function getPreventCyclesFlagFromArgv(
 }
 
 function resolveDelegationDepthConfig(pi: ExtensionAPI): DelegationDepthConfig {
-  // When loaded inside an in-process child session (SDK mode), the correct
-  // depth/stack/limits are provided via AsyncLocalStorage rather than
-  // process.env (which still holds the root process values).
-  const inProcessCtx = subagentContext.getStore();
-  if (inProcessCtx) {
-    return {
-      currentDepth: inProcessCtx.depth,
-      maxDepth: inProcessCtx.maxDepth,
-      canDelegate: inProcessCtx.depth < inProcessCtx.maxDepth,
-      ancestorAgentStack: inProcessCtx.stack,
-      preventCycles: inProcessCtx.preventCycles,
-    };
-  }
-
   const depthRaw = process.env[SUBAGENT_DEPTH_ENV];
   const parsedDepth = parseNonNegativeInt(depthRaw);
   if (depthRaw !== undefined && parsedDepth === null) {
@@ -364,38 +340,6 @@ function getProjectAgentSessionKey(projectAgentsDir: string | null): string {
 }
 
 // ---------------------------------------------------------------------------
-// Subagent mode helpers (exported for testing and external consumers)
-// ---------------------------------------------------------------------------
-
-/** The two supported subagent execution modes. */
-export type SubagentMode = "subprocess" | "sdk";
-
-/** Default subagent execution mode. */
-export const DEFAULT_SUBAGENTS_MODE: SubagentMode = "subprocess";
-
-/**
- * Parse a raw value into a SubagentMode.
- * Returns null for invalid/unrecognized values, the default mode for undefined.
- */
-export function parseSubagentMode(raw: unknown): SubagentMode | null {
-  if (raw === undefined) return DEFAULT_SUBAGENTS_MODE;
-  if (typeof raw !== "string") return null;
-  const normalized = raw.trim().toLowerCase();
-  if (normalized === "subprocess") return "subprocess";
-  if (normalized === "sdk") return "sdk";
-  return null;
-}
-
-/**
- * Read the subagent mode from PI_SUBAGENTS_MODE env var.
- * Falls back to DEFAULT_SUBAGENTS_MODE if the env var is absent or invalid.
- */
-export function getSubagentMode(): SubagentMode {
-  const parsed = parseSubagentMode(process.env["PI_SUBAGENTS_MODE"]);
-  return parsed ?? DEFAULT_SUBAGENTS_MODE;
-}
-
-// ---------------------------------------------------------------------------
 // Extension entry point
 // ---------------------------------------------------------------------------
 
@@ -413,7 +357,6 @@ export default function (pi: ExtensionAPI) {
   const depthConfig = resolveDelegationDepthConfig(pi);
   const { currentDepth, maxDepth, canDelegate, ancestorAgentStack, preventCycles } =
     depthConfig;
-  const subagentMode = getSubagentMode();
   const maxParallelTasks =
     parseNonNegativeInt(process.env[SUBAGENT_MAX_PARALLEL_TASKS_ENV]) ??
     DEFAULT_MAX_PARALLEL_TASKS;
@@ -496,9 +439,7 @@ calls one after another. Do NOT put dependent tasks in the same array.
       name: "subagent",
       label: "Subagent",
       description: [
-        `Delegate work to specialized subagents running as ${
-          subagentMode === "sdk" ? "in-process SDK sessions" : "isolated pi processes"
-        }.`,
+        "Delegate work to specialized subagents running as isolated pi processes.",
         "",
         "Pass a `tasks` array. Every task in the same call runs IN PARALLEL.",
         "  - 1 task  -> single delegation",
@@ -628,8 +569,6 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
               signal,
               onUpdate,
               makeDetails,
-              ctx.modelRegistry,
-              ctx.model,
             );
           }
 
@@ -640,8 +579,6 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
             signal,
             onUpdate,
             makeDetails,
-            ctx.modelRegistry,
-            ctx.model,
           );
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -674,41 +611,21 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
     signal: AbortSignal | undefined,
     onUpdate: ((partial: any) => void) | undefined,
     makeDetails: ReturnType<typeof makeDetailsFactory>,
-    modelRegistry: any,
-    parentModel: any,
   ) {
-    const result =
-      subagentMode === "sdk"
-        ? await runAgentSameProcess({
-            cwd: defaultCwd,
-            agents,
-            agentName,
-            task,
-            taskCwd: cwd,
-            parentDepth: currentDepth,
-            parentAgentStack: ancestorAgentStack,
-            maxDepth,
-            preventCycles,
-            modelRegistry,
-            parentModel,
-            signal,
-            onUpdate,
-            makeDetails: makeDetails("single"),
-          })
-        : await runAgentSubprocess({
-            cwd: defaultCwd,
-            agents,
-            agentName,
-            task,
-            taskCwd: cwd,
-            parentDepth: currentDepth,
-            parentAgentStack: ancestorAgentStack,
-            maxDepth,
-            preventCycles,
-            signal,
-            onUpdate,
-            makeDetails: makeDetails("single"),
-          });
+    const result = await runAgentSubprocess({
+      cwd: defaultCwd,
+      agents,
+      agentName,
+      task,
+      taskCwd: cwd,
+      parentDepth: currentDepth,
+      parentAgentStack: ancestorAgentStack,
+      maxDepth,
+      preventCycles,
+      signal,
+      onUpdate,
+      makeDetails: makeDetails("single"),
+    });
 
     if (isResultError(result)) {
       const errorMsg =
@@ -745,25 +662,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
     signal: AbortSignal | undefined,
     onUpdate: ((partial: any) => void) | undefined,
     makeDetails: ReturnType<typeof makeDetailsFactory>,
-    modelRegistry: any,
-    parentModel: any,
   ) {
-    if (subagentMode === "sdk") {
-      return executeParallelSameProcess(
-        tasks,
-        agents,
-        defaultCwd,
-        currentDepth,
-        maxDepth,
-        ancestorAgentStack,
-        preventCycles,
-        modelRegistry,
-        parentModel,
-        signal,
-        onUpdate,
-        makeDetails("parallel"),
-      );
-    }
     return executeParallelSubprocess(
       tasks,
       agents,
