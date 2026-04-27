@@ -9,6 +9,10 @@
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import {
+  createAssistantMessageEventStream,
+  streamSimple as streamModelSimple,
+} from "@mariozechner/pi-ai";
 import { Type } from "@sinclair/typebox";
 import { type AgentConfig, discoverAgents } from "./agents.js";
 import { renderCall, renderResult } from "./render.js";
@@ -17,7 +21,6 @@ import {
   SUBAGENT_RESUME_DISABLE_ENV,
   SUBAGENT_RESUME_PROMPT_ENV,
   buildSubagentSessionDir,
-  ensureDir,
   findLatestResumableSubagentCall,
   getDefaultSubagentSessionRoot,
   isFinishedResult,
@@ -366,11 +369,67 @@ function hasCliInitialPrompt(argv: string[]): boolean {
   return false;
 }
 
+const RESUME_PROVIDER = "pi-subagent-resume";
+const RESUME_MODEL_ID = "synthetic-tool-call";
+const RESUME_STATE_KEY = "__piSubagentResumeState";
+
+type SyntheticResumeState = {
+  plan: ResumableSubagentCall | null;
+  phase: "tool" | "final";
+};
+
+function clearSyntheticResumeState(): void {
+  const state = getSyntheticResumeState();
+  state.plan = null;
+  state.phase = "tool";
+}
+
+function getSyntheticResumeState(): SyntheticResumeState {
+  const g = globalThis as any;
+  if (!g[RESUME_STATE_KEY]) {
+    g[RESUME_STATE_KEY] = { plan: null, phase: "tool" } satisfies SyntheticResumeState;
+  }
+  return g[RESUME_STATE_KEY] as SyntheticResumeState;
+}
+
+function emptyModelUsage() {
+  return {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  };
+}
+
+function getMessageText(message: any): string {
+  const content = message?.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) => (part?.type === "text" && typeof part.text === "string" ? part.text : ""))
+    .join("");
+}
+
+function isSyntheticResumePrompt(context: any, taskCount: number): boolean {
+  const messages = Array.isArray(context?.messages) ? context.messages : [];
+  const lastUser = [...messages].reverse().find((message) => message?.role === "user");
+  return getMessageText(lastUser).trim() === `Resuming ${taskCount} subagents...`;
+}
+
+function formatModelFlag(model: any): string | undefined {
+  if (!model?.id || !model?.provider) return undefined;
+  return `${model.provider}/${model.id}`;
+}
+
 // ---------------------------------------------------------------------------
 // Extension entry point
 // ---------------------------------------------------------------------------
 
 export default function (pi: ExtensionAPI) {
+  let resumeModelRegistry: any | undefined;
+
   pi.registerFlag("subagent-max-depth", {
     description: "Maximum allowed subagent delegation depth (default: 3).",
     type: "string",
@@ -379,6 +438,97 @@ export default function (pi: ExtensionAPI) {
     description:
       "Block delegating to agents already in the current delegation stack (default: true).",
     type: "boolean",
+  });
+
+  pi.registerProvider(RESUME_PROVIDER, {
+    baseUrl: "http://127.0.0.1/pi-subagent-resume",
+    api: "openai-responses",
+    apiKey: "pi-subagent-resume-noop-key",
+    streamSimple: async (model, context, options) => {
+      const stream = createAssistantMessageEventStream();
+      const state = getSyntheticResumeState();
+      const plan = state.plan;
+      const phase = state.phase;
+      if (plan && phase === "tool" && isSyntheticResumePrompt(context, plan.tasks.length)) {
+        state.phase = "final";
+        const toolCall = {
+          type: "toolCall" as const,
+          id: `resume_subagent_${Date.now()}`,
+          name: "subagent",
+          arguments: { tasks: plan.tasks },
+        };
+        const message = {
+          role: "assistant" as const,
+          content: [toolCall],
+          api: model.api,
+          provider: model.provider,
+          model: model.id,
+          usage: emptyModelUsage(),
+          stopReason: "toolUse" as const,
+          timestamp: Date.now(),
+        };
+        queueMicrotask(() => {
+          stream.push({ type: "start", partial: message });
+          stream.push({ type: "toolcall_start", contentIndex: 0, partial: message });
+          stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: message });
+          stream.push({ type: "done", reason: "toolUse", message });
+          stream.end(message);
+        });
+        return stream;
+      }
+
+      if (phase === "final" && modelToRestoreAfterResume) {
+        const restore = modelToRestoreAfterResume;
+        const auth = resumeModelRegistry
+          ? await resumeModelRegistry.getApiKeyAndHeaders(restore)
+          : { ok: true, apiKey: undefined, headers: undefined };
+        if (!auth.ok) {
+          throw new Error(auth.error);
+        }
+        return streamModelSimple(restore, context, {
+          ...options,
+          apiKey: auth.apiKey,
+          headers: auth.headers,
+        });
+      }
+
+      if (!(plan && phase === "tool")) {
+        state.plan = null;
+        state.phase = "tool";
+      }
+      const message = {
+        role: "assistant" as const,
+        content: [],
+        api: model.api,
+        provider: model.provider,
+        model: model.id,
+        usage: emptyModelUsage(),
+        stopReason: "stop" as const,
+        timestamp: Date.now(),
+      };
+      queueMicrotask(() => {
+        stream.push({ type: "start", partial: message });
+        stream.push({ type: "done", reason: "stop", message });
+        stream.end(message);
+      });
+      return stream;
+    },
+    models: [
+      {
+        id: RESUME_MODEL_ID,
+        name: "Pi Subagent Resume",
+        api: "openai-responses",
+        reasoning: false,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        // Keep this large so Pi's pre-prompt auto-compaction does not call the
+        // synthetic provider before the visible resume prompt is appended. That
+        // would consume the tool-call phase during compaction and the real
+        // resume turn would only see the final text message.
+        contextWindow: 1_000_000,
+        maxTokens: 16,
+      },
+    ],
   });
 
   const depthConfig = resolveDelegationDepthConfig(pi);
@@ -392,7 +542,23 @@ export default function (pi: ExtensionAPI) {
   let currentSessionId = "ephemeral";
   let currentSubagentSessionRoot = "";
   let pendingResumePlan: ResumableSubagentCall | null = null;
+  let modelToRestoreAfterResume: any | undefined;
   const approvedProjectAgentDirsForSession = new Set<string>();
+
+  async function restoreModelAfterResumeFailure(ctx?: { ui?: { notify?: (message: string, type?: "info" | "warning" | "error") => void } }) {
+    const restore = modelToRestoreAfterResume;
+    modelToRestoreAfterResume = undefined;
+    pendingResumePlan = null;
+    clearSyntheticResumeState();
+    if (!restore) return;
+    try {
+      await pi.setModel(restore);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      ctx?.ui?.notify?.(`Failed to restore model after subagent resume error: ${message}`, "error");
+      console.error("[pi-subagent] Failed to restore model after resume error:", err);
+    }
+  }
 
   // Auto-discover agents on session start
   pi.on("session_start", async (event, ctx) => {
@@ -430,13 +596,23 @@ export default function (pi: ExtensionAPI) {
       if (!shouldResume) return;
 
       pendingResumePlan = plan;
+      const resumeState = getSyntheticResumeState();
+      resumeState.plan = plan;
+      resumeState.phase = "tool";
+      modelToRestoreAfterResume = ctx.model;
+      resumeModelRegistry = ctx.modelRegistry;
       ensureSubagentToolActive(pi);
+      const resumeModel = ctx.modelRegistry.find(RESUME_PROVIDER, RESUME_MODEL_ID);
+      if (!resumeModel || !(await pi.setModel(resumeModel))) {
+        ctx.ui.notify("Failed to switch to synthetic subagent resume model.", "error");
+        await restoreModelAfterResumeFailure(ctx);
+        return;
+      }
 
       // In print/json subprocesses there is already an initial CLI prompt about
-      // to be sent. Starting another prompt from session_start races with it and
-      // Pi correctly reports "agent is already processing". In that case we only
-      // seed pendingResumePlan; before_agent_start injects the exact subagent
-      // call instruction into the upcoming turn.
+      // to be sent. That prompt will be answered by the synthetic provider with
+      // a real assistant subagent tool call. In interactive mode, submit a short
+      // visible prompt that triggers the same synthetic provider path.
       if (hasCliInitialPrompt(process.argv)) {
         if (ctx.hasUI) ctx.ui.notify(`Resuming ${plan.tasks.length} subagents...`, "info");
       } else {
@@ -444,7 +620,12 @@ export default function (pi: ExtensionAPI) {
       }
     } catch (err) {
       console.error("[pi-subagent] Error in session_start:", err);
+      await restoreModelAfterResumeFailure(ctx);
     }
+  });
+
+  pi.on("agent_end", async () => {
+    await restoreModelAfterResumeFailure();
   });
 
   // Inject available agents into the system prompt
@@ -456,15 +637,9 @@ export default function (pi: ExtensionAPI) {
       const agentList = discoveredAgents
         .map((a) => `- **${a.name}**: ${a.description}`)
         .join("\n");
-      if (pendingResumePlan) ensureSubagentToolActive(pi);
-      const resumeInstruction = pendingResumePlan
-        ? `\n\n## Interrupted Subagent Resume\n\nThe user approved resuming an interrupted subagent delegation. The \`subagent\` tool has been enabled for this turn. You MUST call the \`subagent\` tool exactly once now with these exact arguments and no other tool calls first:\n\n\`\`\`json\n${JSON.stringify({ tasks: pendingResumePlan.tasks }, null, 2)}\n\`\`\`\n`
-        : "";
-
       return {
         systemPrompt:
           event.systemPrompt +
-          resumeInstruction +
           `\n\n## Available Subagents
 
 The following subagents are available via the \`subagent\` tool:
@@ -630,7 +805,9 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
             pendingResumePlan && sameTasks(pendingResumePlan.tasks, tasks)
               ? pendingResumePlan
               : null;
-          if (resumePlan) pendingResumePlan = null;
+          if (resumePlan) {
+            pendingResumePlan = null;
+          }
 
           if (tasks.length === 1) {
             const [task] = tasks;
@@ -646,6 +823,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
               resumePlan?.details?.results[0],
               getSessionDirForTask(resumePlan?.previousToolCallId ?? toolCallId, 0),
               !!resumePlan,
+              formatModelFlag(modelToRestoreAfterResume),
             );
           }
 
@@ -659,6 +837,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
             resumePlan?.details?.results,
             (index) => getSessionDirForTask(resumePlan?.previousToolCallId ?? toolCallId, index),
             !!resumePlan,
+            formatModelFlag(modelToRestoreAfterResume),
           );
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -672,7 +851,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
 
       },
 
-      renderCall: (args, theme) => renderCall(args, theme),
+      renderCall: (args, theme, context) => renderCall(args, theme, context),
       renderResult: (result, { expanded }, theme) =>
         renderResult(result, expanded, theme),
     });
@@ -680,9 +859,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
 
   function getSessionDirForTask(toolCallId: string, index: number): string {
     const root = currentSubagentSessionRoot || pathlessSubagentRootFallback();
-    const dir = buildSubagentSessionDir(root, currentSessionId, toolCallId, index);
-    ensureDir(dir);
-    return dir;
+    return buildSubagentSessionDir(root, currentSessionId, toolCallId, index);
   }
 
   function pathlessSubagentRootFallback(): string {
@@ -705,6 +882,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
     previousResult: SingleResult | undefined,
     sessionDir: string,
     resumeExistingSession: boolean,
+    fallbackModel?: string,
   ) {
     if (previousResult && isFinishedResult(previousResult)) {
       return {
@@ -732,8 +910,10 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
       onUpdate,
       makeDetails: makeDetails("single"),
       sessionDir: previousResult?.sessionDir ?? sessionDir,
+      sessionRoot: currentSubagentSessionRoot,
       resumeSession: resumeExistingSession,
       initialResult: previousResult,
+      fallbackModel,
     });
 
     if (isResultError(result)) {
@@ -774,6 +954,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
     resumeResults: SingleResult[] | undefined,
     getSessionDir: (index: number) => string,
     resumeExistingSessions: boolean,
+    fallbackModel?: string,
   ) {
     return executeParallelSubprocess(
       tasks,
@@ -789,6 +970,8 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
       resumeResults,
       (index) => getSessionDir(index),
       resumeExistingSessions,
+      currentSubagentSessionRoot,
+      fallbackModel,
     );
   }
 }

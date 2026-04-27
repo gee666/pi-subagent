@@ -21,6 +21,7 @@ import {
   getFinalOutput,
   getNestedSubagentErrorSummary,
 } from "./types.js";
+import { SUBAGENT_SESSION_ROOT_ENV } from "./resume.js";
 import {
   DEFAULT_MAX_PARALLEL_TASKS,
   DEFAULT_MAX_CONCURRENCY,
@@ -51,6 +52,7 @@ const SUBAGENT_DEPTH_ENV = "PI_SUBAGENT_DEPTH";
 const SUBAGENT_MAX_DEPTH_ENV = "PI_SUBAGENT_MAX_DEPTH";
 const SUBAGENT_STACK_ENV = "PI_SUBAGENT_STACK";
 const SUBAGENT_PREVENT_CYCLES_ENV = "PI_SUBAGENT_PREVENT_CYCLES";
+const SUBAGENT_FALLBACK_MODEL_ENV = "PI_SUBAGENT_FALLBACK_MODEL";
 // PI_OFFLINE intentionally removed: setting it on child processes blocks all API
 // calls and renders subagents unable to do any LLM work. Children inherit the
 // parent's PI_OFFLINE value via process.env spread if needed.
@@ -305,7 +307,7 @@ export function processJsonLine(line: string, result: SingleResult): boolean {
         result.usage.cost += usage.cost?.total || 0;
         result.usage.contextTokens = usage.totalTokens || 0;
       }
-      if (!result.model && msg.model) result.model = msg.model;
+      if (msg.model && msg.model !== "synthetic-tool-call") result.model = msg.model;
       if (msg.stopReason) result.stopReason = msg.stopReason;
       if (msg.errorMessage) result.errorMessage = msg.errorMessage;
     }
@@ -367,6 +369,7 @@ function buildPiArgs(
   task: string,
   sessionDir: string | undefined,
   resumeSession: boolean,
+  fallbackModelOverride?: string,
 ): string[] {
   const args: string[] = [
     "--mode",
@@ -380,7 +383,7 @@ function buildPiArgs(
   args.push("-p");
 
   // Agent config takes priority; fall back to parent CLI value
-  const model = agent.model ?? _inheritedCliArgs.fallbackModel;
+  const model = agent.model ?? fallbackModelOverride ?? process.env[SUBAGENT_FALLBACK_MODEL_ENV] ?? _inheritedCliArgs.fallbackModel;
   if (model) args.push("--model", model);
 
   const thinking = agent.thinking ?? _inheritedCliArgs.fallbackThinking;
@@ -444,10 +447,14 @@ export interface RunAgentOptions {
   makeDetails: (results: SingleResult[]) => SubagentDetails;
   /** Dedicated session directory for this subagent process. */
   sessionDir?: string;
+  /** Top-level root for all subagent session directories in this delegation tree. */
+  sessionRoot?: string;
   /** Continue the most recent session in sessionDir instead of creating a new one. */
   resumeSession?: boolean;
   /** Previously captured state for this same subagent, used to render resumed nested trees. */
   initialResult?: SingleResult;
+  /** Fallback model to use when the agent config does not pin one. */
+  fallbackModel?: string;
 }
 
 /**
@@ -470,8 +477,10 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
     onUpdate,
     makeDetails,
     sessionDir,
+    sessionRoot,
     resumeSession = false,
     initialResult,
+    fallbackModel,
   } = opts;
 
   const agent = agents.find((a) => a.name === agentName);
@@ -540,6 +549,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       task,
       sessionDir,
       resumeSession,
+      fallbackModel,
     );
     let wasAborted = false;
 
@@ -564,6 +574,8 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
           [SUBAGENT_MAX_DEPTH_ENV]: String(propagatedMaxDepth),
           [SUBAGENT_STACK_ENV]: JSON.stringify(propagatedStack),
           [SUBAGENT_PREVENT_CYCLES_ENV]: preventCycles ? "1" : "0",
+          ...(sessionRoot ? { [SUBAGENT_SESSION_ROOT_ENV]: sessionRoot } : {}),
+          ...(fallbackModel ? { [SUBAGENT_FALLBACK_MODEL_ENV]: fallbackModel } : {}),
           // PI_OFFLINE is NOT forced here — see explanation near PI_OFFLINE_ENV.
         },
       });
@@ -761,6 +773,8 @@ export async function executeParallelSubprocess(
   resumeResults?: SingleResult[],
   getSessionDir?: (index: number, task: { agent: string; task: string; cwd?: string }) => string | undefined,
   resumeExistingSessions = false,
+  sessionRoot?: string,
+  fallbackModel?: string,
 ): Promise<{
   content: Array<{ type: "text"; text: string }>;
   details: SubagentDetails;
@@ -855,8 +869,10 @@ export async function executeParallelSubprocess(
         preventCycles,
         signal,
         sessionDir,
+        sessionRoot,
         resumeSession: resumeExistingSessions && !!sessionDir,
         initialResult: previousResult,
+        fallbackModel,
         onUpdate: (partial) => {
           if (partial.details?.results[0]) {
             allResults[index] = partial.details.results[0];

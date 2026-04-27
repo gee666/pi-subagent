@@ -400,14 +400,23 @@ function topLevelSummary(details: SubagentDetails, counts: TreeCounts): string {
 // renderCall — shown while the tool is being invoked
 // ---------------------------------------------------------------------------
 
-export function renderCall(args: Record<string, any>, theme: { fg: ThemeFg; bold: (s: string) => string }): Text {
+export function renderCall(
+	args: Record<string, any>,
+	theme: { fg: ThemeFg; bold: (s: string) => string },
+	context?: { isPartial?: boolean; isError?: boolean },
+): Text {
 	const tasks = Array.isArray(args.tasks) ? args.tasks : [];
 	const count = tasks.length;
+	const icon = context?.isPartial === false
+		? context.isError
+			? theme.fg("error", "❌")
+			: theme.fg("success", "✅")
+		: theme.fg("warning", "⏳");
 	let text = `${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", `${count} task${count === 1 ? "" : "s"}`)}`;
 	for (const task of tasks.slice(0, 6)) {
 		const agent = typeof task?.agent === "string" ? task.agent : "...";
 		const preview = typeof task?.task === "string" ? ` ${truncate(task.task, 56)}` : "";
-		text += `\n  ${theme.fg("warning", "⏳")} ${theme.fg("accent", agent)}${theme.fg("dim", preview)}`;
+		text += `\n  ${icon} ${theme.fg("accent", agent)}${theme.fg("dim", preview)}`;
 	}
 	if (tasks.length > 6) text += `\n  ${theme.fg("muted", `... +${tasks.length - 6} more`)}`;
 	return new Text(text, 0, 0);

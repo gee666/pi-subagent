@@ -1,7 +1,12 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { buildSubagentDetails, emptyUsage, type SingleResult } from "../types.js";
-import { findLatestResumableSubagentCall, sameTasks } from "../resume.js";
+import {
+  SUBAGENT_SESSION_ROOT_ENV,
+  findLatestResumableSubagentCall,
+  getDefaultSubagentSessionRoot,
+  sameTasks,
+} from "../resume.js";
 
 function makeResult(overrides: Partial<SingleResult> = {}): SingleResult {
   return {
@@ -201,6 +206,24 @@ describe("findLatestResumableSubagentCall", () => {
     assert.ok(plan);
     assert.equal(plan.previousToolCallId, "second-call");
     assert.deepEqual(plan.tasks, secondTasks);
+  });
+});
+
+describe("subagent session root", () => {
+  test("nested subagents inherit the top-level session root instead of nesting sessions-subagents repeatedly", () => {
+    const previous = process.env[SUBAGENT_SESSION_ROOT_ENV];
+    process.env[SUBAGENT_SESSION_ROOT_ENV] = "/tmp/pi-subagent-root";
+    try {
+      const root = getDefaultSubagentSessionRoot({
+        sessionManager: {
+          getSessionDir: () => "/tmp/pi-subagent-root/parent-session/tool-call/0",
+        },
+      } as any);
+      assert.equal(root, "/tmp/pi-subagent-root");
+    } finally {
+      if (previous === undefined) delete process.env[SUBAGENT_SESSION_ROOT_ENV];
+      else process.env[SUBAGENT_SESSION_ROOT_ENV] = previous;
+    }
   });
 });
 

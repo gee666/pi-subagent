@@ -6,6 +6,7 @@ import { isResultError, isSubagentDetails, type SingleResult, type SubagentDetai
 
 export const SUBAGENT_RESUME_PROMPT_ENV = "PI_SUBAGENT_RESUME_PROMPT";
 export const SUBAGENT_RESUME_DISABLE_ENV = "PI_SUBAGENT_DISABLE_RESUME";
+export const SUBAGENT_SESSION_ROOT_ENV = "PI_SUBAGENT_SESSION_ROOT";
 
 type SessionEntry = ReturnType<ExtensionContext["sessionManager"]["getEntries"]>[number];
 
@@ -25,6 +26,9 @@ export function parseBooleanEnv(raw: unknown): boolean | null {
 }
 
 export function getDefaultSubagentSessionRoot(ctx: ExtensionContext): string {
+  const inheritedRoot = process.env[SUBAGENT_SESSION_ROOT_ENV];
+  if (inheritedRoot) return inheritedRoot;
+
   const mainSessionDir = ctx.sessionManager.getSessionDir?.();
   if (typeof mainSessionDir === "string" && mainSessionDir.length > 0) {
     return path.join(path.dirname(mainSessionDir), "sessions-subagents");
