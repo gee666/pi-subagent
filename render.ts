@@ -180,21 +180,56 @@ function buildNodesFromNestedResult(nested: NestedSubagentResult): TreeNode[] {
 	return nested.details.results.map((result) => buildResultNode(result));
 }
 
+function subagentCallSignature(call: PendingSubagentCall): string {
+	return JSON.stringify(call.tasks.map((task) => ({ agent: task.agent, task: task.task ?? "" })));
+}
+
+function nestedResultIsHealthy(nested: NestedSubagentResult | undefined): boolean {
+	if (!nested || nested.isError) return false;
+	return nested.details.results.every((result) => !isResultError(result));
+}
+
 function buildNestedChildren(result: SingleResult): TreeNode[] {
+	const parentIsRunning = result.exitCode === -1;
 	const completedByToolCallId = new Map<string, NestedSubagentResult>();
 	for (const nested of getNestedSubagentResults(result.messages)) {
 		completedByToolCallId.set(nested.toolCallId, nested);
 	}
 
-	const nodes: TreeNode[] = [];
-	for (const call of extractPendingSubagentCalls(result.messages)) {
+	const calls = extractPendingSubagentCalls(result.messages);
+	const laterResumeBySignature = new Map<string, number>();
+	calls.forEach((call, index) => {
 		const completed = completedByToolCallId.get(call.toolCallId);
+		// A resumed call has the same task signature as the interrupted call but a
+		// newer toolCallId. Prefer that newer running/successful tree over the old
+		// synthetic/aborted result so resumed nested subagents render in-place.
+		if (!completed || nestedResultIsHealthy(completed)) {
+			laterResumeBySignature.set(subagentCallSignature(call), index);
+		}
+	});
+
+	const nodes: TreeNode[] = [];
+	calls.forEach((call, index) => {
+		const completed = completedByToolCallId.get(call.toolCallId);
+		const newerEquivalent = laterResumeBySignature.get(subagentCallSignature(call));
+		if (
+			newerEquivalent !== undefined &&
+			newerEquivalent > index &&
+			(!completed || completed.isError || !nestedResultIsHealthy(completed))
+		) {
+			return;
+		}
+
 		if (completed && isSubagentDetails(completed.details)) {
 			nodes.push(...buildNodesFromNestedResult(completed));
-			continue;
+			return;
 		}
-		nodes.push(...buildPendingNodes(call));
-	}
+		// Unmatched subagent tool calls are useful while the parent is still
+		// running (they show live pending children). Once the parent finished,
+		// unmatched calls are stale history from an interrupted/resumed session and
+		// must not keep the whole tree in a perpetual "running" state.
+		if (parentIsRunning) nodes.push(...buildPendingNodes(call));
+	});
 	return nodes;
 }
 

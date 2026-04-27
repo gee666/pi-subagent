@@ -45,6 +45,8 @@ export interface SingleResult {
 	model?: string;
 	stopReason?: string;
 	errorMessage?: string;
+	/** Session directory used by this subagent process, when persisted. */
+	sessionDir?: string;
 	/** Number of LLM turns completed so far in this agent run. */
 	completedTurns: number;
 	/** True while an LLM call is currently in flight (between turn_start and turn_end). */

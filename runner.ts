@@ -365,15 +365,19 @@ function buildPiArgs(
   agent: AgentConfig,
   systemPromptPath: string | null,
   task: string,
+  sessionDir: string | undefined,
+  resumeSession: boolean,
 ): string[] {
   const args: string[] = [
     "--mode",
     "json",
     ..._inheritedCliArgs.extensionArgs,
     ..._inheritedCliArgs.alwaysProxy,
-    "-p",
-    "--no-session",
   ];
+
+  if (sessionDir) args.push("--session-dir", sessionDir);
+  if (resumeSession) args.push("--continue");
+  args.push("-p");
 
   // Agent config takes priority; fall back to parent CLI value
   const model = agent.model ?? _inheritedCliArgs.fallbackModel;
@@ -401,7 +405,11 @@ function buildPiArgs(
   }
 
   if (systemPromptPath) args.push("--append-system-prompt", systemPromptPath);
-  args.push(`Task: ${task}`);
+  args.push(
+    resumeSession
+      ? `Continue the previous task from where you left off. Original task: ${task}`
+      : `Task: ${task}`,
+  );
   return args;
 }
 
@@ -434,6 +442,12 @@ export interface RunAgentOptions {
   onUpdate?: OnUpdateCallback;
   /** Factory to wrap results into SubagentDetails. */
   makeDetails: (results: SingleResult[]) => SubagentDetails;
+  /** Dedicated session directory for this subagent process. */
+  sessionDir?: string;
+  /** Continue the most recent session in sessionDir instead of creating a new one. */
+  resumeSession?: boolean;
+  /** Previously captured state for this same subagent, used to render resumed nested trees. */
+  initialResult?: SingleResult;
 }
 
 /**
@@ -455,6 +469,9 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
     signal,
     onUpdate,
     makeDetails,
+    sessionDir,
+    resumeSession = false,
+    initialResult,
   } = opts;
 
   const agent = agents.find((a) => a.name === agentName);
@@ -472,6 +489,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       completedTurns: 0,
       turnInProgress: false,
       liveLog: [],
+      sessionDir: opts.sessionDir,
     };
   }
 
@@ -480,14 +498,16 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
     agentSource: agent.source,
     task,
     exitCode: -1,
-    messages: [],
-    stderr: "",
-    usage: emptyUsage(),
-    toolCalls: {},
-    model: agent.model,
-    completedTurns: 0,
+    messages: initialResult?.messages ? [...initialResult.messages] : [],
+    stderr: initialResult?.stderr ?? "",
+    usage: initialResult?.usage ? { ...initialResult.usage } : emptyUsage(),
+    toolCalls: initialResult?.toolCalls ? { ...initialResult.toolCalls } : {},
+    model: initialResult?.model ?? agent.model,
+    completedTurns: initialResult?.completedTurns ?? 0,
     turnInProgress: false,
-    liveLog: [],
+    liveToolExecutions: initialResult?.liveToolExecutions,
+    liveLog: initialResult?.liveLog ? [...initialResult.liveLog] : [],
+    sessionDir,
   };
 
   const emitUpdate = () => {
@@ -518,6 +538,8 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       agent,
       promptTmpPath,
       task,
+      sessionDir,
+      resumeSession,
     );
     let wasAborted = false;
 
@@ -736,6 +758,9 @@ export async function executeParallelSubprocess(
   signal: AbortSignal | undefined,
   onUpdate: OnUpdateCallback | undefined,
   makeDetails: (results: SingleResult[]) => SubagentDetails,
+  resumeResults?: SingleResult[],
+  getSessionDir?: (index: number, task: { agent: string; task: string; cwd?: string }) => string | undefined,
+  resumeExistingSessions = false,
 ): Promise<{
   content: Array<{ type: "text"; text: string }>;
   details: SubagentDetails;
@@ -770,7 +795,7 @@ export async function executeParallelSubprocess(
     };
   }
 
-  const allResults: SingleResult[] = tasks.map((t) => ({
+  const allResults: SingleResult[] = tasks.map((t, index) => resumeResults?.[index] ?? ({
     agent: t.agent,
     agentSource: "unknown" as const,
     task: t.task,
@@ -782,6 +807,7 @@ export async function executeParallelSubprocess(
     completedTurns: 0,
     turnInProgress: false,
     liveLog: [],
+    sessionDir: getSessionDir?.(index, t),
   }));
 
   const emitProgress = () => {
@@ -810,6 +836,13 @@ export async function executeParallelSubprocess(
   let results: SingleResult[];
   try {
     results = await mapConcurrent(tasks, maxConcurrency, async (t, index) => {
+      const previousResult = resumeResults?.[index];
+      if (previousResult?.exitCode === 0) {
+        allResults[index] = previousResult;
+        emitProgress();
+        return previousResult;
+      }
+      const sessionDir = previousResult?.sessionDir ?? getSessionDir?.(index, t);
       const result = await runAgentSubprocess({
         cwd: defaultCwd,
         agents,
@@ -821,6 +854,9 @@ export async function executeParallelSubprocess(
         maxDepth,
         preventCycles,
         signal,
+        sessionDir,
+        resumeSession: resumeExistingSessions && !!sessionDir,
+        initialResult: previousResult,
         onUpdate: (partial) => {
           if (partial.details?.results[0]) {
             allResults[index] = partial.details.results[0];

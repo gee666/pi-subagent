@@ -14,6 +14,18 @@ import { type AgentConfig, discoverAgents } from "./agents.js";
 import { renderCall, renderResult } from "./render.js";
 import { runAgentSubprocess, executeParallelSubprocess } from "./runner.js";
 import {
+  SUBAGENT_RESUME_DISABLE_ENV,
+  SUBAGENT_RESUME_PROMPT_ENV,
+  buildSubagentSessionDir,
+  ensureDir,
+  findLatestResumableSubagentCall,
+  getDefaultSubagentSessionRoot,
+  isFinishedResult,
+  parseBooleanEnv,
+  sameTasks,
+  type ResumableSubagentCall,
+} from "./resume.js";
+import {
   DEFAULT_MAX_PARALLEL_TASKS,
   SUBAGENT_MAX_PARALLEL_TASKS_ENV,
   parseNonNegativeInt,
@@ -339,6 +351,21 @@ function getProjectAgentSessionKey(projectAgentsDir: string | null): string {
   return projectAgentsDir ?? "(unknown-project-agents-dir)";
 }
 
+function ensureSubagentToolActive(pi: ExtensionAPI): void {
+  const activeTools = pi.getActiveTools();
+  if (!activeTools.includes("subagent")) {
+    pi.setActiveTools([...activeTools, "subagent"]);
+  }
+}
+
+function hasCliInitialPrompt(argv: string[]): boolean {
+  for (let i = 2; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "-p" || arg === "--print") return true;
+  }
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // Extension entry point
 // ---------------------------------------------------------------------------
@@ -362,14 +389,19 @@ export default function (pi: ExtensionAPI) {
     DEFAULT_MAX_PARALLEL_TASKS;
 
   let discoveredAgents: AgentConfig[] = [];
+  let currentSessionId = "ephemeral";
+  let currentSubagentSessionRoot = "";
+  let pendingResumePlan: ResumableSubagentCall | null = null;
   const approvedProjectAgentDirsForSession = new Set<string>();
 
   // Auto-discover agents on session start
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
     if (!canDelegate) return;
     try {
       const discovery = discoverAgents(ctx.cwd, "both");
       discoveredAgents = discovery.agents;
+      currentSessionId = ctx.sessionManager.getSessionId?.() ?? "ephemeral";
+      currentSubagentSessionRoot = getDefaultSubagentSessionRoot(ctx);
 
       if (discoveredAgents.length > 0 && ctx.hasUI) {
         const list = discoveredAgents
@@ -379,6 +411,36 @@ export default function (pi: ExtensionAPI) {
           `Found ${discoveredAgents.length} subagent(s):\n${list}`,
           "info",
         );
+      }
+
+      const resumeDisabled = parseBooleanEnv(process.env[SUBAGENT_RESUME_DISABLE_ENV]) === true;
+      if (resumeDisabled || (event.reason !== "resume" && event.reason !== "startup")) return;
+
+      const plan = findLatestResumableSubagentCall(ctx);
+      if (!plan) return;
+
+      let shouldResume = true;
+      const shouldPrompt = parseBooleanEnv(process.env[SUBAGENT_RESUME_PROMPT_ENV]) !== false;
+      if (ctx.hasUI && shouldPrompt) {
+        shouldResume = await ctx.ui.confirm(
+          "Resume subagents?",
+          `The resumed session has an unfinished subagent call (${plan.tasks.length} task${plan.tasks.length === 1 ? "" : "s"}). Resume it from saved subagent sessions?`,
+        );
+      }
+      if (!shouldResume) return;
+
+      pendingResumePlan = plan;
+      ensureSubagentToolActive(pi);
+
+      // In print/json subprocesses there is already an initial CLI prompt about
+      // to be sent. Starting another prompt from session_start races with it and
+      // Pi correctly reports "agent is already processing". In that case we only
+      // seed pendingResumePlan; before_agent_start injects the exact subagent
+      // call instruction into the upcoming turn.
+      if (hasCliInitialPrompt(process.argv)) {
+        if (ctx.hasUI) ctx.ui.notify(`Resuming ${plan.tasks.length} subagents...`, "info");
+      } else {
+        pi.sendUserMessage(`Resuming ${plan.tasks.length} subagents...`);
       }
     } catch (err) {
       console.error("[pi-subagent] Error in session_start:", err);
@@ -394,9 +456,15 @@ export default function (pi: ExtensionAPI) {
       const agentList = discoveredAgents
         .map((a) => `- **${a.name}**: ${a.description}`)
         .join("\n");
+      if (pendingResumePlan) ensureSubagentToolActive(pi);
+      const resumeInstruction = pendingResumePlan
+        ? `\n\n## Interrupted Subagent Resume\n\nThe user approved resuming an interrupted subagent delegation. The \`subagent\` tool has been enabled for this turn. You MUST call the \`subagent\` tool exactly once now with these exact arguments and no other tool calls first:\n\n\`\`\`json\n${JSON.stringify({ tasks: pendingResumePlan.tasks }, null, 2)}\n\`\`\`\n`
+        : "";
+
       return {
         systemPrompt:
           event.systemPrompt +
+          resumeInstruction +
           `\n\n## Available Subagents
 
 The following subagents are available via the \`subagent\` tool:
@@ -453,7 +521,7 @@ calls one after another. Do NOT put dependent tasks in the same array.
       ].join("\n"),
       parameters: SubagentParams,
 
-      async execute(_toolCallId, params, signal, onUpdate, ctx) {
+      async execute(toolCallId, params, signal, onUpdate, ctx) {
         try {
           const discovery = discoverAgents(ctx.cwd, "both");
           const { agents } = discovery;
@@ -558,6 +626,12 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
             }
           }
 
+          const resumePlan =
+            pendingResumePlan && sameTasks(pendingResumePlan.tasks, tasks)
+              ? pendingResumePlan
+              : null;
+          if (resumePlan) pendingResumePlan = null;
+
           if (tasks.length === 1) {
             const [task] = tasks;
             return executeSingle(
@@ -569,6 +643,9 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
               signal,
               onUpdate,
               makeDetails,
+              resumePlan?.details?.results[0],
+              getSessionDirForTask(resumePlan?.previousToolCallId ?? toolCallId, 0),
+              !!resumePlan,
             );
           }
 
@@ -579,6 +656,9 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
             signal,
             onUpdate,
             makeDetails,
+            resumePlan?.details?.results,
+            (index) => getSessionDirForTask(resumePlan?.previousToolCallId ?? toolCallId, index),
+            !!resumePlan,
           );
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -598,6 +678,17 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
     });
   }
 
+  function getSessionDirForTask(toolCallId: string, index: number): string {
+    const root = currentSubagentSessionRoot || pathlessSubagentRootFallback();
+    const dir = buildSubagentSessionDir(root, currentSessionId, toolCallId, index);
+    ensureDir(dir);
+    return dir;
+  }
+
+  function pathlessSubagentRootFallback(): string {
+    return `${process.env.HOME ?? "."}/.pi/agent/sessions-subagents`;
+  }
+
   // -----------------------------------------------------------------------
   // Mode implementations
   // -----------------------------------------------------------------------
@@ -611,7 +702,22 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
     signal: AbortSignal | undefined,
     onUpdate: ((partial: any) => void) | undefined,
     makeDetails: ReturnType<typeof makeDetailsFactory>,
+    previousResult: SingleResult | undefined,
+    sessionDir: string,
+    resumeExistingSession: boolean,
   ) {
+    if (previousResult && isFinishedResult(previousResult)) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: getFinalOutput(previousResult.messages) || "(no output)",
+          },
+        ],
+        details: makeDetails("single")([previousResult]),
+      };
+    }
+
     const result = await runAgentSubprocess({
       cwd: defaultCwd,
       agents,
@@ -625,6 +731,9 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
       signal,
       onUpdate,
       makeDetails: makeDetails("single"),
+      sessionDir: previousResult?.sessionDir ?? sessionDir,
+      resumeSession: resumeExistingSession,
+      initialResult: previousResult,
     });
 
     if (isResultError(result)) {
@@ -662,6 +771,9 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
     signal: AbortSignal | undefined,
     onUpdate: ((partial: any) => void) | undefined,
     makeDetails: ReturnType<typeof makeDetailsFactory>,
+    resumeResults: SingleResult[] | undefined,
+    getSessionDir: (index: number) => string,
+    resumeExistingSessions: boolean,
   ) {
     return executeParallelSubprocess(
       tasks,
@@ -674,6 +786,9 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
       signal,
       onUpdate,
       makeDetails("parallel"),
+      resumeResults,
+      (index) => getSessionDir(index),
+      resumeExistingSessions,
     );
   }
 }

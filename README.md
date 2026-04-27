@@ -24,6 +24,7 @@ pi remove npm:oira666_pi-subagent
 
 Each subagent runs as a **separate `pi` process** — fully isolated memory, its own model/tool loop.
 Processes are spawned via the operating system and communicate through JSON-line stdout.
+Subagent sessions are persisted separately under a `sessions-subagents` directory (a sibling of Pi's normal `sessions` directory), so they can be resumed without mixing into the main session list.
 
 - Full OS-level isolation — a crashed subagent cannot affect the parent
 - True parallel execution across all CPU cores
@@ -118,6 +119,20 @@ pi --no-subagent-prevent-cycles   # allow cycles (not recommended)
 | -------------------------------- | ------- | ---------------------------------------- |
 | `PI_SUBAGENT_MAX_PARALLEL_TASKS` | `16`    | Max tasks per single call                |
 | `PI_SUBAGENT_MAX_CONCURRENCY`    | `8`     | Max subagents running simultaneously     |
+
+## Subagent Session Resume
+
+Subagent subprocesses save sessions in `sessions-subagents`. When a main Pi session is resumed and its latest branch contains an unfinished `subagent` tool call (aborted, errored, or closed by Pi's synthetic unfinished-tool error), the extension can resume that delegation from the saved subagent sessions.
+
+- TUI mode asks: **Resume subagents?**
+- Non-UI modes (`pi -p`, JSON/RPC) resume automatically.
+- Already-finished subagents are reused as completed; unfinished ones continue from their own saved sessions.
+- Nested subagents use the same mechanism recursively.
+
+| Env Var | Default | Description |
+| --- | --- | --- |
+| `PI_SUBAGENT_RESUME_PROMPT` | `true` | Set to `false` to suppress the TUI yes/no prompt and auto-resume. |
+| `PI_SUBAGENT_DISABLE_RESUME` | `false` | Set to `true` to disable automatic subagent resume detection entirely. |
 
 ## Agent Discovery
 
