@@ -376,18 +376,20 @@ const RESUME_STATE_KEY = "__piSubagentResumeState";
 type SyntheticResumeState = {
   plan: ResumableSubagentCall | null;
   phase: "tool" | "final";
+  trigger: "resumePrompt" | "nextRequest";
 };
 
 function clearSyntheticResumeState(): void {
   const state = getSyntheticResumeState();
   state.plan = null;
   state.phase = "tool";
+  state.trigger = "resumePrompt";
 }
 
 function getSyntheticResumeState(): SyntheticResumeState {
   const g = globalThis as any;
   if (!g[RESUME_STATE_KEY]) {
-    g[RESUME_STATE_KEY] = { plan: null, phase: "tool" } satisfies SyntheticResumeState;
+    g[RESUME_STATE_KEY] = { plan: null, phase: "tool", trigger: "resumePrompt" } satisfies SyntheticResumeState;
   }
   return g[RESUME_STATE_KEY] as SyntheticResumeState;
 }
@@ -449,7 +451,10 @@ export default function (pi: ExtensionAPI) {
       const state = getSyntheticResumeState();
       const plan = state.plan;
       const phase = state.phase;
-      if (plan && phase === "tool" && isSyntheticResumePrompt(context, plan.tasks.length)) {
+      const triggerMatches =
+        state.trigger === "nextRequest" ||
+        (plan ? isSyntheticResumePrompt(context, plan.tasks.length) : false);
+      if (plan && phase === "tool" && triggerMatches) {
         state.phase = "final";
         const toolCall = {
           type: "toolCall" as const,
@@ -599,6 +604,7 @@ export default function (pi: ExtensionAPI) {
       const resumeState = getSyntheticResumeState();
       resumeState.plan = plan;
       resumeState.phase = "tool";
+      resumeState.trigger = hasCliInitialPrompt(process.argv) ? "nextRequest" : "resumePrompt";
       modelToRestoreAfterResume = ctx.model;
       resumeModelRegistry = ctx.modelRegistry;
       ensureSubagentToolActive(pi);
