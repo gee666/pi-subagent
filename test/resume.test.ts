@@ -181,9 +181,23 @@ describe("findLatestResumableSubagentCall", () => {
     assert.equal(plan.details, undefined);
   });
 
+  test("resumes a parallel call with missing result entries", () => {
+    const partialSuccessDetails = buildSubagentDetails("parallel", "spawn", null, [
+      makeResult({ exitCode: 0, stopReason: "stop", errorMessage: undefined, stderr: "" }),
+    ]);
+    const plan = findLatestResumableSubagentCall(makeCtx([
+      assistantSubagentCall(),
+      subagentToolResult("call-subagent", partialSuccessDetails, false),
+    ]));
+
+    assert.ok(plan);
+    assert.equal(plan.previousToolCallId, "call-subagent");
+  });
+
   test("does not resume a successfully finished subagent call", () => {
     const successDetails = buildSubagentDetails("parallel", "spawn", null, [
       makeResult({ exitCode: 0, stopReason: "stop", errorMessage: undefined, stderr: "" }),
+      makeResult({ agent: "reviewer", task: "review work", exitCode: 0, stopReason: "stop", errorMessage: undefined, stderr: "" }),
     ]);
     const plan = findLatestResumableSubagentCall(makeCtx([
       assistantSubagentCall(),
@@ -191,6 +205,33 @@ describe("findLatestResumableSubagentCall", () => {
     ]));
 
     assert.equal(plan, null);
+  });
+
+  test("selects the unfinished call with the latest activity, not insertion order", () => {
+    const firstTasks = [{ agent: "first", task: "first task" }];
+    const secondTasks = [{ agent: "second", task: "second task" }];
+    const bothCalls = messageEntry(
+      {
+        role: "assistant",
+        content: [
+          { type: "toolCall", id: "first-call", name: "subagent", arguments: { tasks: firstTasks } },
+          { type: "toolCall", id: "second-call", name: "subagent", arguments: { tasks: secondTasks } },
+        ],
+        stopReason: "toolUse",
+        timestamp: Date.now(),
+      },
+      "assistant-both",
+    );
+
+    const plan = findLatestResumableSubagentCall(makeCtx([
+      bothCalls,
+      subagentToolResult("second-call", buildSubagentDetails("single", "spawn", null, [makeResult({ agent: "second", task: "second task" })])),
+      subagentToolResult("first-call", buildSubagentDetails("single", "spawn", null, [makeResult({ agent: "first", task: "first task" })])),
+    ]));
+
+    assert.ok(plan);
+    assert.equal(plan.previousToolCallId, "first-call");
+    assert.deepEqual(plan.tasks, firstTasks);
   });
 
   test("returns the latest unfinished subagent call on the active branch", () => {
@@ -210,7 +251,7 @@ describe("findLatestResumableSubagentCall", () => {
 });
 
 describe("subagent session root", () => {
-  test("nested subagents inherit the top-level session root instead of nesting sessions-subagents repeatedly", () => {
+  test("nested subagents inherit the top-level session root", () => {
     const previous = process.env[SUBAGENT_SESSION_ROOT_ENV];
     process.env[SUBAGENT_SESSION_ROOT_ENV] = "/tmp/pi-subagent-root";
     try {

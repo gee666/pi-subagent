@@ -20,6 +20,7 @@ import { runAgentSubprocess, executeParallelSubprocess } from "./runner.js";
 import {
   SUBAGENT_RESUME_DISABLE_ENV,
   SUBAGENT_RESUME_PROMPT_ENV,
+  branchEntries,
   buildSubagentSessionDir,
   findLatestResumableSubagentCall,
   getDefaultSubagentSessionRoot,
@@ -30,7 +31,10 @@ import {
 } from "./resume.js";
 import {
   DEFAULT_MAX_PARALLEL_TASKS,
+  RESUME_MODEL_ID,
+  RESUME_PROVIDER,
   SUBAGENT_MAX_PARALLEL_TASKS_ENV,
+  parseBoolean,
   parseNonNegativeInt,
 } from "./shared.js";
 
@@ -95,15 +99,6 @@ interface DelegationDepthConfig {
   canDelegate: boolean;
   ancestorAgentStack: string[];
   preventCycles: boolean;
-}
-
-function parseBoolean(raw: unknown): boolean | null {
-  if (typeof raw === "boolean") return raw;
-  if (typeof raw !== "string") return null;
-  const normalized = raw.trim().toLowerCase();
-  if (["1", "true", "yes", "on"].includes(normalized)) return true;
-  if (["0", "false", "no", "off"].includes(normalized)) return false;
-  return null;
 }
 
 function parseProjectAgentConfirmationSetting(
@@ -369,8 +364,6 @@ function hasCliInitialPrompt(argv: string[]): boolean {
   return false;
 }
 
-const RESUME_PROVIDER = "pi-subagent-resume";
-const RESUME_MODEL_ID = "synthetic-tool-call";
 const RESUME_STATE_KEY = "__piSubagentResumeState";
 const SUBAGENT_FALLBACK_MODEL_ENV = "PI_SUBAGENT_FALLBACK_MODEL";
 const RESUME_INTERACTIVE_DELAY_MS = 50;
@@ -428,15 +421,7 @@ function formatModelFlag(model: any): string | undefined {
 }
 
 function findLastNonResumeModel(ctx: any): any | undefined {
-  const entries = (() => {
-    const leafId = ctx.sessionManager?.getLeafId?.();
-    if (leafId) {
-      const branch = ctx.sessionManager?.getBranch?.(leafId);
-      if (Array.isArray(branch)) return branch;
-    }
-    const all = ctx.sessionManager?.getEntries?.();
-    return Array.isArray(all) ? all : [];
-  })();
+  const entries = branchEntries(ctx);
 
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i];
@@ -662,7 +647,27 @@ export default function (pi: ExtensionAPI) {
           `The resumed session has an unfinished subagent call (${plan.tasks.length} task${plan.tasks.length === 1 ? "" : "s"}). Resume it from saved subagent sessions?`,
         );
       }
-      if (!shouldResume) return;
+      if (!shouldResume) {
+        if (ctx.model?.provider === RESUME_PROVIDER) {
+          if (restorableModel) {
+            await pi.setModel(restorableModel);
+          } else {
+            ctx.ui.notify(
+              `Subagent resume was declined, but the current model is the synthetic resume model and no real fallback model is available. Select a real model before continuing, or set ${SUBAGENT_FALLBACK_MODEL_ENV}=provider/model.`,
+              "error",
+            );
+          }
+        }
+        return;
+      }
+
+      if (!restorableModel && ctx.model?.provider === RESUME_PROVIDER) {
+        ctx.ui.notify(
+          `Cannot resume subagents while on the synthetic resume model because no real fallback model is available. Select a real model or set ${SUBAGENT_FALLBACK_MODEL_ENV}=provider/model.`,
+          "error",
+        );
+        return;
+      }
 
       pendingResumePlan = plan;
       const resumeState = getSyntheticResumeState();
@@ -947,12 +952,10 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
   }
 
   function getSessionDirForTask(toolCallId: string, index: number): string {
-    const root = currentSubagentSessionRoot || pathlessSubagentRootFallback();
-    return buildSubagentSessionDir(root, currentSessionId, toolCallId, index);
-  }
-
-  function pathlessSubagentRootFallback(): string {
-    return `${process.env.HOME ?? "."}/.pi/agent/sessions-subagents`;
+    if (!currentSubagentSessionRoot) {
+      throw new Error("Cannot create subagent session dir: subagent session root is not initialized.");
+    }
+    return buildSubagentSessionDir(currentSubagentSessionRoot, currentSessionId, toolCallId, index);
   }
 
   // -----------------------------------------------------------------------

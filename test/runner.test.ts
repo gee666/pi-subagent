@@ -302,6 +302,43 @@ describe("runAgent resilience", () => {
     assert.ok(result.stderr.includes("Unknown agent"));
   });
 
+  test("missing resume session directory returns a clear error before spawning", async () => {
+    const { runAgentSubprocess: runAgent } = await import("../runner.js");
+    const fakeAgent = {
+      name: "fake",
+      description: "fake agent",
+      systemPrompt: "",
+      source: "user" as const,
+      filePath: "/fake/agent.md",
+    };
+
+    const result = await runAgent({
+      cwd: "/tmp",
+      agents: [fakeAgent],
+      agentName: "fake",
+      task: "do something",
+      parentDepth: 0,
+      parentAgentStack: [],
+      maxDepth: 3,
+      preventCycles: false,
+      resumeSession: true,
+      sessionDir: "/tmp/pi-subagent-missing-session-dir-for-test",
+      makeDetails: (results) => ({
+        mode: "single",
+        delegationMode: "spawn",
+        projectAgentsDir: null,
+        results,
+        aggregatedUsage: emptyUsage(),
+        aggregatedToolCalls: {},
+        usageTree: [],
+      }),
+    });
+
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.stopReason, "error");
+    assert.match(result.stderr, /session directory does not exist/);
+  });
+
   test("startup timeout kills a hung process and returns a result", async () => {
     const { runAgentSubprocess: runAgent } = await import("../runner.js");
 

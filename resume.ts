@@ -1,7 +1,6 @@
-import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { parseBoolean } from "./shared.js";
 import { isResultError, isSubagentDetails, type SingleResult, type SubagentDetails } from "./types.js";
 
 export const SUBAGENT_RESUME_PROMPT_ENV = "PI_SUBAGENT_RESUME_PROMPT";
@@ -16,14 +15,7 @@ export interface ResumableSubagentCall {
   details?: SubagentDetails;
 }
 
-export function parseBooleanEnv(raw: unknown): boolean | null {
-  if (typeof raw === "boolean") return raw;
-  if (typeof raw !== "string") return null;
-  const normalized = raw.trim().toLowerCase();
-  if (["1", "true", "yes", "on"].includes(normalized)) return true;
-  if (["0", "false", "no", "off"].includes(normalized)) return false;
-  return null;
-}
+export const parseBooleanEnv = parseBoolean;
 
 export function getDefaultSubagentSessionRoot(ctx: ExtensionContext): string {
   const inheritedRoot = process.env[SUBAGENT_SESSION_ROOT_ENV];
@@ -33,7 +25,8 @@ export function getDefaultSubagentSessionRoot(ctx: ExtensionContext): string {
   if (typeof mainSessionDir === "string" && mainSessionDir.length > 0) {
     return path.join(path.dirname(mainSessionDir), "sessions-subagents");
   }
-  return path.join(os.homedir(), ".pi", "agent", "sessions-subagents");
+
+  throw new Error("Cannot determine subagent session root: sessionManager.getSessionDir() is unavailable.");
 }
 
 export function buildSubagentSessionDir(
@@ -47,11 +40,7 @@ export function buildSubagentSessionDir(
   return path.join(root, safeParent, safeTool, String(index));
 }
 
-export function ensureDir(dir: string): void {
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-}
-
-function branchEntries(ctx: ExtensionContext): SessionEntry[] {
+export function branchEntries(ctx: ExtensionContext): SessionEntry[] {
   const leafId = ctx.sessionManager.getLeafId?.();
   if (leafId) {
     const branch = ctx.sessionManager.getBranch?.(leafId);
@@ -87,9 +76,10 @@ function normalizeTasks(args: any): Array<{ agent: string; task: string; cwd?: s
   return tasks;
 }
 
-function hasUnfinishedResults(details: SubagentDetails | undefined): boolean {
+function hasUnfinishedResults(details: SubagentDetails | undefined, expectedTaskCount: number): boolean {
   if (!details) return true;
-  return details.results.some((result) => result.exitCode === -1 || isResultError(result));
+  if (details.results.length < expectedTaskCount) return true;
+  return details.results.slice(0, expectedTaskCount).some((result) => result.exitCode === -1 || isResultError(result));
 }
 
 function messageHasNonEmptyText(message: any): boolean {
@@ -155,7 +145,7 @@ export function findLatestResumableSubagentCall(ctx: ExtensionContext): Resumabl
   const candidates: Array<ResumableSubagentCall & { activityOrder: number }> = [];
   for (const [toolCallId, call] of calls) {
     const result = results.get(toolCallId);
-    const unfinished = !result || result.isError || hasUnfinishedResults(result.details);
+    const unfinished = !result || result.isError || hasUnfinishedResults(result.details, call.tasks.length);
     if (!unfinished) continue;
     candidates.push({
       previousToolCallId: toolCallId,
@@ -165,7 +155,7 @@ export function findLatestResumableSubagentCall(ctx: ExtensionContext): Resumabl
     });
   }
 
-  const latest = candidates.at(-1);
+  const latest = candidates.sort((a, b) => a.activityOrder - b.activityOrder).at(-1);
   if (!latest || !hasOnlyIgnorableTrailingEntries(entries, latest.activityOrder)) return null;
   return latest;
 }
@@ -174,7 +164,11 @@ export function sameTasks(
   a: Array<{ agent: string; task: string; cwd?: string }>,
   b: Array<{ agent: string; task: string; cwd?: string }>,
 ): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
+  if (a.length !== b.length) return false;
+  return a.every((task, index) => {
+    const other = b[index];
+    return task.agent === other.agent && task.task === other.task && (task.cwd ?? undefined) === (other.cwd ?? undefined);
+  });
 }
 
 export function isFinishedResult(result: SingleResult | undefined): boolean {

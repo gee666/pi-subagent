@@ -26,6 +26,8 @@ import {
   DEFAULT_MAX_PARALLEL_TASKS,
   DEFAULT_MAX_CONCURRENCY,
   PARALLEL_HEARTBEAT_MS,
+  RESUME_MODEL_ID,
+  RESUME_PROVIDER,
   SUBAGENT_MAX_PARALLEL_TASKS_ENV,
   SUBAGENT_MAX_CONCURRENCY_ENV,
   parseNonNegativeInt,
@@ -49,23 +51,20 @@ function isTerminalStopReason(reason: string | undefined): boolean {
   return reason !== undefined && TERMINAL_STOP_REASONS.has(reason);
 }
 
-function endedWithEmptySyntheticResume(messages: Message[]): boolean {
+function endedWithSyntheticResumeFailure(messages: Message[]): boolean {
   const lastAssistant = [...messages].reverse().find((message: any) => message?.role === "assistant") as any;
-  return (
-    lastAssistant?.provider === RESUME_PROVIDER &&
-    lastAssistant?.model === RESUME_MODEL_ID &&
-    lastAssistant?.stopReason === "stop" &&
-    Array.isArray(lastAssistant.content) &&
-    lastAssistant.content.length === 0
-  );
+  if (lastAssistant?.provider !== RESUME_PROVIDER || lastAssistant?.model !== RESUME_MODEL_ID) return false;
+  const content = Array.isArray(lastAssistant.content) ? lastAssistant.content : [];
+  const handedOffToRealModel = messages.some((message: any) => message?.role === "assistant" && message.provider !== RESUME_PROVIDER);
+  const hasToolCall = content.some((part: any) => part?.type === "toolCall");
+  return !handedOffToRealModel && !hasToolCall;
 }
 const SUBAGENT_DEPTH_ENV = "PI_SUBAGENT_DEPTH";
 const SUBAGENT_MAX_DEPTH_ENV = "PI_SUBAGENT_MAX_DEPTH";
 const SUBAGENT_STACK_ENV = "PI_SUBAGENT_STACK";
 const SUBAGENT_PREVENT_CYCLES_ENV = "PI_SUBAGENT_PREVENT_CYCLES";
 const SUBAGENT_FALLBACK_MODEL_ENV = "PI_SUBAGENT_FALLBACK_MODEL";
-const RESUME_PROVIDER = "pi-subagent-resume";
-const RESUME_MODEL_ID = "synthetic-tool-call";
+
 // PI_OFFLINE intentionally removed: setting it on child processes blocks all API
 // calls and renders subagents unable to do any LLM work. Children inherit the
 // parent's PI_OFFLINE value via process.env spread if needed.
@@ -292,6 +291,26 @@ function pushLiveLog(result: SingleResult, entry: LiveLogEntry): void {
   if (result.liveLog.length > MAX_LIVE_LOG_ENTRIES) result.liveLog.shift();
 }
 
+function messageDedupKey(message: Message): string {
+  const anyMessage = message as any;
+  if (typeof anyMessage.id === "string") return `id:${anyMessage.id}`;
+  return JSON.stringify({
+    role: anyMessage.role,
+    provider: anyMessage.provider,
+    model: anyMessage.model,
+    stopReason: anyMessage.stopReason,
+    toolCallId: anyMessage.toolCallId,
+    toolName: anyMessage.toolName,
+    content: anyMessage.content,
+    usage: anyMessage.usage,
+  });
+}
+
+function hasMessage(result: SingleResult, message: Message): boolean {
+  const key = messageDedupKey(message);
+  return result.messages.some((existing) => messageDedupKey(existing) === key);
+}
+
 export function processJsonLine(line: string, result: SingleResult): boolean {
   if (!line.trim()) return false;
 
@@ -307,6 +326,7 @@ export function processJsonLine(line: string, result: SingleResult): boolean {
 
   if (event.type === "message_end" && event.message) {
     const msg = event.message as Message;
+    if (hasMessage(result, msg)) return true;
     result.messages.push(msg);
 
     if (msg.role === "assistant") {
@@ -328,7 +348,8 @@ export function processJsonLine(line: string, result: SingleResult): boolean {
   }
 
   if (event.type === "tool_result_end" && event.message) {
-    result.messages.push(event.message as Message);
+    const msg = event.message as Message;
+    if (!hasMessage(result, msg)) result.messages.push(msg);
     return true;
   }
 
@@ -512,6 +533,27 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       turnInProgress: false,
       liveLog: [],
       sessionDir: opts.sessionDir,
+    };
+  }
+
+  if (resumeSession && sessionDir && (!fs.existsSync(sessionDir) || !fs.statSync(sessionDir).isDirectory())) {
+    const errorMessage = `Cannot resume subagent session: session directory does not exist: ${sessionDir}`;
+    return {
+      agent: agentName,
+      agentSource: agent.source,
+      task,
+      exitCode: 1,
+      messages: initialResult?.messages ? [...initialResult.messages] : [],
+      stderr: errorMessage,
+      usage: initialResult?.usage ? { ...initialResult.usage } : emptyUsage(),
+      toolCalls: initialResult?.toolCalls ? { ...initialResult.toolCalls } : {},
+      model: initialResult?.model ?? agent.model,
+      stopReason: "error",
+      errorMessage,
+      completedTurns: initialResult?.completedTurns ?? 0,
+      turnInProgress: false,
+      liveLog: initialResult?.liveLog ? [...initialResult.liveLog] : [],
+      sessionDir,
     };
   }
 
@@ -743,7 +785,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       if (!result.stderr.trim()) result.stderr = "Subagent was aborted.";
     }
 
-    if (result.exitCode === 0 && endedWithEmptySyntheticResume(result.messages)) {
+    if (result.exitCode === 0 && endedWithSyntheticResumeFailure(result.messages)) {
       result.exitCode = 1;
       result.stopReason = "error";
       result.errorMessage = "Subagent resume failed before the real model continued.";

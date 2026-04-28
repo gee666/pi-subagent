@@ -13,10 +13,21 @@ export const DEFAULT_MAX_CONCURRENCY = 8;
 export const PARALLEL_HEARTBEAT_MS = 1000;
 export const SUBAGENT_MAX_PARALLEL_TASKS_ENV = "PI_SUBAGENT_MAX_PARALLEL_TASKS";
 export const SUBAGENT_MAX_CONCURRENCY_ENV = "PI_SUBAGENT_MAX_CONCURRENCY";
+export const RESUME_PROVIDER = "pi-subagent-resume";
+export const RESUME_MODEL_ID = "synthetic-tool-call";
 
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
+
+export function parseBoolean(raw: unknown): boolean | null {
+	if (typeof raw === "boolean") return raw;
+	if (typeof raw !== "string") return null;
+	const normalized = raw.trim().toLowerCase();
+	if (["1", "true", "yes", "on"].includes(normalized)) return true;
+	if (["0", "false", "no", "off"].includes(normalized)) return false;
+	return null;
+}
 
 /** Parse a string into a non-negative safe integer, or null on failure. */
 export function parseNonNegativeInt(raw: unknown): number | null {
