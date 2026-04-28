@@ -48,11 +48,24 @@ const TERMINAL_STOP_REASONS = new Set(["end_turn", "stop", "max_tokens", "error"
 function isTerminalStopReason(reason: string | undefined): boolean {
   return reason !== undefined && TERMINAL_STOP_REASONS.has(reason);
 }
+
+function endedWithEmptySyntheticResume(messages: Message[]): boolean {
+  const lastAssistant = [...messages].reverse().find((message: any) => message?.role === "assistant") as any;
+  return (
+    lastAssistant?.provider === RESUME_PROVIDER &&
+    lastAssistant?.model === RESUME_MODEL_ID &&
+    lastAssistant?.stopReason === "stop" &&
+    Array.isArray(lastAssistant.content) &&
+    lastAssistant.content.length === 0
+  );
+}
 const SUBAGENT_DEPTH_ENV = "PI_SUBAGENT_DEPTH";
 const SUBAGENT_MAX_DEPTH_ENV = "PI_SUBAGENT_MAX_DEPTH";
 const SUBAGENT_STACK_ENV = "PI_SUBAGENT_STACK";
 const SUBAGENT_PREVENT_CYCLES_ENV = "PI_SUBAGENT_PREVENT_CYCLES";
 const SUBAGENT_FALLBACK_MODEL_ENV = "PI_SUBAGENT_FALLBACK_MODEL";
+const RESUME_PROVIDER = "pi-subagent-resume";
+const RESUME_MODEL_ID = "synthetic-tool-call";
 // PI_OFFLINE intentionally removed: setting it on child processes blocks all API
 // calls and renders subagents unable to do any LLM work. Children inherit the
 // parent's PI_OFFLINE value via process.env spread if needed.
@@ -728,6 +741,13 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       result.stopReason = "aborted";
       result.errorMessage = "Subagent was aborted.";
       if (!result.stderr.trim()) result.stderr = "Subagent was aborted.";
+    }
+
+    if (result.exitCode === 0 && endedWithEmptySyntheticResume(result.messages)) {
+      result.exitCode = 1;
+      result.stopReason = "error";
+      result.errorMessage = "Subagent resume failed before the real model continued.";
+      if (!result.stderr.trim()) result.stderr = result.errorMessage;
     }
 
     if (result.exitCode === 0) {
