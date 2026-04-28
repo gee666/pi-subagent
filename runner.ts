@@ -224,7 +224,7 @@ function parseInheritedCliArgs(argv: string[]): InheritedCliArgs {
 
     // ── ALWAYS-PROXY: known value flags ──────────────────────────────────────
     if ([
-      "--provider", "--api-key", "--system-prompt", "--session-dir",
+      "--provider", "--api-key", "--system-prompt",
       "--models", "--skill", "--prompt-template", "--theme",
     ].includes(flagName)) {
       const [value, skip] = getVal();
@@ -309,6 +309,15 @@ function messageDedupKey(message: Message): string {
 function hasMessage(result: SingleResult, message: Message): boolean {
   const key = messageDedupKey(message);
   return result.messages.some((existing) => messageDedupKey(existing) === key);
+}
+
+function sessionDirExists(dir: string | undefined): boolean {
+  if (!dir) return false;
+  try {
+    return fs.existsSync(dir) && fs.statSync(dir).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 export function processJsonLine(line: string, result: SingleResult): boolean {
@@ -536,26 +545,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
     };
   }
 
-  if (resumeSession && sessionDir && (!fs.existsSync(sessionDir) || !fs.statSync(sessionDir).isDirectory())) {
-    const errorMessage = `Cannot resume subagent session: session directory does not exist: ${sessionDir}`;
-    return {
-      agent: agentName,
-      agentSource: agent.source,
-      task,
-      exitCode: 1,
-      messages: initialResult?.messages ? [...initialResult.messages] : [],
-      stderr: errorMessage,
-      usage: initialResult?.usage ? { ...initialResult.usage } : emptyUsage(),
-      toolCalls: initialResult?.toolCalls ? { ...initialResult.toolCalls } : {},
-      model: initialResult?.model ?? agent.model,
-      stopReason: "error",
-      errorMessage,
-      completedTurns: initialResult?.completedTurns ?? 0,
-      turnInProgress: false,
-      liveLog: initialResult?.liveLog ? [...initialResult.liveLog] : [],
-      sessionDir,
-    };
-  }
+  const shouldContinueSession = resumeSession && (!sessionDir || sessionDirExists(sessionDir));
 
   const result: SingleResult = {
     agent: agentName,
@@ -603,7 +593,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       promptTmpPath,
       task,
       sessionDir,
-      resumeSession,
+      shouldContinueSession,
       fallbackModel,
     );
     let wasAborted = false;
@@ -883,7 +873,6 @@ export async function executeParallelSubprocess(
     completedTurns: 0,
     turnInProgress: false,
     liveLog: [],
-    sessionDir: getSessionDir?.(index, t),
   }));
 
   const emitProgress = () => {
@@ -918,7 +907,12 @@ export async function executeParallelSubprocess(
         emitProgress();
         return previousResult;
       }
-      const sessionDir = previousResult?.sessionDir ?? getSessionDir?.(index, t);
+      const savedSessionDir = previousResult?.sessionDir;
+      const savedSessionDirExists = sessionDirExists(savedSessionDir);
+      const shouldResumeThisSession = resumeExistingSessions && (!previousResult || !savedSessionDir || savedSessionDirExists);
+      const sessionDir = shouldResumeThisSession && savedSessionDirExists
+        ? savedSessionDir
+        : getSessionDir?.(index, t);
       const result = await runAgentSubprocess({
         cwd: defaultCwd,
         agents,
@@ -932,7 +926,7 @@ export async function executeParallelSubprocess(
         signal,
         sessionDir,
         sessionRoot,
-        resumeSession: resumeExistingSessions && !!sessionDir,
+        resumeSession: shouldResumeThisSession && !!sessionDir,
         initialResult: previousResult,
         fallbackModel,
         onUpdate: (partial) => {

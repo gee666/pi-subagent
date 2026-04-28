@@ -23,7 +23,7 @@ export function getDefaultSubagentSessionRoot(ctx: ExtensionContext): string {
 
   const mainSessionDir = ctx.sessionManager.getSessionDir?.();
   if (typeof mainSessionDir === "string" && mainSessionDir.length > 0) {
-    return path.join(path.dirname(mainSessionDir), "sessions-subagents");
+    return path.join(mainSessionDir, "subagents");
   }
 
   throw new Error("Cannot determine subagent session root: sessionManager.getSessionDir() is unavailable.");

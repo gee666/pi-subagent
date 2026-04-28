@@ -302,7 +302,7 @@ describe("runAgent resilience", () => {
     assert.ok(result.stderr.includes("Unknown agent"));
   });
 
-  test("missing resume session directory returns a clear error before spawning", async () => {
+  test("missing unstarted resume session directory is treated as a fresh run", async () => {
     const { runAgentSubprocess: runAgent } = await import("../runner.js");
     const fakeAgent = {
       name: "fake",
@@ -312,31 +312,110 @@ describe("runAgent resilience", () => {
       filePath: "/fake/agent.md",
     };
 
-    const result = await runAgent({
-      cwd: "/tmp",
-      agents: [fakeAgent],
-      agentName: "fake",
-      task: "do something",
-      parentDepth: 0,
-      parentAgentStack: [],
-      maxDepth: 3,
-      preventCycles: false,
-      resumeSession: true,
-      sessionDir: "/tmp/pi-subagent-missing-session-dir-for-test",
-      makeDetails: (results) => ({
-        mode: "single",
-        delegationMode: "spawn",
-        projectAgentsDir: null,
-        results,
-        aggregatedUsage: emptyUsage(),
-        aggregatedToolCalls: {},
-        usageTree: [],
-      }),
-    });
+    const origTimeout = process.env.PI_SUBAGENT_STARTUP_TIMEOUT;
+    process.env.PI_SUBAGENT_STARTUP_TIMEOUT = "1";
+    let result;
+    try {
+      result = await runAgent({
+        cwd: "/tmp",
+        agents: [fakeAgent],
+        agentName: "fake",
+        task: "do something",
+        parentDepth: 0,
+        parentAgentStack: [],
+        maxDepth: 3,
+        preventCycles: false,
+        resumeSession: true,
+        sessionDir: "/tmp/pi-subagent-missing-session-dir-for-test",
+        initialResult: {
+          agent: "fake",
+          agentSource: "user",
+          task: "do something",
+          exitCode: -1,
+          messages: [],
+          stderr: "",
+          usage: emptyUsage(),
+          toolCalls: {},
+          completedTurns: 0,
+          turnInProgress: false,
+          liveLog: [],
+          sessionDir: "/tmp/pi-subagent-missing-session-dir-for-test",
+        },
+        makeDetails: (results) => ({
+          mode: "single",
+          delegationMode: "spawn",
+          projectAgentsDir: null,
+          results,
+          aggregatedUsage: emptyUsage(),
+          aggregatedToolCalls: {},
+          usageTree: [],
+        }),
+      });
+    } finally {
+      if (origTimeout === undefined) delete process.env.PI_SUBAGENT_STARTUP_TIMEOUT;
+      else process.env.PI_SUBAGENT_STARTUP_TIMEOUT = origTimeout;
+    }
 
-    assert.equal(result.exitCode, 1);
-    assert.equal(result.stopReason, "error");
-    assert.match(result.stderr, /session directory does not exist/);
+    assert.match(result.stderr, /startup timeout/);
+    assert.doesNotMatch(result.stderr, /session directory does not exist/);
+  });
+
+  test("missing started resume session directory is treated as a fresh run", async () => {
+    const { runAgentSubprocess: runAgent } = await import("../runner.js");
+    const fakeAgent = {
+      name: "fake",
+      description: "fake agent",
+      systemPrompt: "",
+      source: "user" as const,
+      filePath: "/fake/agent.md",
+    };
+
+    const origTimeout = process.env.PI_SUBAGENT_STARTUP_TIMEOUT;
+    process.env.PI_SUBAGENT_STARTUP_TIMEOUT = "1";
+    let result;
+    try {
+      result = await runAgent({
+        cwd: "/tmp",
+        agents: [fakeAgent],
+        agentName: "fake",
+        task: "do something",
+        parentDepth: 0,
+        parentAgentStack: [],
+        maxDepth: 3,
+        preventCycles: false,
+        resumeSession: true,
+        sessionDir: "/tmp/pi-subagent-missing-started-session-dir-for-test",
+        initialResult: {
+          agent: "fake",
+          agentSource: "user",
+          task: "do something",
+          exitCode: -1,
+          messages: [{ role: "assistant", content: [{ type: "text", text: "started" }] } as any],
+          stderr: "",
+          usage: emptyUsage(),
+          toolCalls: {},
+          completedTurns: 1,
+          turnInProgress: false,
+          liveLog: [],
+          sessionDir: "/tmp/pi-subagent-missing-started-session-dir-for-test",
+        },
+        makeDetails: (results) => ({
+          mode: "single",
+          delegationMode: "spawn",
+          projectAgentsDir: null,
+          results,
+          aggregatedUsage: emptyUsage(),
+          aggregatedToolCalls: {},
+          usageTree: [],
+        }),
+      });
+    } finally {
+      if (origTimeout === undefined) delete process.env.PI_SUBAGENT_STARTUP_TIMEOUT;
+      else process.env.PI_SUBAGENT_STARTUP_TIMEOUT = origTimeout;
+    }
+
+    assert.match(result.stderr, /startup timeout/);
+    assert.doesNotMatch(result.stderr, /session directory does not exist/);
   });
 
   test("startup timeout kills a hung process and returns a result", async () => {
