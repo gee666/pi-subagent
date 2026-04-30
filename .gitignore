@@ -1,3 +1,4 @@
 node_modules
 test-agent-dir
 .agent-*.md
+.pi

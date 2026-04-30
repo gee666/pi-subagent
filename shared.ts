@@ -38,6 +38,40 @@ export function parseNonNegativeInt(raw: unknown): number | null {
 	return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
+// ---------------------------------------------------------------------------
+// Object utilities
+// ---------------------------------------------------------------------------
+
+/** Returns true when `value` is a plain (non-array, non-null) object. */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Recursively merge `source` into a deep clone of `target`.
+ *
+ * Rules:
+ * - Plain-object values are merged recursively.
+ * - All other values (primitives, arrays, class instances) from `source`
+ *   overwrite the corresponding key in `target`.
+ * - Keys present only in `target` are preserved unchanged.
+ * - The original `target` and `source` objects are never mutated.
+ */
+export function deepMerge(target: object, source: object): object {
+	const output: Record<string, unknown> = { ...(target as Record<string, unknown>) };
+	for (const [key, srcVal] of Object.entries(source as Record<string, unknown>)) {
+		const tgtVal = (output as Record<string, unknown>)[key];
+		if (isPlainObject(srcVal) && isPlainObject(tgtVal)) {
+			output[key] = deepMerge(tgtVal, srcVal);
+		} else {
+			output[key] = srcVal;
+		}
+	}
+	return output;
+}
+
+// ---------------------------------------------------------------------------
+
 /**
  * Map over items with a bounded number of concurrent async workers.
  * Order of results matches order of input regardless of completion order.

@@ -686,12 +686,20 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       const flushLine = (line: string) => {
         const accepted = processJsonLine(line, result);
         if (accepted) {
-          // An assistant turn (turns > 0) means the API responded and the
-          // agent is actually working.  Permanently disable the startup
-          // timer; from here on only the terminal-stopReason hang guard
-          // applies.  User message echoes don't count — the process could
-          // still be stuck waiting for the API.
-          if (!receivedFirstEvent && result.usage.turns > 0) {
+          // Cancel the startup timer as soon as the subprocess proves it has
+          // reached the LLM-call phase. Two conditions qualify:
+          //   1. A turn has started (turn_start sets turnInProgress=true) —
+          //      the subprocess has initialised, loaded all extensions (including
+          //      MCP adapters), and sent its first request to the LLM.  The LLM
+          //      may now take any amount of time to respond (especially with
+          //      extended thinking enabled) and must NOT be killed by the startup
+          //      timer.
+          //   2. A complete assistant turn has arrived (turns > 0) — the LLM
+          //      already responded; startup trivially succeeded.
+          // User message echoes alone (before turn_start) don't qualify:
+          // the process could still stall before dispatching the LLM call,
+          // e.g. in a hanging before_agent_start extension hook.
+          if (!receivedFirstEvent && (result.usage.turns > 0 || result.turnInProgress)) {
             receivedFirstEvent = true;
             if (startupTimer) { clearTimeout(startupTimer); startupTimer = undefined; }
           }
@@ -708,9 +716,10 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
         }
       };
 
-      // Start the startup timer — if the child process never produces its
-      // first JSON event (hung during init, broken binary, etc.), kill it.
-      // This timer is cancelled permanently once the first event arrives.
+      // Start the startup timer — if the child process never reaches the
+      // LLM-call phase (hung during init, broken binary, slow MCP adapter, etc.),
+      // kill it.  The timer is cancelled permanently on the first turn_start or
+      // completed assistant turn, whichever comes first.
       if (startupTimeoutMs > 0) {
         startupTimer = setTimeout(() => {
           if (resolved || receivedFirstEvent) return;
