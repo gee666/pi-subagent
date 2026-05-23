@@ -14,6 +14,16 @@ import { mapConcurrent } from "../shared.js";
 // Helpers
 // ---------------------------------------------------------------------------
 
+function hungPiMockOptions(timeoutMs = 50) {
+  return {
+    startupTimeoutMsOverride: timeoutMs,
+    piCommandOverride: {
+      command: process.execPath,
+      argsPrefix: ["-e", "setInterval(() => {}, 1000)", "--"],
+    },
+  };
+}
+
 function makeResult(overrides: Partial<SingleResult> = {}): SingleResult {
   return {
     agent: "test-agent",
@@ -312,49 +322,42 @@ describe("runAgent resilience", () => {
       filePath: "/fake/agent.md",
     };
 
-    const origTimeout = process.env.PI_SUBAGENT_STARTUP_TIMEOUT;
-    process.env.PI_SUBAGENT_STARTUP_TIMEOUT = "1";
-    let result;
-    try {
-      result = await runAgent({
-        cwd: "/tmp",
-        agents: [fakeAgent],
-        agentName: "fake",
+    const result = await runAgent({
+      ...hungPiMockOptions(),
+      cwd: "/tmp",
+      agents: [fakeAgent],
+      agentName: "fake",
+      task: "do something",
+      parentDepth: 0,
+      parentAgentStack: [],
+      maxDepth: 3,
+      preventCycles: false,
+      resumeSession: true,
+      sessionDir: "/tmp/pi-subagent-missing-session-dir-for-test",
+      initialResult: {
+        agent: "fake",
+        agentSource: "user",
         task: "do something",
-        parentDepth: 0,
-        parentAgentStack: [],
-        maxDepth: 3,
-        preventCycles: false,
-        resumeSession: true,
+        exitCode: -1,
+        messages: [],
+        stderr: "",
+        usage: emptyUsage(),
+        toolCalls: {},
+        completedTurns: 0,
+        turnInProgress: false,
+        liveLog: [],
         sessionDir: "/tmp/pi-subagent-missing-session-dir-for-test",
-        initialResult: {
-          agent: "fake",
-          agentSource: "user",
-          task: "do something",
-          exitCode: -1,
-          messages: [],
-          stderr: "",
-          usage: emptyUsage(),
-          toolCalls: {},
-          completedTurns: 0,
-          turnInProgress: false,
-          liveLog: [],
-          sessionDir: "/tmp/pi-subagent-missing-session-dir-for-test",
-        },
-        makeDetails: (results) => ({
-          mode: "single",
-          delegationMode: "spawn",
-          projectAgentsDir: null,
-          results,
-          aggregatedUsage: emptyUsage(),
-          aggregatedToolCalls: {},
-          usageTree: [],
-        }),
-      });
-    } finally {
-      if (origTimeout === undefined) delete process.env.PI_SUBAGENT_STARTUP_TIMEOUT;
-      else process.env.PI_SUBAGENT_STARTUP_TIMEOUT = origTimeout;
-    }
+      },
+      makeDetails: (results) => ({
+        mode: "single",
+        delegationMode: "spawn",
+        projectAgentsDir: null,
+        results,
+        aggregatedUsage: emptyUsage(),
+        aggregatedToolCalls: {},
+        usageTree: [],
+      }),
+    });
 
     assert.match(result.stderr, /startup timeout/);
     assert.doesNotMatch(result.stderr, /session directory does not exist/);
@@ -370,49 +373,42 @@ describe("runAgent resilience", () => {
       filePath: "/fake/agent.md",
     };
 
-    const origTimeout = process.env.PI_SUBAGENT_STARTUP_TIMEOUT;
-    process.env.PI_SUBAGENT_STARTUP_TIMEOUT = "1";
-    let result;
-    try {
-      result = await runAgent({
-        cwd: "/tmp",
-        agents: [fakeAgent],
-        agentName: "fake",
+    const result = await runAgent({
+      ...hungPiMockOptions(),
+      cwd: "/tmp",
+      agents: [fakeAgent],
+      agentName: "fake",
+      task: "do something",
+      parentDepth: 0,
+      parentAgentStack: [],
+      maxDepth: 3,
+      preventCycles: false,
+      resumeSession: true,
+      sessionDir: "/tmp/pi-subagent-missing-started-session-dir-for-test",
+      initialResult: {
+        agent: "fake",
+        agentSource: "user",
         task: "do something",
-        parentDepth: 0,
-        parentAgentStack: [],
-        maxDepth: 3,
-        preventCycles: false,
-        resumeSession: true,
+        exitCode: -1,
+        messages: [{ role: "assistant", content: [{ type: "text", text: "started" }] } as any],
+        stderr: "",
+        usage: emptyUsage(),
+        toolCalls: {},
+        completedTurns: 1,
+        turnInProgress: false,
+        liveLog: [],
         sessionDir: "/tmp/pi-subagent-missing-started-session-dir-for-test",
-        initialResult: {
-          agent: "fake",
-          agentSource: "user",
-          task: "do something",
-          exitCode: -1,
-          messages: [{ role: "assistant", content: [{ type: "text", text: "started" }] } as any],
-          stderr: "",
-          usage: emptyUsage(),
-          toolCalls: {},
-          completedTurns: 1,
-          turnInProgress: false,
-          liveLog: [],
-          sessionDir: "/tmp/pi-subagent-missing-started-session-dir-for-test",
-        },
-        makeDetails: (results) => ({
-          mode: "single",
-          delegationMode: "spawn",
-          projectAgentsDir: null,
-          results,
-          aggregatedUsage: emptyUsage(),
-          aggregatedToolCalls: {},
-          usageTree: [],
-        }),
-      });
-    } finally {
-      if (origTimeout === undefined) delete process.env.PI_SUBAGENT_STARTUP_TIMEOUT;
-      else process.env.PI_SUBAGENT_STARTUP_TIMEOUT = origTimeout;
-    }
+      },
+      makeDetails: (results) => ({
+        mode: "single",
+        delegationMode: "spawn",
+        projectAgentsDir: null,
+        results,
+        aggregatedUsage: emptyUsage(),
+        aggregatedToolCalls: {},
+        usageTree: [],
+      }),
+    });
 
     assert.match(result.stderr, /startup timeout/);
     assert.doesNotMatch(result.stderr, /session directory does not exist/);
@@ -421,7 +417,6 @@ describe("runAgent resilience", () => {
   test("startup timeout kills a hung process and returns a result", async () => {
     const { runAgentSubprocess: runAgent } = await import("../runner.js");
 
-    // Use a fake agent
     const fakeAgent = {
       name: "fake",
       description: "fake agent",
@@ -430,39 +425,27 @@ describe("runAgent resilience", () => {
       filePath: "/fake/agent.md",
     };
 
-    // Use a short startup timeout so the extension kills the hung
-    // process itself — no external abort needed.
-    const origTimeout = process.env.PI_SUBAGENT_STARTUP_TIMEOUT;
-    process.env.PI_SUBAGENT_STARTUP_TIMEOUT = "3000";
+    const result = await runAgent({
+      ...hungPiMockOptions(),
+      cwd: "/tmp",
+      agents: [fakeAgent],
+      agentName: "fake",
+      task: "do something",
+      parentDepth: 0,
+      parentAgentStack: [],
+      maxDepth: 3,
+      preventCycles: false,
+      makeDetails: (results) => ({
+        mode: "single",
+        delegationMode: "spawn",
+        projectAgentsDir: null,
+        results,
+        aggregatedUsage: emptyUsage(),
+        aggregatedToolCalls: {},
+        usageTree: [],
+      }),
+    });
 
-    let result;
-    try {
-      result = await runAgent({
-        cwd: "/tmp",
-        agents: [fakeAgent],
-        agentName: "fake",
-        task: "do something",
-        parentDepth: 0,
-        parentAgentStack: [],
-        maxDepth: 3,
-        preventCycles: false,
-        makeDetails: (results) => ({
-          mode: "single",
-          delegationMode: "spawn",
-          projectAgentsDir: null,
-          results,
-          aggregatedUsage: emptyUsage(),
-          aggregatedToolCalls: {},
-          usageTree: [],
-        }),
-      });
-    } finally {
-      if (origTimeout === undefined) delete process.env.PI_SUBAGENT_STARTUP_TIMEOUT;
-      else process.env.PI_SUBAGENT_STARTUP_TIMEOUT = origTimeout;
-    }
-
-    // The extension must have killed the process and returned a valid
-    // SingleResult (not hung forever).
     assert.ok(typeof result.exitCode === "number");
     assert.ok(typeof result.stderr === "string");
     assert.ok(Array.isArray(result.messages));

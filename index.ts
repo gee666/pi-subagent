@@ -457,6 +457,7 @@ function getRestorableModel(ctx: any): any | undefined {
 export default function (pi: ExtensionAPI) {
   let resumeModelRegistry: any | undefined;
   let lastRestorableModel: any | undefined;
+  let latestSessionCtx: any | undefined;
   let pendingInteractiveResumePrompt: string | null = null;
 
   async function streamWithRealModelFallback(context: any, options: any, fallback: any) {
@@ -472,6 +473,20 @@ export default function (pi: ExtensionAPI) {
       apiKey: auth.apiKey,
       headers: auth.headers,
     });
+  }
+
+  async function restoreVisibleModelForResume(): Promise<any | undefined> {
+    const restore = modelToRestoreAfterResume ?? lastRestorableModel;
+    if (!restore) return undefined;
+    lastRestorableModel = restore;
+    if (latestSessionCtx?.model?.provider === RESUME_PROVIDER) {
+      try {
+        await pi.setModel(restore);
+      } catch (err) {
+        console.error("[pi-subagent] Failed to restore real model during resume:", err);
+      }
+    }
+    return restore;
   }
 
   pi.registerFlag("subagent-max-depth", {
@@ -491,7 +506,12 @@ export default function (pi: ExtensionAPI) {
     streamSimple: async (model, context, options) => {
       const stream = createAssistantMessageEventStream();
       const state = getSyntheticResumeState();
-      const plan = state.plan;
+      const discoveredPlan = state.plan ?? pendingResumePlan ?? (latestSessionCtx ? findLatestResumableSubagentCall(latestSessionCtx) : null);
+      if (discoveredPlan && !state.plan) {
+        state.plan = discoveredPlan;
+        pendingResumePlan = discoveredPlan;
+      }
+      const plan = discoveredPlan;
       const phase = state.phase;
       const triggerMatches =
         state.trigger === "nextRequest" ||
@@ -524,12 +544,14 @@ export default function (pi: ExtensionAPI) {
         return stream;
       }
 
-      if (phase === "final" && modelToRestoreAfterResume) {
-        const delegated = await streamWithRealModelFallback(context, options, modelToRestoreAfterResume);
+      if (phase === "final") {
+        const restore = await restoreVisibleModelForResume();
+        const delegated = await streamWithRealModelFallback(context, options, restore);
         if (delegated) return delegated;
       }
 
-      const fallback = await streamWithRealModelFallback(context, options, lastRestorableModel);
+      const restore = await restoreVisibleModelForResume();
+      const fallback = await streamWithRealModelFallback(context, options, restore ?? lastRestorableModel);
       if (fallback) return fallback;
 
       if (!(plan && phase === "tool")) {
@@ -603,6 +625,7 @@ export default function (pi: ExtensionAPI) {
 
   // Auto-discover agents on session start
   pi.on("session_start", async (event, ctx) => {
+    latestSessionCtx = ctx;
     try {
       // Always repair sessions left on the synthetic resume model, even in
       // nested subagents that can no longer delegate. Those leaf processes
@@ -917,7 +940,11 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
               resumePlan?.details?.results[0],
               getSessionDirForTask(resumePlan?.previousToolCallId ?? toolCallId, 0),
               !!resumePlan,
-              formatModelFlag(modelToRestoreAfterResume),
+              // Prefer the pre-resume model (during resume) or the current
+              // active model (normal runs). This prevents children from
+              // defaulting to whatever settings.json says at spawn time, which
+              // can change while the parent session is long-running.
+              formatModelFlag(modelToRestoreAfterResume ?? lastRestorableModel),
             );
           }
 
@@ -931,7 +958,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
             resumePlan?.details?.results,
             (index) => getSessionDirForTask(resumePlan?.previousToolCallId ?? toolCallId, index),
             !!resumePlan,
-            formatModelFlag(modelToRestoreAfterResume),
+            formatModelFlag(modelToRestoreAfterResume ?? lastRestorableModel),
           );
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);

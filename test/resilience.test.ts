@@ -13,6 +13,16 @@ import { processJsonLine } from "../runner.js";
 // Helpers
 // ---------------------------------------------------------------------------
 
+function hungPiMockOptions(timeoutMs = 50) {
+  return {
+    startupTimeoutMsOverride: timeoutMs,
+    piCommandOverride: {
+      command: process.execPath,
+      argsPrefix: ["-e", "setInterval(() => {}, 1000)", "--"],
+    },
+  };
+}
+
 function makeResult(overrides: Partial<SingleResult> = {}): SingleResult {
   return {
     agent: "agent",
@@ -91,28 +101,19 @@ describe("runAgent: catch block covers spawn errors", async () => {
       filePath: "/fake/path.md",
     };
 
-    // Use a short startup timeout so the extension itself kills the
-    // hung process — not an external abort signal.
-    const origTimeout = process.env.PI_SUBAGENT_STARTUP_TIMEOUT;
-    process.env.PI_SUBAGENT_STARTUP_TIMEOUT = "3000"; // 3 seconds
-
-    let result: SingleResult;
-    try {
-      result = await runAgent({
-        cwd: "/tmp",
-        agents: [fakeAgent],
-        agentName: "fake-agent",
-        task: specialTask,
-        parentDepth: 0,
-        parentAgentStack: [],
-        maxDepth: 3,
-        preventCycles: false,
-        makeDetails: (results) => buildSubagentDetails("single", "spawn", null, results),
-      });
-    } finally {
-      if (origTimeout === undefined) delete process.env.PI_SUBAGENT_STARTUP_TIMEOUT;
-      else process.env.PI_SUBAGENT_STARTUP_TIMEOUT = origTimeout;
-    }
+    // Use a short startup timeout with a deterministic hung child process.
+    const result: SingleResult = await runAgent({
+      ...hungPiMockOptions(),
+      cwd: "/tmp",
+      agents: [fakeAgent],
+      agentName: "fake-agent",
+      task: specialTask,
+      parentDepth: 0,
+      parentAgentStack: [],
+      maxDepth: 3,
+      preventCycles: false,
+      makeDetails: (results) => buildSubagentDetails("single", "spawn", null, results),
+    });
 
     // The extension must have killed the process and returned a result
     // (not hung forever). Verify it's a valid SingleResult.
@@ -137,26 +138,18 @@ describe("runAgent: catch block covers spawn errors", async () => {
       filePath: "/fake/path.md",
     };
 
-    const origTimeout = process.env.PI_SUBAGENT_STARTUP_TIMEOUT;
-    process.env.PI_SUBAGENT_STARTUP_TIMEOUT = "3000";
-
-    let result: SingleResult;
-    try {
-      result = await runAgent({
-        cwd: "/tmp",
-        agents: [fakeAgent],
-        agentName: "fake-agent",
-        task: taskWithNewlines,
-        parentDepth: 0,
-        parentAgentStack: [],
-        maxDepth: 3,
-        preventCycles: false,
-        makeDetails: (results) => buildSubagentDetails("single", "spawn", null, results),
-      });
-    } finally {
-      if (origTimeout === undefined) delete process.env.PI_SUBAGENT_STARTUP_TIMEOUT;
-      else process.env.PI_SUBAGENT_STARTUP_TIMEOUT = origTimeout;
-    }
+    const result: SingleResult = await runAgent({
+      ...hungPiMockOptions(),
+      cwd: "/tmp",
+      agents: [fakeAgent],
+      agentName: "fake-agent",
+      task: taskWithNewlines,
+      parentDepth: 0,
+      parentAgentStack: [],
+      maxDepth: 3,
+      preventCycles: false,
+      makeDetails: (results) => buildSubagentDetails("single", "spawn", null, results),
+    });
 
     assert.ok(result! !== undefined);
     assert.ok(typeof result!.exitCode === "number");

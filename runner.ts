@@ -38,6 +38,8 @@ const SIGKILL_TIMEOUT_MS = 5000;
 const HANG_GUARD_DELAY_MS = 5000;
 const DEFAULT_STARTUP_TIMEOUT_MS = 120_000; // only for startup (before first assistant turn)
 const SUBAGENT_STARTUP_TIMEOUT_ENV = "PI_SUBAGENT_STARTUP_TIMEOUT";
+const SUBAGENT_PI_COMMAND_ENV = "PI_SUBAGENT_PI_COMMAND";
+const SUBAGENT_PI_ARGS_PREFIX_ENV = "PI_SUBAGENT_PI_ARGS_PREFIX";
 
 /**
  * Stop reasons that indicate the agent has truly finished its work.
@@ -108,6 +110,53 @@ function getCurrentPiCliScript(): string | null {
   }
 
   return script;
+}
+
+function findPiCliScriptOnPath(): string | null {
+  const pathEnv = process.env.PATH ?? "";
+  for (const dir of pathEnv.split(path.delimiter)) {
+    if (!dir) continue;
+    for (const shimName of process.platform === "win32" ? ["pi.cmd", "pi"] : ["pi"]) {
+      const shimPath = path.join(dir, shimName);
+      if (!fs.existsSync(shimPath)) continue;
+      let text = "";
+      try {
+        text = fs.readFileSync(shimPath, "utf8");
+      } catch {
+        continue;
+      }
+      const match = text.match(/node_modules[\\/]([^\s"']*pi-coding-agent)[\\/]dist[\\/]cli\.js/);
+      if (!match) continue;
+      const cliPath = path.join(dir, "node_modules", match[1], "dist", "cli.js");
+      if (fs.existsSync(cliPath)) return cliPath;
+    }
+  }
+  return null;
+}
+
+function getPiSpawnCommand(override?: { command: string; argsPrefix?: string[] }): { command: string; argsPrefix: string[] } {
+  if (override?.command) return { command: override.command, argsPrefix: override.argsPrefix ?? [] };
+
+  const overrideCommand = process.env[SUBAGENT_PI_COMMAND_ENV];
+  if (overrideCommand) {
+    let argsPrefix: string[] = [];
+    const rawPrefix = process.env[SUBAGENT_PI_ARGS_PREFIX_ENV];
+    if (rawPrefix) {
+      try {
+        const parsed = JSON.parse(rawPrefix);
+        if (Array.isArray(parsed) && parsed.every((value) => typeof value === "string")) {
+          argsPrefix = parsed;
+        }
+      } catch {
+        // Ignore invalid test/debug override and run the command without a prefix.
+      }
+    }
+    return { command: overrideCommand, argsPrefix };
+  }
+
+  const cliScript = getCurrentPiCliScript() ?? findPiCliScriptOnPath();
+  if (cliScript) return { command: process.execPath, argsPrefix: [cliScript] };
+  return { command: "pi", argsPrefix: [] };
 }
 
 function resolveExtensionArg(value: string): string {
@@ -498,6 +547,10 @@ export interface RunAgentOptions {
   initialResult?: SingleResult;
   /** Fallback model to use when the agent config does not pin one. */
   fallbackModel?: string;
+  /** Test/debug override for the spawned pi executable. */
+  piCommandOverride?: { command: string; argsPrefix?: string[] };
+  /** Test/debug override for startup timeout. */
+  startupTimeoutMsOverride?: number;
 }
 
 /**
@@ -524,6 +577,8 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
     resumeSession = false,
     initialResult,
     fallbackModel,
+    piCommandOverride,
+    startupTimeoutMsOverride,
   } = opts;
 
   const agent = agents.find((a) => a.name === agentName);
@@ -606,9 +661,9 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       // but shell:true splits arguments on whitespace — breaking task strings.
       // Fix: reuse the running node binary + the pi CLI script path directly,
       // so the child is spawned without a shell and args are passed safely.
-      const currentPiCli = getCurrentPiCliScript();
-      const spawnCmd = currentPiCli ? process.execPath : "pi";
-      const spawnArgs = currentPiCli ? [currentPiCli, ...piArgs] : piArgs;
+      const piSpawn = getPiSpawnCommand(piCommandOverride);
+      const spawnCmd = piSpawn.command;
+      const spawnArgs = [...piSpawn.argsPrefix, ...piArgs];
       const proc = spawn(spawnCmd, spawnArgs, {
         cwd: taskCwd ?? cwd,
         shell: false,
@@ -636,6 +691,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       // disabled — from that point, tool calls can run for as long as they
       // need, and only the terminal-stopReason hang guard applies.
       const startupTimeoutMs = (() => {
+        if (startupTimeoutMsOverride !== undefined) return startupTimeoutMsOverride;
         const raw = process.env[SUBAGENT_STARTUP_TIMEOUT_ENV];
         if (raw === undefined) return DEFAULT_STARTUP_TIMEOUT_MS;
         const parsed = parseNonNegativeInt(raw);
