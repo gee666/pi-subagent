@@ -1,6 +1,6 @@
 import * as path from "node:path";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { parseBoolean } from "./shared.js";
+import { parseBoolean, RESUME_PROVIDER } from "./shared.js";
 import { isResultError, isSubagentDetails, type SingleResult, type SubagentDetails } from "./types.js";
 
 export const SUBAGENT_RESUME_PROMPT_ENV = "PI_SUBAGENT_RESUME_PROMPT";
@@ -82,11 +82,17 @@ function hasUnfinishedResults(details: SubagentDetails | undefined, expectedTask
   return details.results.slice(0, expectedTaskCount).some((result) => result.exitCode === -1 || isResultError(result));
 }
 
-function messageHasNonEmptyText(message: any): boolean {
+function getMessageText(message: any): string {
   const content = message?.content;
-  if (typeof content === "string") return content.trim().length > 0;
-  if (!Array.isArray(content)) return false;
-  return content.some((part) => part?.type === "text" && typeof part.text === "string" && part.text.trim().length > 0);
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) => (part?.type === "text" && typeof part.text === "string" ? part.text : ""))
+    .join("");
+}
+
+function messageHasNonEmptyText(message: any): boolean {
+  return getMessageText(message).trim().length > 0;
 }
 
 function messageHasToolCall(message: any): boolean {
@@ -114,9 +120,55 @@ function isIgnorableTrailingAbortMessage(entry: any): boolean {
   return false;
 }
 
+function isResumePromptEntry(entry: any): boolean {
+  if (entry?.type !== "message") return false;
+  const message = entry.message;
+  if (message?.role !== "user") return false;
+  return /^Resuming \d+ subagents\.\.\.$/.test(getMessageText(message).trim());
+}
+
+function isSyntheticResumeModelChange(entry: any): boolean {
+  return entry?.type === "model_change" && entry.provider === RESUME_PROVIDER;
+}
+
+function isFailedResumeAttemptTail(entries: SessionEntry[], start: number): boolean {
+  if (start >= entries.length) return true;
+
+  let sawSyntheticModel = false;
+  let sawResumePrompt = false;
+  let sawFailure = false;
+
+  for (let i = start; i < entries.length; i++) {
+    const entry: any = entries[i];
+
+    if (isSyntheticResumeModelChange(entry)) {
+      sawSyntheticModel = true;
+      continue;
+    }
+
+    if (entry?.type === "thinking_level_change") continue;
+
+    if (isResumePromptEntry(entry)) {
+      if (!sawSyntheticModel) return false;
+      sawResumePrompt = true;
+      continue;
+    }
+
+    if (isIgnorableTrailingAbortMessage(entry)) {
+      if (entry?.type === "message" && sawResumePrompt) sawFailure = true;
+      continue;
+    }
+
+    return false;
+  }
+
+  return sawSyntheticModel && sawResumePrompt && sawFailure;
+}
+
 function hasOnlyIgnorableTrailingEntries(entries: SessionEntry[], activityOrder: number): boolean {
-  for (let i = activityOrder + 1; i < entries.length; i++) {
-    if (!isIgnorableTrailingAbortMessage(entries[i])) return false;
+  const start = activityOrder + 1;
+  for (let i = start; i < entries.length; i++) {
+    if (!isIgnorableTrailingAbortMessage(entries[i])) return isFailedResumeAttemptTail(entries, start);
   }
   return true;
 }

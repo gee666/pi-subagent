@@ -116,6 +116,37 @@ function userText(text: string): any {
   );
 }
 
+function modelChange(provider: string, modelId: string): any {
+  return {
+    type: "model_change",
+    id: `model-${provider}-${modelId}`,
+    parentId: null,
+    timestamp: new Date().toISOString(),
+    provider,
+    modelId,
+  };
+}
+
+function thinkingLevelChange(): any {
+  return {
+    type: "thinking_level_change",
+    id: "thinking-change",
+    parentId: null,
+    timestamp: new Date().toISOString(),
+    thinkingLevel: "medium",
+  };
+}
+
+function failedSyntheticResumeTail(): any[] {
+  return [
+    modelChange("pi-subagent-resume", "synthetic-tool-call"),
+    thinkingLevelChange(),
+    userText("Resuming 2 subagents..."),
+    trailingAbortedAssistant(),
+    modelChange("anthropic", "claude-sonnet-4-6"),
+  ];
+}
+
 function makeCtx(entries: any[]): any {
   return {
     sessionManager: {
@@ -165,6 +196,28 @@ describe("findLatestResumableSubagentCall", () => {
       assistantSubagentCall(),
       subagentToolResult(),
       userText("Never mind, do something else."),
+    ]));
+
+    assert.equal(plan, null);
+  });
+
+  test("ignores a failed synthetic resume attempt tail and resumes the previous unfinished subagent", () => {
+    const plan = findLatestResumableSubagentCall(makeCtx([
+      assistantSubagentCall(),
+      subagentToolResult(),
+      ...failedSyntheticResumeTail(),
+    ]));
+
+    assert.ok(plan);
+    assert.equal(plan.previousToolCallId, "call-subagent");
+  });
+
+  test("does not ignore a failed synthetic resume attempt if real user input follows it", () => {
+    const plan = findLatestResumableSubagentCall(makeCtx([
+      assistantSubagentCall(),
+      subagentToolResult(),
+      ...failedSyntheticResumeTail(),
+      userText("Actually do something else."),
     ]));
 
     assert.equal(plan, null);
