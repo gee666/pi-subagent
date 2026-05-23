@@ -513,7 +513,7 @@ function buildPiArgs(
 // ---------------------------------------------------------------------------
 
 export interface RunAgentOptions {
-  /** Fallback working directory when the task doesn't specify one. */
+  /** Working directory inherited by every subagent process. */
   cwd: string;
   /** All available agent configs. */
   agents: AgentConfig[];
@@ -521,8 +521,6 @@ export interface RunAgentOptions {
   agentName: string;
   /** Task description. */
   task: string;
-  /** Optional override working directory. */
-  taskCwd?: string;
   /** Current delegation depth of the caller process. */
   parentDepth: number;
   /** Delegation stack from the caller process (ancestor agent names). */
@@ -564,7 +562,6 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
     agents,
     agentName,
     task,
-    taskCwd,
     parentDepth,
     parentAgentStack,
     maxDepth,
@@ -665,7 +662,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       const spawnCmd = piSpawn.command;
       const spawnArgs = [...piSpawn.argsPrefix, ...piArgs];
       const proc = spawn(spawnCmd, spawnArgs, {
-        cwd: taskCwd ?? cwd,
+        cwd,
         shell: false,
         stdio: ["ignore", "pipe", "pipe"],
         env: {
@@ -877,7 +874,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
 
 
 export async function executeParallelSubprocess(
-  tasks: Array<{ agent: string; task: string; cwd?: string }>,
+  tasks: Array<{ agent: string; task: string }>,
   agents: AgentConfig[],
   defaultCwd: string,
   parentDepth: number,
@@ -888,7 +885,7 @@ export async function executeParallelSubprocess(
   onUpdate: OnUpdateCallback | undefined,
   makeDetails: (results: SingleResult[]) => SubagentDetails,
   resumeResults?: SingleResult[],
-  getSessionDir?: (index: number, task: { agent: string; task: string; cwd?: string }) => string | undefined,
+  getSessionDir?: (index: number, task: { agent: string; task: string }) => string | undefined,
   resumeExistingSessions = false,
   sessionRoot?: string,
   fallbackModel?: string,
@@ -983,7 +980,6 @@ export async function executeParallelSubprocess(
         agents,
         agentName: t.agent,
         task: t.task,
-        taskCwd: t.cwd,
         parentDepth,
         parentAgentStack,
         maxDepth,

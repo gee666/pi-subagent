@@ -11,7 +11,7 @@ type SessionEntry = ReturnType<ExtensionContext["sessionManager"]["getEntries"]>
 
 export interface ResumableSubagentCall {
   previousToolCallId: string;
-  tasks: Array<{ agent: string; task: string; cwd?: string }>;
+  tasks: Array<{ agent: string; task: string }>;
   details?: SubagentDetails;
 }
 
@@ -61,16 +61,15 @@ function getSubagentToolCalls(message: any): Array<{ id: string; args: any }> {
   return calls;
 }
 
-function normalizeTasks(args: any): Array<{ agent: string; task: string; cwd?: string }> | null {
+function normalizeTasks(args: any): Array<{ agent: string; task: string }> | null {
   const rawTasks = args?.tasks;
   if (!Array.isArray(rawTasks) || rawTasks.length === 0) return null;
-  const tasks: Array<{ agent: string; task: string; cwd?: string }> = [];
+  const tasks: Array<{ agent: string; task: string }> = [];
   for (const task of rawTasks) {
     if (typeof task?.agent !== "string" || typeof task?.task !== "string") return null;
     tasks.push({
       agent: task.agent,
       task: task.task,
-      ...(typeof task.cwd === "string" ? { cwd: task.cwd } : {}),
     });
   }
   return tasks;
@@ -175,7 +174,7 @@ function hasOnlyIgnorableTrailingEntries(entries: SessionEntry[], activityOrder:
 
 export function findLatestResumableSubagentCall(ctx: ExtensionContext): ResumableSubagentCall | null {
   const entries = branchEntries(ctx);
-  const calls = new Map<string, { tasks: Array<{ agent: string; task: string; cwd?: string }>; order: number }>();
+  const calls = new Map<string, { tasks: Array<{ agent: string; task: string }>; order: number }>();
   const results = new Map<string, { details?: SubagentDetails; isError: boolean; order: number }>();
 
   entries.forEach((entry: any, order) => {
@@ -213,13 +212,13 @@ export function findLatestResumableSubagentCall(ctx: ExtensionContext): Resumabl
 }
 
 export function sameTasks(
-  a: Array<{ agent: string; task: string; cwd?: string }>,
-  b: Array<{ agent: string; task: string; cwd?: string }>,
+  a: Array<{ agent: string; task: string }>,
+  b: Array<{ agent: string; task: string }>,
 ): boolean {
   if (a.length !== b.length) return false;
   return a.every((task, index) => {
     const other = b[index];
-    return task.agent === other.agent && task.task === other.task && (task.cwd ?? undefined) === (other.cwd ?? undefined);
+    return task.agent === other.agent && task.task === other.task;
   });
 }
 

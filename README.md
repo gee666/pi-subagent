@@ -51,7 +51,7 @@ Multiple tasks run in parallel:
 }
 ```
 
-Each task supports `agent`, `task`, and optional `cwd`.
+Each task supports `agent` and `task`.
 
 ## Bundled Agents
 

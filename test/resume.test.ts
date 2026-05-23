@@ -29,7 +29,7 @@ function makeResult(overrides: Partial<SingleResult> = {}): SingleResult {
 
 const tasks = [
   { agent: "worker", task: "do work" },
-  { agent: "reviewer", task: "review work", cwd: "/tmp/project" },
+  { agent: "reviewer", task: "review work" },
 ];
 
 function messageEntry(message: any, id: string): any {
@@ -322,8 +322,8 @@ describe("subagent session root", () => {
 });
 
 describe("sameTasks", () => {
-  test("matches exact task configuration including cwd", () => {
+  test("matches exact task configuration", () => {
     assert.equal(sameTasks(tasks, [...tasks]), true);
-    assert.equal(sameTasks(tasks, tasks.map(({ agent, task }) => ({ agent, task }))), false);
+    assert.equal(sameTasks(tasks, tasks.map(({ agent }) => ({ agent, task: "different" }))), false);
   });
 });

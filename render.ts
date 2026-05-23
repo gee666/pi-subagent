@@ -44,7 +44,7 @@ interface TreeCounts {
 
 interface PendingSubagentCall {
 	toolCallId: string;
-	tasks: Array<{ agent: string; task?: string; cwd?: string }>;
+	tasks: Array<{ agent: string; task?: string }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -151,7 +151,6 @@ function extractPendingSubagentCalls(messages: SingleResult["messages"]): Pendin
 						.map((task: any) => ({
 							agent: task.agent,
 							task: typeof task.task === "string" ? task.task : undefined,
-							cwd: typeof task.cwd === "string" ? task.cwd : undefined,
 						}))
 				: [];
 			calls.push({
@@ -182,7 +181,7 @@ function buildNodesFromNestedResult(nested: NestedSubagentResult): TreeNode[] {
 }
 
 function subagentCallSignature(call: PendingSubagentCall): string {
-	return JSON.stringify(call.tasks.map((task) => ({ agent: task.agent, task: task.task ?? "", cwd: task.cwd ?? "" })));
+	return JSON.stringify(call.tasks.map((task) => ({ agent: task.agent, task: task.task ?? "" })));
 }
 
 function nestedResultIsHealthy(nested: NestedSubagentResult | undefined): boolean {

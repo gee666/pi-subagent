@@ -76,10 +76,7 @@ const TaskItem = Type.Object({
     description:
       "Task description for this delegated run. Include all required context; the subagent receives only this prompt.",
   }),
-  cwd: Type.Optional(
-    Type.String({ description: "Working directory for this agent's process" }),
-  ),
-});
+}, { additionalProperties: false });
 
 const SubagentParams = Type.Object({
   tasks: Type.Array(TaskItem, {
@@ -87,7 +84,7 @@ const SubagentParams = Type.Object({
     description:
       "Array of {agent, task} objects. One task behaves like a single-agent delegation; multiple tasks run concurrently.",
   }),
-});
+}, { additionalProperties: false });
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -937,7 +934,6 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
             return executeSingle(
               task.agent,
               task.task,
-              task.cwd,
               agents,
               ctx.cwd,
               signal,
@@ -998,7 +994,6 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
   async function executeSingle(
     agentName: string,
     task: string,
-    cwd: string | undefined,
     agents: AgentConfig[],
     defaultCwd: string,
     signal: AbortSignal | undefined,
@@ -1026,7 +1021,6 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
       agents,
       agentName,
       task,
-      taskCwd: cwd,
       parentDepth: currentDepth,
       parentAgentStack: ancestorAgentStack,
       maxDepth,
@@ -1070,7 +1064,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
   }
 
   async function executeParallel(
-    tasks: Array<{ agent: string; task: string; cwd?: string }>,
+    tasks: Array<{ agent: string; task: string }>,
     agents: AgentConfig[],
     defaultCwd: string,
     signal: AbortSignal | undefined,
