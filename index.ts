@@ -540,6 +540,12 @@ export default function (pi: ExtensionAPI) {
           stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: message });
           stream.push({ type: "done", reason: "toolUse", message });
           stream.end(message);
+
+          // The synthetic provider's only job is to inject the resumed subagent
+          // tool call. Restore the real model immediately after that handoff so
+          // the TUI does not appear stuck on `pi-subagent-resume` while the
+          // subagent tool execution is still running.
+          void restoreVisibleModelForResume();
         });
         return stream;
       }
