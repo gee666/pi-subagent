@@ -20,6 +20,12 @@ import {
 
 const OUTPUT_PREVIEW_LINE_COUNT = 6;
 
+let broadcastNumberingActive = false;
+
+export function setBroadcastNumberingActive(active: boolean): void {
+	broadcastNumberingActive = active;
+}
+
 type ThemeFg = (color: string, text: string) => string;
 type NodeStatus = "running" | "success" | "error";
 
@@ -351,12 +357,15 @@ function renderTreeLines(
 	theme: { fg: ThemeFg },
 	showOutputPreview: boolean,
 	depth = 0,
+	prefix = "",
 ): string[] {
 	const lines: string[] = [];
 
-	for (const node of nodes) {
+	nodes.forEach((node, index) => {
 		const indent = "  ".repeat(depth);
-		let line = `${indent}${statusEmoji(node.status, theme)} ${theme.fg("accent", node.label)}`;
+		const number = prefix ? `${prefix}.${index + 1}` : `${index + 1}`;
+		const numberPrefix = broadcastNumberingActive ? `${number}. ` : "";
+		let line = `${indent}${numberPrefix}${statusEmoji(node.status, theme)} ${theme.fg("accent", node.label)}`;
 		if (node.meta) line += ` ${theme.fg("dim", node.meta)}`;
 		lines.push(line);
 
@@ -373,9 +382,9 @@ function renderTreeLines(
 		}
 
 		if (node.children.length > 0) {
-			lines.push(...renderTreeLines(node.children, theme, false, depth + 1));
+			lines.push(...renderTreeLines(node.children, theme, false, depth + 1, number));
 		}
-	}
+	});
 
 	return lines;
 }

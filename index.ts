@@ -15,8 +15,8 @@ import {
 } from "@mariozechner/pi-ai";
 import { Type } from "@sinclair/typebox";
 import { type AgentConfig, discoverAgents } from "./agents.js";
-import { renderCall, renderResult } from "./render.js";
-import { runAgentSubprocess, executeParallelSubprocess } from "./runner.js";
+import { renderCall, renderResult, setBroadcastNumberingActive } from "./render.js";
+import { runAgentSubprocess, executeParallelSubprocess, type RunningSubagentHandle } from "./runner.js";
 import {
   SUBAGENT_RESUME_DISABLE_ENV,
   SUBAGENT_RESUME_PROMPT_ENV,
@@ -45,7 +45,9 @@ import {
   DEFAULT_DELEGATION_MODE,
   buildSubagentDetails,
   getFinalOutput,
+  getNestedSubagentResults,
   isResultError,
+  isSubagentDetails,
 } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -610,6 +612,286 @@ export default function (pi: ExtensionAPI) {
   let pendingResumePlan: ResumableSubagentCall | null = null;
   let modelToRestoreAfterResume: any | undefined;
   const approvedProjectAgentDirsForSession = new Set<string>();
+  const activeSubagents = new Map<number, { agent: string; task: string; handle: RunningSubagentHandle }>();
+  const latestBroadcastTargets = {
+    all: [] as BroadcastTarget[],
+    youngest: [] as BroadcastTarget[],
+  };
+  let nextActiveSubagentId = 1;
+
+  const BROADCAST_STEER_PREFIX = "__PI_SUBAGENT_BROADCAST_STEER__";
+
+  interface BroadcastTarget {
+    display: string;
+    topLevelId: number;
+    restPath: number[];
+  }
+
+  interface ParsedBroadcastSelection {
+    targets: BroadcastTarget[];
+    errors: string[];
+  }
+
+  function parseBroadcastPath(raw: string): number[] | null {
+    const parts = raw.trim().split(".");
+    if (parts.length === 0) return null;
+    const path: number[] = [];
+    for (const part of parts) {
+      if (!/^\d+$/.test(part)) return null;
+      const value = Number(part);
+      if (!Number.isSafeInteger(value) || value < 1) return null;
+      path.push(value);
+    }
+    return path;
+  }
+
+  function parseBroadcastSelection(input: string, available: number[]): ParsedBroadcastSelection {
+    const normalized = input.trim().toUpperCase();
+    if (normalized === "ALL") {
+      return {
+        targets: available.map((id) => ({ display: String(id), topLevelId: id, restPath: [] })),
+        errors: [],
+      };
+    }
+
+    const errors: string[] = [];
+    const targetMap = new Map<string, BroadcastTarget>();
+    for (const rawPart of input.split(",")) {
+      const part = rawPart.trim();
+      if (!part) continue;
+
+      if (part.includes("-")) {
+        const [startRaw, endRaw, extra] = part.split("-").map((p) => p.trim());
+        const startPath = parseBroadcastPath(startRaw);
+        const endPath = parseBroadcastPath(endRaw);
+        if (extra !== undefined || !startPath || !endPath || startPath.length !== 1 || endPath.length !== 1) {
+          errors.push(`Invalid range "${part}". Use top-level ranges like 1-3.`);
+          continue;
+        }
+        const start = startPath[0];
+        const end = endPath[0];
+        for (let id = Math.min(start, end); id <= Math.max(start, end); id++) {
+          if (!available.includes(id)) {
+            errors.push(`Subagent ${id} is not running.`);
+            continue;
+          }
+          targetMap.set(String(id), { display: String(id), topLevelId: id, restPath: [] });
+        }
+        continue;
+      }
+
+      const path = parseBroadcastPath(part);
+      if (!path) {
+        errors.push(`Invalid target "${part}". Use ALL, numbers, paths, or top-level ranges (e.g. 1, 2, 4.1, 1-3).`);
+        continue;
+      }
+      const [topLevelId, ...restPath] = path;
+      if (!available.includes(topLevelId)) {
+        errors.push(`Subagent ${topLevelId} is not running.`);
+        continue;
+      }
+      const display = path.join(".");
+      targetMap.set(display, { display, topLevelId, restPath });
+    }
+
+    return {
+      targets: Array.from(targetMap.values()).sort((a, b) => a.display.localeCompare(b.display, undefined, { numeric: true })),
+      errors,
+    };
+  }
+
+  function encodeNestedBroadcast(message: string, path: number[]): string {
+    return `${BROADCAST_STEER_PREFIX}${JSON.stringify({ path, message })}`;
+  }
+
+  function decodeNestedBroadcast(text: string): { path: number[]; message: string } | null {
+    if (!text.startsWith(BROADCAST_STEER_PREFIX)) return null;
+    try {
+      const parsed = JSON.parse(text.slice(BROADCAST_STEER_PREFIX.length));
+      if (!Array.isArray(parsed?.path) || !parsed.path.every((n: unknown) => Number.isSafeInteger(n) && (n as number) >= 1)) return null;
+      if (typeof parsed?.message !== "string") return null;
+      return { path: parsed.path, message: parsed.message };
+    } catch {
+      return null;
+    }
+  }
+
+  function extractPendingSubagentTaskCounts(result: SingleResult): number[] {
+    const completedToolCallIds = new Set(getNestedSubagentResults(result.messages).map((nested) => nested.toolCallId));
+    const counts: number[] = [];
+    for (const message of result.messages as any[]) {
+      if (message?.role !== "assistant" || !Array.isArray(message.content)) continue;
+      for (const part of message.content) {
+        if (part?.type !== "toolCall" || part?.name !== "subagent") continue;
+        const toolCallId = typeof part.toolCallId === "string" ? part.toolCallId : typeof part.id === "string" ? part.id : undefined;
+        if (toolCallId && completedToolCallIds.has(toolCallId)) continue;
+        const tasks = Array.isArray(part.arguments?.tasks) ? part.arguments.tasks : [];
+        if (tasks.length > 0) counts.push(tasks.length);
+      }
+    }
+    return counts;
+  }
+
+  function collectRunningBroadcastTargetsFromResult(
+    result: SingleResult,
+    path: number[],
+    targets: { all: BroadcastTarget[]; youngest: BroadcastTarget[] },
+  ): boolean {
+    const nestedRunningPaths: number[][] = [];
+
+    for (const nested of getNestedSubagentResults(result.messages)) {
+      if (!isSubagentDetails(nested.details)) continue;
+      nested.details.results.forEach((child, index) => {
+        const childPath = [...path, index + 1];
+        if (collectRunningBroadcastTargetsFromResult(child, childPath, targets)) {
+          nestedRunningPaths.push(childPath);
+        }
+      });
+    }
+
+    if (result.exitCode === -1) {
+      for (const taskCount of extractPendingSubagentTaskCounts(result)) {
+        for (let i = 1; i <= taskCount; i++) {
+          const childPath = [...path, i];
+          const [topLevelId, ...restPath] = childPath;
+          targets.all.push({ display: childPath.join("."), topLevelId, restPath });
+          targets.youngest.push({ display: childPath.join("."), topLevelId, restPath });
+          nestedRunningPaths.push(childPath);
+        }
+      }
+    }
+
+    const isRunning = result.exitCode === -1;
+    if (!isRunning) return nestedRunningPaths.length > 0;
+
+    const [topLevelId, ...restPath] = path;
+    const self = { display: path.join("."), topLevelId, restPath };
+    targets.all.push(self);
+    if (nestedRunningPaths.length === 0) targets.youngest.push(self);
+    return true;
+  }
+
+  function updateLatestBroadcastTargets(details: SubagentDetails | undefined): void {
+    latestBroadcastTargets.all = [];
+    latestBroadcastTargets.youngest = [];
+    if (!details) {
+      for (const id of activeSubagents.keys()) {
+        const target = { display: String(id), topLevelId: id, restPath: [] };
+        latestBroadcastTargets.all.push(target);
+        latestBroadcastTargets.youngest.push(target);
+      }
+      return;
+    }
+    details.results.forEach((result, index) => {
+      collectRunningBroadcastTargetsFromResult(result, [index + 1], latestBroadcastTargets);
+    });
+    const dedupe = (targets: BroadcastTarget[]) =>
+      Array.from(new Map(targets.map((target) => [target.display, target])).values())
+        .filter((target) => activeSubagents.has(target.topLevelId))
+        .sort((a, b) => a.display.localeCompare(b.display, undefined, { numeric: true }));
+    latestBroadcastTargets.all = dedupe(latestBroadcastTargets.all);
+    latestBroadcastTargets.youngest = dedupe(latestBroadcastTargets.youngest);
+  }
+
+  function getFallbackTopLevelTargets(): BroadcastTarget[] {
+    return Array.from(activeSubagents.keys())
+      .sort((a, b) => a - b)
+      .map((id) => ({ display: String(id), topLevelId: id, restPath: [] }));
+  }
+
+  function sendBroadcastToTargets(message: string, targets: BroadcastTarget[], ctx: any): void {
+    const delivered: string[] = [];
+    const missed: string[] = [];
+    for (const target of targets) {
+      const item = activeSubagents.get(target.topLevelId);
+      if (!item) {
+        missed.push(target.display);
+        continue;
+      }
+      item.handle.steer(
+        target.restPath.length > 0
+          ? encodeNestedBroadcast(message, target.restPath)
+          : message,
+      );
+      delivered.push(target.display);
+    }
+    if (delivered.length > 0) {
+      ctx.ui.notify(`Broadcasted steering message to subagent(s): ${delivered.join(", ")}`, "info");
+    }
+    if (missed.length > 0) {
+      ctx.ui.notify(`Some selected subagents are no longer running: ${missed.join(", ")}`, "warning");
+    }
+  }
+
+  async function askBroadcastForSteering(message: string, ctx: any): Promise<"continue" | "handled"> {
+    const nested = decodeNestedBroadcast(message);
+    if (nested) {
+      const available = Array.from(activeSubagents.keys()).sort((a, b) => a - b);
+      if (available.length === 0) return "handled";
+      const [nextId, ...restPath] = nested.path;
+      if (!available.includes(nextId)) return "handled";
+      sendBroadcastToTargets(nested.message, [{ display: nested.path.join("."), topLevelId: nextId, restPath }], ctx);
+      return "handled";
+    }
+
+    if (!ctx.hasUI || activeSubagents.size === 0) return "continue";
+
+    setBroadcastNumberingActive(true);
+    try {
+      const available = Array.from(activeSubagents.keys()).sort((a, b) => a - b);
+      const choice = await ctx.ui.select(
+        "Broadcast this steering message to subagents?",
+        ["No", "All (+nested)", "Youngest", "Numbers (e.g. 1, 2, 4.1)"],
+      );
+      if (choice === "All (+nested)" || choice === "Youngest") {
+        const fallback = getFallbackTopLevelTargets();
+        const selected = choice === "Youngest"
+          ? (latestBroadcastTargets.youngest.length > 0 ? latestBroadcastTargets.youngest : fallback)
+          : (latestBroadcastTargets.all.length > 0 ? latestBroadcastTargets.all : fallback);
+        const current = selected.filter((target) => activeSubagents.has(target.topLevelId));
+        if (current.length === 0) {
+          ctx.ui.notify("No selected subagents are still running. Continuing with normal steering.", "warning");
+          return "continue";
+        }
+        sendBroadcastToTargets(message, current, ctx);
+        return "handled";
+      }
+      if (choice !== "Numbers (e.g. 1, 2, 4.1)") return "continue";
+
+      const answer = await ctx.ui.input(
+        "Subagent numbers/ranges to broadcast to (e.g. 1, 2, 4.1)",
+        "",
+      );
+      if (!answer) return "continue";
+      const current = Array.from(new Set([
+        ...available,
+        ...latestBroadcastTargets.all.map((target) => target.topLevelId),
+      ])).sort((a, b) => a - b);
+      const parsed = parseBroadcastSelection(answer, current);
+      const knownDisplays = new Set(latestBroadcastTargets.all.map((target) => target.display));
+      const validatedTargets = knownDisplays.size > 0
+        ? parsed.targets.filter((target) => knownDisplays.has(target.display))
+        : parsed.targets;
+      const unknownNested = knownDisplays.size > 0
+        ? parsed.targets.filter((target) => !knownDisplays.has(target.display)).map((target) => target.display)
+        : [];
+      const errors = [
+        ...parsed.errors,
+        ...unknownNested.map((display) => `Subagent ${display} is not running.`),
+      ];
+      if (errors.length > 0) {
+        ctx.ui.notify(errors.slice(0, 4).join("\n"), "warning");
+      }
+      if (validatedTargets.length === 0) {
+        ctx.ui.notify("No valid running subagents selected. Continuing with normal steering.", "warning");
+        return "continue";
+      }
+      sendBroadcastToTargets(message, validatedTargets, ctx);
+      return "handled";
+    } finally {
+      setBroadcastNumberingActive(false);
+    }
+  }
 
   async function restoreModelAfterResumeFailure(ctx?: { ui?: { notify?: (message: string, type?: "info" | "warning" | "error") => void } }) {
     const restore = modelToRestoreAfterResume;
@@ -748,6 +1030,23 @@ export default function (pi: ExtensionAPI) {
     }, RESUME_INTERACTIVE_DELAY_MS);
   });
 
+  pi.on("input", async (event, ctx) => {
+    try {
+      // Pi emits this before it applies the built-in streaming behavior. When a
+      // subagent tool is running, user input is a normal steering message to the
+      // parent. Give the user a chance to route it to child RPC sessions instead.
+      if (activeSubagents.size === 0) return { action: "continue" as const };
+      if (ctx.isIdle()) return { action: "continue" as const };
+      const result = await askBroadcastForSteering(event.text, ctx);
+      return result === "handled"
+        ? { action: "handled" as const }
+        : { action: "continue" as const };
+    } catch (err) {
+      console.error("[pi-subagent] Error while handling steering broadcast:", err);
+      return { action: "continue" as const };
+    }
+  });
+
   // Inject available agents into the system prompt
   pi.on("before_agent_start", async (event) => {
     try {
@@ -818,6 +1117,9 @@ calls one after another. Do NOT put dependent tasks in the same array.
 
       async execute(toolCallId, params, signal, onUpdate, ctx) {
         try {
+          activeSubagents.clear();
+          updateLatestBroadcastTargets(undefined);
+          nextActiveSubagentId = 1;
           const discovery = discoverAgents(ctx.cwd, "both");
           const { agents } = discovery;
 
@@ -840,6 +1142,10 @@ calls one after another. Do NOT put dependent tasks in the same array.
           }
 
           const executionMode = tasks.length === 1 ? "single" : "parallel";
+          const trackedOnUpdate = (partial: any) => {
+            if (isSubagentDetails(partial?.details)) updateLatestBroadcastTargets(partial.details);
+            onUpdate?.(partial);
+          };
 
           // Security: guard project-local agents before running
           const requested = new Set<string>();
@@ -937,7 +1243,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
               agents,
               ctx.cwd,
               signal,
-              onUpdate,
+              trackedOnUpdate,
               makeDetails,
               resumePlan?.details?.results[0],
               getSessionDirForTask(resumePlan?.previousToolCallId ?? toolCallId, 0),
@@ -946,7 +1252,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
               // active model (normal runs). This prevents children from
               // defaulting to whatever settings.json says at spawn time, which
               // can change while the parent session is long-running.
-              formatModelFlag(modelToRestoreAfterResume ?? lastRestorableModel),
+              formatModelFlag(modelToRestoreAfterResume ?? ctx.model ?? lastRestorableModel),
             );
           }
 
@@ -955,12 +1261,12 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
             agents,
             ctx.cwd,
             signal,
-            onUpdate,
+            trackedOnUpdate,
             makeDetails,
             resumePlan?.details?.results,
             (index) => getSessionDirForTask(resumePlan?.previousToolCallId ?? toolCallId, index),
             !!resumePlan,
-            formatModelFlag(modelToRestoreAfterResume ?? lastRestorableModel),
+            formatModelFlag(modelToRestoreAfterResume ?? ctx.model ?? lastRestorableModel),
           );
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -1016,6 +1322,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
       };
     }
 
+    let activeId: number | undefined;
     const result = await runAgentSubprocess({
       cwd: defaultCwd,
       agents,
@@ -1033,7 +1340,16 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
       resumeSession: resumeExistingSession,
       initialResult: previousResult,
       fallbackModel,
+      onHandle: (handle) => {
+        activeId = 1;
+        activeSubagents.set(activeId, { agent: agentName, task, handle });
+        updateLatestBroadcastTargets(undefined);
+      },
     });
+    if (activeId !== undefined) {
+      activeSubagents.delete(activeId);
+      updateLatestBroadcastTargets(undefined);
+    }
 
     if (isResultError(result)) {
       const errorMsg =
@@ -1075,22 +1391,40 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
     resumeExistingSessions: boolean,
     fallbackModel?: string,
   ) {
-    return executeParallelSubprocess(
-      tasks,
-      agents,
-      defaultCwd,
-      currentDepth,
-      maxDepth,
-      ancestorAgentStack,
-      preventCycles,
-      signal,
-      onUpdate,
-      makeDetails("parallel"),
-      resumeResults,
-      (index) => getSessionDir(index),
-      resumeExistingSessions,
-      currentSubagentSessionRoot,
-      fallbackModel,
-    );
+    const taskIds = new Map<number, number>();
+    try {
+      return await executeParallelSubprocess(
+        tasks,
+        agents,
+        defaultCwd,
+        currentDepth,
+        maxDepth,
+        ancestorAgentStack,
+        preventCycles,
+        signal,
+        onUpdate,
+        makeDetails("parallel"),
+        resumeResults,
+        (index) => getSessionDir(index),
+        resumeExistingSessions,
+        currentSubagentSessionRoot,
+        fallbackModel,
+        (index, task, handle) => {
+          const id = index + 1;
+          taskIds.set(index, id);
+          activeSubagents.set(id, { agent: task.agent, task: task.task, handle });
+          updateLatestBroadcastTargets(undefined);
+        },
+        (index) => {
+          const id = taskIds.get(index);
+          if (id !== undefined) {
+            activeSubagents.delete(id);
+            updateLatestBroadcastTargets(undefined);
+          }
+        },
+      );
+    } finally {
+      for (const id of taskIds.values()) activeSubagents.delete(id);
+    }
   }
 }

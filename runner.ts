@@ -73,6 +73,12 @@ const SUBAGENT_FALLBACK_MODEL_ENV = "PI_SUBAGENT_FALLBACK_MODEL";
 
 type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
 
+export interface RunningSubagentHandle {
+  steer(message: string): void;
+}
+
+export type RunningSubagentStartedCallback = (handle: RunningSubagentHandle) => void;
+
 // ---------------------------------------------------------------------------
 // Temp file helpers
 // ---------------------------------------------------------------------------
@@ -462,17 +468,16 @@ function buildPiArgs(
   sessionDir: string | undefined,
   resumeSession: boolean,
   fallbackModelOverride?: string,
-): string[] {
+): { args: string[]; prompt: string } {
   const args: string[] = [
     "--mode",
-    "json",
+    "rpc",
     ..._inheritedCliArgs.extensionArgs,
     ..._inheritedCliArgs.alwaysProxy,
   ];
 
   if (sessionDir) args.push("--session-dir", sessionDir);
   if (resumeSession) args.push("--continue");
-  args.push("-p");
 
   // Agent config takes priority; fall back to parent CLI value
   const model = agent.model ?? fallbackModelOverride ?? process.env[SUBAGENT_FALLBACK_MODEL_ENV] ?? _inheritedCliArgs.fallbackModel;
@@ -500,12 +505,12 @@ function buildPiArgs(
   }
 
   if (systemPromptPath) args.push("--append-system-prompt", systemPromptPath);
-  args.push(
-    resumeSession
+  return {
+    args,
+    prompt: resumeSession
       ? `Continue the previous task from where you left off. Original task: ${task}`
       : `Task: ${task}`,
-  );
-  return args;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -549,6 +554,8 @@ export interface RunAgentOptions {
   piCommandOverride?: { command: string; argsPrefix?: string[] };
   /** Test/debug override for startup timeout. */
   startupTimeoutMsOverride?: number;
+  /** Called once the child RPC process is ready to receive steering messages. */
+  onHandle?: RunningSubagentStartedCallback;
 }
 
 /**
@@ -640,7 +647,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
   }
 
   try {
-    const piArgs = buildPiArgs(
+    const { args: piArgs, prompt } = buildPiArgs(
       agent,
       promptTmpPath,
       task,
@@ -664,7 +671,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       const proc = spawn(spawnCmd, spawnArgs, {
         cwd,
         shell: false,
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: ["pipe", "pipe", "pipe"],
         env: {
           ...process.env,
           [SUBAGENT_DEPTH_ENV]: String(nextDepth),
@@ -682,6 +689,18 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       let hangTimer: ReturnType<typeof setTimeout> | undefined;
       let startupTimer: ReturnType<typeof setTimeout> | undefined;
       let receivedFirstEvent = false;
+
+      const sendRpc = (command: Record<string, unknown>) => {
+        proc.stdin?.write(`${JSON.stringify(command)}\n`);
+      };
+
+      opts.onHandle?.({
+        steer(message: string) {
+          sendRpc({ type: "steer", message });
+        },
+      });
+
+      sendRpc({ type: "prompt", message: prompt });
 
       // Startup timeout: kill the process if it never produces its first
       // JSON event. Once the first event arrives, this timer is permanently
@@ -737,6 +756,14 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       };
 
       const flushLine = (line: string) => {
+        let event: any;
+        try { event = JSON.parse(line); } catch { event = null; }
+        if (event?.type === "agent_end") {
+          if (result.exitCode === -1) result.exitCode = 0;
+          try { proc.kill("SIGTERM"); } catch { /* already dead */ }
+          doResolve(0);
+          return;
+        }
         const accepted = processJsonLine(line, result);
         if (accepted) {
           // Cancel the startup timer as soon as the subprocess proves it has
@@ -889,6 +916,8 @@ export async function executeParallelSubprocess(
   resumeExistingSessions = false,
   sessionRoot?: string,
   fallbackModel?: string,
+  onHandleForTask?: (index: number, task: { agent: string; task: string }, handle: RunningSubagentHandle) => void,
+  onTaskDone?: (index: number, task: { agent: string; task: string }) => void,
 ): Promise<{
   content: Array<{ type: "text"; text: string }>;
   details: SubagentDetails;
@@ -975,29 +1004,35 @@ export async function executeParallelSubprocess(
       const sessionDir = shouldResumeThisSession && savedSessionDirExists
         ? savedSessionDir
         : getSessionDir?.(index, t);
-      const result = await runAgentSubprocess({
-        cwd: defaultCwd,
-        agents,
-        agentName: t.agent,
-        task: t.task,
-        parentDepth,
-        parentAgentStack,
-        maxDepth,
-        preventCycles,
-        signal,
-        sessionDir,
-        sessionRoot,
-        resumeSession: shouldResumeThisSession && !!sessionDir,
-        initialResult: previousResult,
-        fallbackModel,
-        onUpdate: (partial) => {
-          if (partial.details?.results[0]) {
-            allResults[index] = partial.details.results[0];
-            emitProgress();
-          }
-        },
-        makeDetails,
-      });
+      let result: SingleResult;
+      try {
+        result = await runAgentSubprocess({
+          cwd: defaultCwd,
+          agents,
+          agentName: t.agent,
+          task: t.task,
+          parentDepth,
+          parentAgentStack,
+          maxDepth,
+          preventCycles,
+          signal,
+          sessionDir,
+          sessionRoot,
+          resumeSession: shouldResumeThisSession && !!sessionDir,
+          initialResult: previousResult,
+          fallbackModel,
+          onHandle: (handle) => onHandleForTask?.(index, t, handle),
+          onUpdate: (partial) => {
+            if (partial.details?.results[0]) {
+              allResults[index] = partial.details.results[0];
+              emitProgress();
+            }
+          },
+          makeDetails,
+        });
+      } finally {
+        onTaskDone?.(index, t);
+      }
       allResults[index] = result;
       emitProgress();
       return result;
