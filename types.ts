@@ -62,6 +62,13 @@ export interface SingleResult {
 	 * Populated while the agent is running; each entry is one display line.
 	 */
 	liveLog: LiveLogEntry[];
+	/**
+	 * Transient, streaming progress for nested subagent calls made by this agent,
+	 * keyed by the nested subagent toolCallId. This is intentionally not part of
+	 * the durable conversation history; final nested results still live in
+	 * messages as toolResult entries.
+	 */
+	liveNestedSubagents?: Record<string, SubagentDetails>;
 }
 
 /** A node in the per-subagent usage tree (own stats + recursive children) */

@@ -20,6 +20,7 @@ import {
   extractToolCalls,
   getFinalOutput,
   getNestedSubagentErrorSummary,
+  isSubagentDetails,
 } from "./types.js";
 import { SUBAGENT_SESSION_ROOT_ENV } from "./resume.js";
 import {
@@ -414,7 +415,20 @@ export function processJsonLine(line: string, result: SingleResult): boolean {
   if (event.type === "tool_result_end" && event.message) {
     const msg = event.message as Message;
     if (!hasMessage(result, msg)) result.messages.push(msg);
+    if ((msg as any).toolName === "subagent" && typeof (msg as any).toolCallId === "string") {
+      delete result.liveNestedSubagents?.[(msg as any).toolCallId];
+    }
     return true;
+  }
+
+  if (event.type === "subagent_progress") {
+    const toolCallId = typeof event.toolCallId === "string" ? event.toolCallId : undefined;
+    if (toolCallId && isSubagentDetails(event.details)) {
+      result.liveNestedSubagents ??= {};
+      result.liveNestedSubagents[toolCallId] = event.details;
+      return true;
+    }
+    return false;
   }
 
   if (event.type === "turn_start") {
@@ -620,6 +634,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
     turnInProgress: false,
     liveToolExecutions: initialResult?.liveToolExecutions,
     liveLog: initialResult?.liveLog ? [...initialResult.liveLog] : [],
+    liveNestedSubagents: initialResult?.liveNestedSubagents ? { ...initialResult.liveNestedSubagents } : undefined,
     sessionDir,
   };
 

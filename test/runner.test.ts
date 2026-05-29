@@ -125,6 +125,78 @@ describe("processJsonLine", () => {
     assert.equal(result.messages.length, 1);
   });
 
+  test("processes subagent_progress as transient live nested details", () => {
+    const result = makeResult();
+    const event = {
+      type: "subagent_progress",
+      toolCallId: "nested-call-1",
+      details: {
+        mode: "single",
+        delegationMode: "spawn",
+        projectAgentsDir: null,
+        results: [
+          {
+            agent: "code-writer",
+            agentSource: "builtin",
+            task: "write",
+            exitCode: -1,
+            messages: [],
+            stderr: "",
+            usage: emptyUsage(),
+            toolCalls: {},
+            completedTurns: 1,
+            turnInProgress: true,
+            liveLog: [{ kind: "tool_start", toolName: "edit", args: { path: "/tmp/file" } }],
+          },
+        ],
+      },
+    };
+
+    const returned = processJsonLine(JSON.stringify(event), result);
+
+    assert.equal(returned, true);
+    assert.equal(result.messages.length, 0, "progress must not enter durable message history");
+    assert.equal(result.liveNestedSubagents?.["nested-call-1"]?.results[0]?.agent, "code-writer");
+  });
+
+  test("final subagent tool_result_end clears matching transient live nested details", () => {
+    const result = makeResult({
+      liveNestedSubagents: {
+        "nested-call-1": {
+          mode: "single",
+          delegationMode: "spawn",
+          projectAgentsDir: null,
+          results: [],
+          aggregatedUsage: emptyUsage(),
+          aggregatedToolCalls: {},
+          usageTree: [],
+        },
+      },
+    });
+    const event = {
+      type: "tool_result_end",
+      message: {
+        role: "toolResult",
+        toolName: "subagent",
+        toolCallId: "nested-call-1",
+        isError: false,
+        content: [{ type: "text", text: "done" }],
+        details: {
+          mode: "single",
+          delegationMode: "spawn",
+          projectAgentsDir: null,
+          results: [],
+          aggregatedUsage: emptyUsage(),
+          aggregatedToolCalls: {},
+          usageTree: [],
+        },
+      },
+    };
+
+    assert.equal(processJsonLine(JSON.stringify(event), result), true);
+    assert.equal(result.liveNestedSubagents?.["nested-call-1"], undefined);
+  });
+
   test("accumulates usage across multiple assistant messages", () => {
     const result = makeResult();
     const msg1 = {

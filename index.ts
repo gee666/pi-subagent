@@ -632,6 +632,73 @@ export default function (pi: ExtensionAPI) {
   };
   let nextActiveSubagentId = 1;
 
+  /**
+   * Build a lightweight version of SubagentDetails for live progress bubbling.
+   *
+   * Full message histories can be very large in long agent trees. For live TUI
+   * rendering we only need subagent tool-call structure, nested subagent
+   * results, live logs, metadata, and usage counters. Text conversations are
+   * intentionally omitted; final durable results still arrive via normal
+   * tool_result_end messages.
+   */
+  function slimDetailsForProgress(details: SubagentDetails): SubagentDetails {
+    const slimResult = (result: SingleResult): SingleResult => {
+      const slimMessages = result.messages
+        .map((message: any) => {
+          if (message?.role === "assistant" && Array.isArray(message.content)) {
+            const subagentCalls = message.content.filter(
+              (part: any) => part?.type === "toolCall" && part?.name === "subagent",
+            );
+            return subagentCalls.length > 0
+              ? { ...message, content: subagentCalls }
+              : null;
+          }
+          if (message?.role === "toolResult" && message.toolName === "subagent") {
+            return isSubagentDetails(message.details)
+              ? { ...message, details: slimDetailsForProgress(message.details) }
+              : message;
+          }
+          return null;
+        })
+        .filter(Boolean) as SingleResult["messages"];
+
+      const liveNestedSubagents = result.liveNestedSubagents
+        ? Object.fromEntries(
+            Object.entries(result.liveNestedSubagents).map(([nestedToolCallId, nested]) => [
+              nestedToolCallId,
+              slimDetailsForProgress(nested),
+            ]),
+          )
+        : undefined;
+
+      return {
+        ...result,
+        messages: slimMessages,
+        stderr: result.stderr ? result.stderr.slice(-1000) : "",
+        liveLog: [...(result.liveLog ?? [])],
+        liveNestedSubagents,
+      };
+    };
+
+    return {
+      ...details,
+      results: details.results.map(slimResult),
+    };
+  }
+
+  function emitNestedProgressToParent(toolCallId: string, details: SubagentDetails): void {
+    if (currentDepth <= 0) return;
+    try {
+      process.stdout.write(`${JSON.stringify({
+        type: "subagent_progress",
+        toolCallId,
+        details: slimDetailsForProgress(details),
+      })}\n`);
+    } catch {
+      // Best-effort only. Normal final tool_result_end still carries the durable result.
+    }
+  }
+
   const BROADCAST_STEER_PREFIX = "__PI_SUBAGENT_BROADCAST_STEER__";
 
   interface BroadcastTarget {
@@ -1157,7 +1224,10 @@ calls one after another. Do NOT put dependent tasks in the same array.
 
           const executionMode = tasks.length === 1 ? "single" : "parallel";
           const trackedOnUpdate = (partial: any) => {
-            if (isSubagentDetails(partial?.details)) updateLatestBroadcastTargets(partial.details);
+            if (isSubagentDetails(partial?.details)) {
+              updateLatestBroadcastTargets(partial.details);
+              emitNestedProgressToParent(toolCallId, partial.details);
+            }
             onUpdate?.(partial);
           };
 
