@@ -120,6 +120,10 @@ pi --no-subagent-prevent-cycles   # allow cycles (not recommended)
 | `PI_SUBAGENT_MAX_PARALLEL_TASKS` | `16`    | Max tasks per single call                |
 | `PI_SUBAGENT_MAX_CONCURRENCY`    | `8`     | Max subagents running simultaneously     |
 
+## Steering Running Subagents
+
+While a `subagent` tool call is running, mid-stream steering input can be broadcast to one or more child agents. The extension uses Pi's `InputEvent.streamingBehavior` metadata when available, so idle prompts and queued follow-ups continue to the parent normally; only true `steer` inputs open the broadcast routing prompt.
+
 ## Subagent Session Resume
 
 Subagent subprocesses save sessions in `sessions-subagents`. When a main Pi session is resumed and its latest branch contains an unfinished `subagent` tool call (aborted, errored, or closed by Pi's synthetic unfinished-tool error), the extension can resume that delegation from the saved subagent sessions.

@@ -363,6 +363,19 @@ function hasCliInitialPrompt(argv: string[]): boolean {
   return false;
 }
 
+function isStreamingSteerInput(event: any, ctx: { isIdle: () => boolean }): boolean {
+  // Newer Pi versions provide this directly. Undefined means the input was
+  // submitted while idle; "followUp" means it is queued for the next turn.
+  // Only "steer" should be intercepted for subagent broadcast routing.
+  if (Object.prototype.hasOwnProperty.call(event ?? {}, "streamingBehavior")) {
+    return event.streamingBehavior === "steer";
+  }
+
+  // Backward compatibility for older Pi versions that emitted `input` without
+  // delivery metadata: non-idle input was treated as a steering message.
+  return !ctx.isIdle();
+}
+
 const RESUME_STATE_KEY = "__piSubagentResumeState";
 const SUBAGENT_FALLBACK_MODEL_ENV = "PI_SUBAGENT_FALLBACK_MODEL";
 const RESUME_INTERACTIVE_DELAY_MS = 50;
@@ -1033,10 +1046,11 @@ export default function (pi: ExtensionAPI) {
   pi.on("input", async (event, ctx) => {
     try {
       // Pi emits this before it applies the built-in streaming behavior. When a
-      // subagent tool is running, user input is a normal steering message to the
-      // parent. Give the user a chance to route it to child RPC sessions instead.
+      // subagent tool is running, only mid-stream steering messages should be
+      // candidates for child broadcast. Idle prompts and queued follow-ups must
+      // continue normally so they reach the parent conversation as intended.
       if (activeSubagents.size === 0) return { action: "continue" as const };
-      if (ctx.isIdle()) return { action: "continue" as const };
+      if (!isStreamingSteerInput(event, ctx)) return { action: "continue" as const };
       const result = await askBroadcastForSteering(event.text, ctx);
       return result === "handled"
         ? { action: "handled" as const }
