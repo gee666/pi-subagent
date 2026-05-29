@@ -201,12 +201,60 @@ function nestedResultIsHealthy(nested: NestedSubagentResult | undefined): boolea
 	return nested.details.results.every((result) => !isResultError(result));
 }
 
+function buildLiveDetailsSignature(details: SubagentDetails): string {
+	return JSON.stringify(details.results.map((result) => ({ agent: result.agent, task: result.task ?? "" })));
+}
+
+function findLiveNestedDetailsForCall(
+	result: SingleResult,
+	call: PendingSubagentCall,
+	usedLiveKeys: Set<string>,
+): SubagentDetails | undefined {
+	const live = result.liveNestedSubagents;
+	if (!live) return undefined;
+
+	const byId = live[call.toolCallId];
+	if (isSubagentDetails(byId)) {
+		usedLiveKeys.add(call.toolCallId);
+		return byId;
+	}
+
+	// Some pi versions pass a different internal id to Tool.execute than the id
+	// stored on the assistant toolCall part. Final toolResult messages still line
+	// up by id, but live `subagent_progress` events can be keyed differently. In
+	// that case match the running nested tree by the requested agent/task
+	// signature so grandchildren render live instead of falling back to static
+	// pending placeholders.
+	const signature = subagentCallSignature(call);
+	for (const [key, details] of Object.entries(live)) {
+		if (usedLiveKeys.has(key) || !isSubagentDetails(details)) continue;
+		if (buildLiveDetailsSignature(details) !== signature) continue;
+		usedLiveKeys.add(key);
+		return details;
+	}
+
+	// Fallback for cases where task text differs slightly by the time the child
+	// details are emitted. Still require the same agent sequence; count-only
+	// matching can attach progress to the wrong repeated/concurrent call.
+	const agentSignature = JSON.stringify(call.tasks.map((task) => task.agent));
+	for (const [key, details] of Object.entries(live)) {
+		if (usedLiveKeys.has(key) || !isSubagentDetails(details)) continue;
+		const liveAgentSignature = JSON.stringify(details.results.map((nestedResult) => nestedResult.agent));
+		if (liveAgentSignature !== agentSignature) continue;
+		usedLiveKeys.add(key);
+		return details;
+	}
+
+	return undefined;
+}
+
 function buildNestedChildren(result: SingleResult): TreeNode[] {
 	const parentIsRunning = result.exitCode === -1;
 	const completedByToolCallId = new Map<string, NestedSubagentResult>();
 	for (const nested of getNestedSubagentResults(result.messages)) {
 		completedByToolCallId.set(nested.toolCallId, nested);
 	}
+	const usedLiveKeys = new Set<string>();
 
 	const calls = extractPendingSubagentCalls(result.messages);
 	const laterResumeBySignature = new Map<string, number>();
@@ -237,8 +285,10 @@ function buildNestedChildren(result: SingleResult): TreeNode[] {
 			return;
 		}
 
-		const liveDetails = result.liveNestedSubagents?.[call.toolCallId];
-		if (parentIsRunning && isSubagentDetails(liveDetails)) {
+		const liveDetails = parentIsRunning
+			? findLiveNestedDetailsForCall(result, call, usedLiveKeys)
+			: undefined;
+		if (liveDetails) {
 			nodes.push(...buildNodesFromDetails(liveDetails));
 			return;
 		}
