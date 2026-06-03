@@ -22,7 +22,7 @@ import {
   SUBAGENT_RESUME_PROMPT_ENV,
   branchEntries,
   buildSubagentSessionDir,
-  findLatestResumableSubagentCall,
+  findLatestResumableSubagentCalls,
   getDefaultSubagentSessionRoot,
   isFinishedResult,
   parseBooleanEnv,
@@ -55,7 +55,7 @@ import {
 // ---------------------------------------------------------------------------
 
 const DEFAULT_MAX_DELEGATION_DEPTH = 3;
-const DEFAULT_PREVENT_CYCLE_DELEGATION = false;
+const DEFAULT_PREVENT_CYCLE_DELEGATION = true;
 const DEFAULT_PROJECT_AGENT_CONFIRMATION = "ask";
 const SUBAGENT_DEPTH_ENV = "PI_SUBAGENT_DEPTH";
 const SUBAGENT_MAX_DEPTH_ENV = "PI_SUBAGENT_MAX_DEPTH";
@@ -355,6 +355,15 @@ function ensureSubagentToolActive(pi: ExtensionAPI): void {
   }
 }
 
+function isRpcMode(argv: string[]): boolean {
+  for (let i = 2; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--mode" && argv[i + 1] === "rpc") return true;
+    if (arg === "--mode=rpc") return true;
+  }
+  return false;
+}
+
 function hasCliInitialPrompt(argv: string[]): boolean {
   for (let i = 2; i < argv.length; i++) {
     const arg = argv[i];
@@ -381,14 +390,14 @@ const SUBAGENT_FALLBACK_MODEL_ENV = "PI_SUBAGENT_FALLBACK_MODEL";
 const RESUME_INTERACTIVE_DELAY_MS = 50;
 
 type SyntheticResumeState = {
-  plan: ResumableSubagentCall | null;
+  plans: ResumableSubagentCall[];
   phase: "tool" | "final";
   trigger: "resumePrompt" | "nextRequest";
 };
 
 function clearSyntheticResumeState(): void {
   const state = getSyntheticResumeState();
-  state.plan = null;
+  state.plans = [];
   state.phase = "tool";
   state.trigger = "resumePrompt";
 }
@@ -396,7 +405,7 @@ function clearSyntheticResumeState(): void {
 function getSyntheticResumeState(): SyntheticResumeState {
   const g = globalThis as any;
   if (!g[RESUME_STATE_KEY]) {
-    g[RESUME_STATE_KEY] = { plan: null, phase: "tool", trigger: "resumePrompt" } satisfies SyntheticResumeState;
+    g[RESUME_STATE_KEY] = { plans: [], phase: "tool", trigger: "resumePrompt" } satisfies SyntheticResumeState;
   }
   return g[RESUME_STATE_KEY] as SyntheticResumeState;
 }
@@ -518,27 +527,34 @@ export default function (pi: ExtensionAPI) {
     streamSimple: async (model, context, options) => {
       const stream = createAssistantMessageEventStream();
       const state = getSyntheticResumeState();
-      const discoveredPlan = state.plan ?? pendingResumePlan ?? (latestSessionCtx ? findLatestResumableSubagentCall(latestSessionCtx) : null);
-      if (discoveredPlan && !state.plan) {
-        state.plan = discoveredPlan;
-        pendingResumePlan = discoveredPlan;
+      const discoveredPlans = state.plans.length > 0
+        ? state.plans
+        : pendingResumePlans.length > 0
+          ? pendingResumePlans
+          : latestSessionCtx
+            ? findLatestResumableSubagentCalls(latestSessionCtx)
+            : [];
+      if (discoveredPlans.length > 0 && state.plans.length === 0) {
+        state.plans = [...discoveredPlans];
+        pendingResumePlans = [...discoveredPlans];
       }
-      const plan = discoveredPlan;
+      const plans = discoveredPlans;
+      const totalTaskCount = plans.reduce((sum, plan) => sum + plan.tasks.length, 0);
       const phase = state.phase;
       const triggerMatches =
         state.trigger === "nextRequest" ||
-        (plan ? isSyntheticResumePrompt(context, plan.tasks.length) : false);
-      if (plan && phase === "tool" && triggerMatches) {
+        (totalTaskCount > 0 ? isSyntheticResumePrompt(context, totalTaskCount) : false);
+      if (plans.length > 0 && phase === "tool" && triggerMatches) {
         state.phase = "final";
-        const toolCall = {
+        const toolCalls = plans.map((plan, index) => ({
           type: "toolCall" as const,
-          id: `resume_subagent_${Date.now()}`,
+          id: `resume_subagent_${Date.now()}_${index}`,
           name: "subagent",
           arguments: { tasks: plan.tasks },
-        };
+        }));
         const message = {
           role: "assistant" as const,
-          content: [toolCall],
+          content: toolCalls,
           api: model.api,
           provider: model.provider,
           model: model.id,
@@ -548,13 +564,15 @@ export default function (pi: ExtensionAPI) {
         };
         queueMicrotask(() => {
           stream.push({ type: "start", partial: message });
-          stream.push({ type: "toolcall_start", contentIndex: 0, partial: message });
-          stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: message });
+          toolCalls.forEach((toolCall, contentIndex) => {
+            stream.push({ type: "toolcall_start", contentIndex, partial: message });
+            stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: message });
+          });
           stream.push({ type: "done", reason: "toolUse", message });
           stream.end(message);
 
           // The synthetic provider's only job is to inject the resumed subagent
-          // tool call. Restore the real model immediately after that handoff so
+          // tool calls. Restore the real model immediately after that handoff so
           // the TUI does not appear stuck on `pi-subagent-resume` while the
           // subagent tool execution is still running.
           void restoreVisibleModelForResume();
@@ -572,8 +590,8 @@ export default function (pi: ExtensionAPI) {
       const fallback = await streamWithRealModelFallback(context, options, restore ?? lastRestorableModel);
       if (fallback) return fallback;
 
-      if (!(plan && phase === "tool")) {
-        state.plan = null;
+      if (!(plans.length > 0 && phase === "tool")) {
+        state.plans = [];
         state.phase = "tool";
       }
       const message = {
@@ -622,7 +640,7 @@ export default function (pi: ExtensionAPI) {
   let discoveredAgents: AgentConfig[] = [];
   let currentSessionId = "ephemeral";
   let currentSubagentSessionRoot = "";
-  let pendingResumePlan: ResumableSubagentCall | null = null;
+  let pendingResumePlans: ResumableSubagentCall[] = [];
   let modelToRestoreAfterResume: any | undefined;
   const approvedProjectAgentDirsForSession = new Set<string>();
   const activeSubagents = new Map<number, { agent: string; task: string; handle: RunningSubagentHandle }>();
@@ -851,7 +869,7 @@ export default function (pi: ExtensionAPI) {
     return true;
   }
 
-  function updateLatestBroadcastTargets(details: SubagentDetails | undefined): void {
+  function updateLatestBroadcastTargets(details: SubagentDetails | undefined, topLevelBaseId = 1): void {
     latestBroadcastTargets.all = [];
     latestBroadcastTargets.youngest = [];
     if (!details) {
@@ -863,7 +881,7 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     details.results.forEach((result, index) => {
-      collectRunningBroadcastTargetsFromResult(result, [index + 1], latestBroadcastTargets);
+      collectRunningBroadcastTargetsFromResult(result, [topLevelBaseId + index], latestBroadcastTargets);
     });
     const dedupe = (targets: BroadcastTarget[]) =>
       Array.from(new Map(targets.map((target) => [target.display, target])).values())
@@ -976,7 +994,7 @@ export default function (pi: ExtensionAPI) {
   async function restoreModelAfterResumeFailure(ctx?: { ui?: { notify?: (message: string, type?: "info" | "warning" | "error") => void } }) {
     const restore = modelToRestoreAfterResume;
     modelToRestoreAfterResume = undefined;
-    pendingResumePlan = null;
+    pendingResumePlans = [];
     clearSyntheticResumeState();
     if (!restore) return;
     try {
@@ -1024,15 +1042,17 @@ export default function (pi: ExtensionAPI) {
       const resumeDisabled = parseBooleanEnv(process.env[SUBAGENT_RESUME_DISABLE_ENV]) === true;
       if (resumeDisabled || (event.reason !== "resume" && event.reason !== "startup")) return;
 
-      const plan = findLatestResumableSubagentCall(ctx);
-      if (!plan) return;
+      const plans = findLatestResumableSubagentCalls(ctx);
+      if (plans.length === 0) return;
+      const totalTaskCount = plans.reduce((sum, plan) => sum + plan.tasks.length, 0);
 
       let shouldResume = true;
       const shouldPrompt = parseBooleanEnv(process.env[SUBAGENT_RESUME_PROMPT_ENV]) !== false;
-      if (ctx.hasUI && shouldPrompt) {
+      const rpcMode = isRpcMode(process.argv);
+      if (ctx.hasUI && !rpcMode && shouldPrompt) {
         shouldResume = await ctx.ui.confirm(
           "Resume subagents?",
-          `The resumed session has an unfinished subagent call (${plan.tasks.length} task${plan.tasks.length === 1 ? "" : "s"}). Resume it from saved subagent sessions?`,
+          `The resumed session has ${plans.length === 1 ? "an" : String(plans.length)} unfinished subagent call${plans.length === 1 ? "" : "s"} (${totalTaskCount} task${totalTaskCount === 1 ? "" : "s"}). Resume from saved subagent sessions?`,
         );
       }
       if (!shouldResume) {
@@ -1057,11 +1077,17 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      pendingResumePlan = plan;
+      pendingResumePlans = [...plans];
       const resumeState = getSyntheticResumeState();
-      resumeState.plan = plan;
+      resumeState.plans = [...plans];
       resumeState.phase = "tool";
-      resumeState.trigger = hasCliInitialPrompt(process.argv) ? "nextRequest" : "resumePrompt";
+      // Headless subprocess/RPC subagents cannot answer a visible resume
+      // prompt. They already receive an initial RPC prompt from the parent
+      // runner, so inject the synthetic resume tool call into that next model
+      // request. Interactive top-level sessions keep using a visible prompt so
+      // the user sees exactly what is happening.
+      const injectOnNextRequest = rpcMode || hasCliInitialPrompt(process.argv) || !ctx.hasUI;
+      resumeState.trigger = injectOnNextRequest ? "nextRequest" : "resumePrompt";
       modelToRestoreAfterResume = restorableModel ?? ctx.model;
       resumeModelRegistry = ctx.modelRegistry;
       ensureSubagentToolActive(pi);
@@ -1076,15 +1102,15 @@ export default function (pi: ExtensionAPI) {
       // to be sent. That prompt will be answered by the synthetic provider with
       // a real assistant subagent tool call. In interactive mode, submit a short
       // visible prompt that triggers the same synthetic provider path.
-      if (hasCliInitialPrompt(process.argv)) {
-        if (ctx.hasUI) ctx.ui.notify(`Resuming ${plan.tasks.length} subagents...`, "info");
+      if (injectOnNextRequest) {
+        if (ctx.hasUI) ctx.ui.notify(`Resuming ${totalTaskCount} subagents...`, "info");
       } else {
         // Do not start the synthetic resume turn from session_start. Pi renders
         // the resumed chat only after session_start/resources_discover complete;
         // starting now lets that render wipe out the live tool component, so no
         // real-time updates appear. Queue it for resources_discover instead,
         // which is the last extension hook before the initial chat render.
-        pendingInteractiveResumePrompt = `Resuming ${plan.tasks.length} subagents...`;
+        pendingInteractiveResumePrompt = `Resuming ${totalTaskCount} subagents...`;
       }
     } catch (err) {
       console.error("[pi-subagent] Error in session_start:", err);
@@ -1198,9 +1224,7 @@ calls one after another. Do NOT put dependent tasks in the same array.
 
       async execute(toolCallId, params, signal, onUpdate, ctx) {
         try {
-          activeSubagents.clear();
           updateLatestBroadcastTargets(undefined);
-          nextActiveSubagentId = 1;
           const discovery = discoverAgents(ctx.cwd, "both");
           const { agents } = discovery;
 
@@ -1223,9 +1247,11 @@ calls one after another. Do NOT put dependent tasks in the same array.
           }
 
           const executionMode = tasks.length === 1 ? "single" : "parallel";
+          const topLevelBaseId = nextActiveSubagentId;
+          nextActiveSubagentId += tasks.length;
           const trackedOnUpdate = (partial: any) => {
             if (isSubagentDetails(partial?.details)) {
-              updateLatestBroadcastTargets(partial.details);
+              updateLatestBroadcastTargets(partial.details, topLevelBaseId);
               emitNestedProgressToParent(toolCallId, partial.details);
             }
             onUpdate?.(partial);
@@ -1275,7 +1301,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
             projectAgentConfirmationSetting === "ask" &&
             !approvedProjectAgentDirsForSession.has(projectAgentSessionKey);
           if (shouldConfirmProjectAgents) {
-            if (ctx.hasUI) {
+            if (ctx.hasUI && !isRpcMode(process.argv)) {
               const approval = await confirmProjectAgentsIfNeeded(
                 requestedProjectAgents,
                 discovery.projectAgentsDir,
@@ -1311,12 +1337,10 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
             }
           }
 
-          const resumePlan =
-            pendingResumePlan && sameTasks(pendingResumePlan.tasks, tasks)
-              ? pendingResumePlan
-              : null;
-          if (resumePlan) {
-            pendingResumePlan = null;
+          const resumePlanIndex = pendingResumePlans.findIndex((plan) => sameTasks(plan.tasks, tasks));
+          const resumePlan = resumePlanIndex >= 0 ? pendingResumePlans[resumePlanIndex] : null;
+          if (resumePlanIndex >= 0) {
+            pendingResumePlans.splice(resumePlanIndex, 1);
           }
 
           if (tasks.length === 1) {
@@ -1337,6 +1361,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
               // defaulting to whatever settings.json says at spawn time, which
               // can change while the parent session is long-running.
               formatModelFlag(modelToRestoreAfterResume ?? ctx.model ?? lastRestorableModel),
+              topLevelBaseId,
             );
           }
 
@@ -1351,6 +1376,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
             (index) => getSessionDirForTask(resumePlan?.previousToolCallId ?? toolCallId, index),
             !!resumePlan,
             formatModelFlag(modelToRestoreAfterResume ?? ctx.model ?? lastRestorableModel),
+            topLevelBaseId,
           );
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -1392,7 +1418,8 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
     previousResult: SingleResult | undefined,
     sessionDir: string,
     resumeExistingSession: boolean,
-    fallbackModel?: string,
+    fallbackModel: string | undefined,
+    topLevelBaseId: number,
   ) {
     if (previousResult && isFinishedResult(previousResult)) {
       return {
@@ -1425,7 +1452,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
       initialResult: previousResult,
       fallbackModel,
       onHandle: (handle) => {
-        activeId = 1;
+        activeId = topLevelBaseId;
         activeSubagents.set(activeId, { agent: agentName, task, handle });
         updateLatestBroadcastTargets(undefined);
       },
@@ -1473,7 +1500,8 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
     resumeResults: SingleResult[] | undefined,
     getSessionDir: (index: number) => string,
     resumeExistingSessions: boolean,
-    fallbackModel?: string,
+    fallbackModel: string | undefined,
+    topLevelBaseId: number,
   ) {
     const taskIds = new Map<number, number>();
     try {
@@ -1494,7 +1522,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
         currentSubagentSessionRoot,
         fallbackModel,
         (index, task, handle) => {
-          const id = index + 1;
+          const id = topLevelBaseId + index;
           taskIds.set(index, id);
           activeSubagents.set(id, { agent: task.agent, task: task.task, handle });
           updateLatestBroadcastTargets(undefined);

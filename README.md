@@ -117,7 +117,7 @@ pi --no-subagent-prevent-cycles   # allow cycles (not recommended)
 
 | Env Var                          | Default | Description                              |
 | -------------------------------- | ------- | ---------------------------------------- |
-| `PI_SUBAGENT_MAX_PARALLEL_TASKS` | `16`    | Max tasks per single call                |
+| `PI_SUBAGENT_MAX_PARALLEL_TASKS` | `30`    | Max tasks per single call                |
 | `PI_SUBAGENT_MAX_CONCURRENCY`    | `8`     | Max subagents running simultaneously     |
 
 ## Steering Running Subagents

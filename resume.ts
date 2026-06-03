@@ -54,9 +54,13 @@ function getSubagentToolCalls(message: any): Array<{ id: string; args: any }> {
   if (!message || message.role !== "assistant" || !Array.isArray(message.content)) return [];
   const calls: Array<{ id: string; args: any }> = [];
   for (const part of message.content) {
-    if (part?.type === "toolCall" && part.name === "subagent" && typeof part.id === "string") {
-      calls.push({ id: part.id, args: part.arguments });
-    }
+    if (part?.type !== "toolCall" || part.name !== "subagent") continue;
+    const id = typeof part.id === "string"
+      ? part.id
+      : typeof part.toolCallId === "string"
+        ? part.toolCallId
+        : undefined;
+    if (id) calls.push({ id, args: part.arguments });
   }
   return calls;
 }
@@ -172,7 +176,7 @@ function hasOnlyIgnorableTrailingEntries(entries: SessionEntry[], activityOrder:
   return true;
 }
 
-export function findLatestResumableSubagentCall(ctx: ExtensionContext): ResumableSubagentCall | null {
+export function findLatestResumableSubagentCalls(ctx: ExtensionContext): ResumableSubagentCall[] {
   const entries = branchEntries(ctx);
   const calls = new Map<string, { tasks: Array<{ agent: string; task: string }>; order: number }>();
   const results = new Map<string, { details?: SubagentDetails; isError: boolean; order: number }>();
@@ -193,7 +197,7 @@ export function findLatestResumableSubagentCall(ctx: ExtensionContext): Resumabl
     }
   });
 
-  const candidates: Array<ResumableSubagentCall & { activityOrder: number }> = [];
+  const candidates: Array<ResumableSubagentCall & { callOrder: number; activityOrder: number }> = [];
   for (const [toolCallId, call] of calls) {
     const result = results.get(toolCallId);
     const unfinished = !result || result.isError || hasUnfinishedResults(result.details, call.tasks.length);
@@ -202,13 +206,41 @@ export function findLatestResumableSubagentCall(ctx: ExtensionContext): Resumabl
       previousToolCallId: toolCallId,
       tasks: call.tasks,
       details: result?.details,
+      callOrder: call.order,
       activityOrder: result?.order ?? call.order,
     });
   }
 
   const latest = candidates.sort((a, b) => a.activityOrder - b.activityOrder).at(-1);
-  if (!latest || !hasOnlyIgnorableTrailingEntries(entries, latest.activityOrder)) return null;
-  return latest;
+  if (!latest) return [];
+
+  // If one assistant message issued several subagent tool calls, Pi records
+  // separate tool results for them. Resuming only the last one leaves sibling
+  // subagents permanently abandoned. Resume every unfinished call from that
+  // same assistant message as one synthetic assistant turn.
+  const batch = candidates
+    .filter((candidate) => candidate.callOrder === latest.callOrder)
+    .sort((a, b) => a.activityOrder - b.activityOrder);
+  const siblingResultOrders = Array.from(calls.entries())
+    .filter(([, call]) => call.order === latest.callOrder)
+    .map(([toolCallId]) => results.get(toolCallId)?.order)
+    .filter((order): order is number => typeof order === "number");
+  const latestBatchActivity = Math.max(
+    latest.callOrder,
+    ...batch.map((candidate) => candidate.activityOrder),
+    ...siblingResultOrders,
+  );
+  if (!hasOnlyIgnorableTrailingEntries(entries, latestBatchActivity)) return [];
+
+  return batch.map(({ previousToolCallId, tasks, details }) => ({
+    previousToolCallId,
+    tasks,
+    details,
+  }));
+}
+
+export function findLatestResumableSubagentCall(ctx: ExtensionContext): ResumableSubagentCall | null {
+  return findLatestResumableSubagentCalls(ctx).at(-1) ?? null;
 }
 
 export function sameTasks(

@@ -38,6 +38,9 @@ function makeResult(overrides: Partial<SingleResult> = {}): SingleResult {
     stderr: "",
     usage: emptyUsage(),
     toolCalls: {},
+    completedTurns: 0,
+    turnInProgress: false,
+    liveLog: [],
     ...overrides,
   };
 }
@@ -227,6 +230,18 @@ describe("getFinalOutput", () => {
       makeTextMessage("second"),
     ];
     assert.equal(getFinalOutput(msgs), "second");
+  });
+
+  test("returns last text part in the last assistant message", () => {
+    const msg = {
+      role: "assistant",
+      content: [
+        { type: "text", text: "draft" },
+        { type: "toolCall", name: "bash", arguments: {} },
+        { type: "text", text: "final" },
+      ],
+    } as unknown as Message;
+    assert.equal(getFinalOutput([msg]), "final");
   });
 
   test("returns empty string for no messages", () => {

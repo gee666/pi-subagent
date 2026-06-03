@@ -34,6 +34,9 @@ function makeResult(overrides: Partial<SingleResult> = {}): SingleResult {
     stderr: "",
     usage: emptyUsage(),
     toolCalls: {},
+    completedTurns: 0,
+    turnInProgress: false,
+    liveLog: [],
     ...overrides,
   };
 }
@@ -432,6 +435,8 @@ describe("runAgent resilience", () => {
     });
 
     assert.match(result.stderr, /startup timeout/);
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.stopReason, "error");
     assert.doesNotMatch(result.stderr, /session directory does not exist/);
   });
 
@@ -483,7 +488,57 @@ describe("runAgent resilience", () => {
     });
 
     assert.match(result.stderr, /startup timeout/);
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.stopReason, "error");
     assert.doesNotMatch(result.stderr, /session directory does not exist/);
+  });
+
+  test("resume subprocess that exits without new messages is an error", async () => {
+    const { runAgentSubprocess: runAgent } = await import("../runner.js");
+    const fakeAgent = {
+      name: "fake",
+      description: "fake agent",
+      systemPrompt: "",
+      source: "user" as const,
+      filePath: "/fake/agent.md",
+    };
+
+    const result = await runAgent({
+      piCommandOverride: {
+        command: process.execPath,
+        argsPrefix: ["-e", "process.exit(0)", "--"],
+      },
+      cwd: "/tmp",
+      agents: [fakeAgent],
+      agentName: "fake",
+      task: "continue work",
+      parentDepth: 0,
+      parentAgentStack: [],
+      maxDepth: 3,
+      preventCycles: false,
+      resumeSession: true,
+      sessionDir: "/tmp",
+      initialResult: makeResult({
+        agent: "fake",
+        agentSource: "user",
+        task: "continue work",
+        messages: [{ role: "assistant", content: [{ type: "text", text: "started" }] } as any],
+        sessionDir: "/tmp",
+      }),
+      makeDetails: (results) => ({
+        mode: "single",
+        delegationMode: "spawn",
+        projectAgentsDir: null,
+        results,
+        aggregatedUsage: emptyUsage(),
+        aggregatedToolCalls: {},
+        usageTree: [],
+      }),
+    });
+
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.stopReason, "error");
+    assert.match(result.errorMessage ?? "", /resume made no progress/i);
   });
 
   test("startup timeout kills a hung process and returns a result", async () => {
@@ -522,6 +577,8 @@ describe("runAgent resilience", () => {
     assert.ok(typeof result.stderr === "string");
     assert.ok(Array.isArray(result.messages));
     assert.ok(result.stderr.includes("startup timeout"));
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.stopReason, "error");
   });
 
 });

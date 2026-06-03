@@ -4,6 +4,7 @@ import { buildSubagentDetails, emptyUsage, type SingleResult } from "../types.js
 import {
   SUBAGENT_SESSION_ROOT_ENV,
   findLatestResumableSubagentCall,
+  findLatestResumableSubagentCalls,
   getDefaultSubagentSessionRoot,
   sameTasks,
 } from "../resume.js";
@@ -42,14 +43,14 @@ function messageEntry(message: any, id: string): any {
   };
 }
 
-function assistantSubagentCall(toolCallId = "call-subagent", callTasks = tasks): any {
+function assistantSubagentCall(toolCallId = "call-subagent", callTasks = tasks, idField: "id" | "toolCallId" = "id"): any {
   return messageEntry(
     {
       role: "assistant",
       content: [
         {
           type: "toolCall",
-          id: toolCallId,
+          [idField]: toolCallId,
           name: "subagent",
           arguments: { tasks: callTasks },
         },
@@ -170,6 +171,17 @@ describe("findLatestResumableSubagentCall", () => {
     assert.equal(plan.details?.results[0].stopReason, "aborted");
   });
 
+  test("resumes calls whose assistant part uses toolCallId instead of id", () => {
+    const plan = findLatestResumableSubagentCall(makeCtx([
+      assistantSubagentCall("call-subagent", tasks, "toolCallId"),
+      subagentToolResult(),
+    ]));
+
+    assert.ok(plan);
+    assert.equal(plan.previousToolCallId, "call-subagent");
+    assert.deepEqual(plan.tasks, tasks);
+  });
+
   test("still resumes when Pi appends only a trailing aborted assistant cleanup message", () => {
     const plan = findLatestResumableSubagentCall(makeCtx([
       assistantSubagentCall(),
@@ -258,6 +270,60 @@ describe("findLatestResumableSubagentCall", () => {
     ]));
 
     assert.equal(plan, null);
+  });
+
+  test("returns all unfinished sibling calls from the latest assistant tool-use turn", () => {
+    const firstTasks = [{ agent: "first", task: "first task" }];
+    const secondTasks = [{ agent: "second", task: "second task" }];
+    const bothCalls = messageEntry(
+      {
+        role: "assistant",
+        content: [
+          { type: "toolCall", id: "first-call", name: "subagent", arguments: { tasks: firstTasks } },
+          { type: "toolCall", id: "second-call", name: "subagent", arguments: { tasks: secondTasks } },
+        ],
+        stopReason: "toolUse",
+        timestamp: Date.now(),
+      },
+      "assistant-both-unfinished",
+    );
+
+    const plans = findLatestResumableSubagentCalls(makeCtx([
+      bothCalls,
+      subagentToolResult("second-call", buildSubagentDetails("single", "spawn", null, [makeResult({ agent: "second", task: "second task" })])),
+      subagentToolResult("first-call", buildSubagentDetails("single", "spawn", null, [makeResult({ agent: "first", task: "first task" })])),
+    ]));
+
+    assert.equal(plans.length, 2);
+    assert.deepEqual(plans.map((plan) => plan.previousToolCallId), ["second-call", "first-call"]);
+  });
+
+  test("resumes an unfinished sibling call even if another sibling result follows it", () => {
+    const firstTasks = [{ agent: "first", task: "first task" }];
+    const secondTasks = [{ agent: "second", task: "second task" }];
+    const bothCalls = messageEntry(
+      {
+        role: "assistant",
+        content: [
+          { type: "toolCall", id: "first-call", name: "subagent", arguments: { tasks: firstTasks } },
+          { type: "toolCall", id: "second-call", name: "subagent", arguments: { tasks: secondTasks } },
+        ],
+        stopReason: "toolUse",
+        timestamp: Date.now(),
+      },
+      "assistant-both-partial",
+    );
+    const successfulSecond = buildSubagentDetails("single", "spawn", null, [
+      makeResult({ agent: "second", task: "second task", exitCode: 0, stopReason: "stop", errorMessage: undefined, stderr: "" }),
+    ]);
+
+    const plans = findLatestResumableSubagentCalls(makeCtx([
+      bothCalls,
+      subagentToolResult("second-call", successfulSecond, false),
+    ]));
+
+    assert.equal(plans.length, 1);
+    assert.equal(plans[0].previousToolCallId, "first-call");
   });
 
   test("selects the unfinished call with the latest activity, not insertion order", () => {

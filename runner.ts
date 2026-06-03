@@ -62,6 +62,7 @@ function endedWithSyntheticResumeFailure(messages: Message[]): boolean {
   const hasToolCall = content.some((part: any) => part?.type === "toolCall");
   return !handedOffToRealModel && !hasToolCall;
 }
+
 const SUBAGENT_DEPTH_ENV = "PI_SUBAGENT_DEPTH";
 const SUBAGENT_MAX_DEPTH_ENV = "PI_SUBAGENT_MAX_DEPTH";
 const SUBAGENT_STACK_ENV = "PI_SUBAGENT_STACK";
@@ -620,6 +621,8 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
 
   const shouldContinueSession = resumeSession && (!sessionDir || sessionDirExists(sessionDir));
 
+  const initialMessageCount = initialResult?.messages?.length ?? 0;
+
   const result: SingleResult = {
     agent: agentName,
     agentSource: agent.source,
@@ -704,6 +707,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       let hangTimer: ReturnType<typeof setTimeout> | undefined;
       let startupTimer: ReturnType<typeof setTimeout> | undefined;
       let receivedFirstEvent = false;
+      let forcedExitCode: number | undefined;
 
       const sendRpc = (command: Record<string, unknown>) => {
         proc.stdin?.write(`${JSON.stringify(command)}\n`);
@@ -774,9 +778,9 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
         let event: any;
         try { event = JSON.parse(line); } catch { event = null; }
         if (event?.type === "agent_end") {
-          if (result.exitCode === -1) result.exitCode = 0;
+          if (result.exitCode === -1) result.exitCode = forcedExitCode ?? 0;
           try { proc.kill("SIGTERM"); } catch { /* already dead */ }
-          doResolve(0);
+          doResolve(forcedExitCode ?? 0);
           return;
         }
         const accepted = processJsonLine(line, result);
@@ -818,7 +822,11 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       if (startupTimeoutMs > 0) {
         startupTimer = setTimeout(() => {
           if (resolved || receivedFirstEvent) return;
-          result.stderr += `\n[pi-subagent] Killed: no JSON output after ${startupTimeoutMs}ms (startup timeout).`;
+          const message = `Subagent startup timeout: no JSON output after ${startupTimeoutMs}ms.`;
+          forcedExitCode = 1;
+          result.stopReason = "error";
+          result.errorMessage = message;
+          result.stderr += `\n[pi-subagent] Killed: ${message}`;
           try { proc.kill("SIGTERM"); } catch { /* already dead */ }
           setTimeout(() => {
             if (!resolved) {
@@ -840,13 +848,13 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       });
 
       proc.on("close", (code) => {
-        doResolve(code ?? 0);
+        doResolve(forcedExitCode ?? code ?? 0);
       });
 
       proc.on("exit", (code) => {
         // If the process exits, resolve as soon as possible.
         // Give a tiny grace period for any remaining buffered stdout data.
-        setTimeout(() => doResolve(code ?? 0), 100);
+        setTimeout(() => doResolve(forcedExitCode ?? code ?? 0), 100);
       });
 
       proc.on("error", (err) => {
@@ -877,6 +885,13 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       result.stopReason = "aborted";
       result.errorMessage = "Subagent was aborted.";
       if (!result.stderr.trim()) result.stderr = "Subagent was aborted.";
+    }
+
+    if (result.exitCode === 0 && shouldContinueSession && result.messages.length <= initialMessageCount) {
+      result.exitCode = 1;
+      result.stopReason = "error";
+      result.errorMessage = "Subagent resume made no progress: resumed subprocess exited without producing any new messages.";
+      if (!result.stderr.trim()) result.stderr = result.errorMessage;
     }
 
     if (result.exitCode === 0 && endedWithSyntheticResumeFailure(result.messages)) {

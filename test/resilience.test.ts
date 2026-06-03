@@ -33,6 +33,9 @@ function makeResult(overrides: Partial<SingleResult> = {}): SingleResult {
     stderr: "",
     usage: emptyUsage(),
     toolCalls: {},
+    completedTurns: 0,
+    turnInProgress: false,
+    liveLog: [],
     ...overrides,
   };
 }
@@ -123,6 +126,8 @@ describe("runAgent: catch block covers spawn errors", async () => {
     assert.ok(Array.isArray(result!.messages));
     // Should mention startup timeout in stderr
     assert.ok(result!.stderr.includes("startup timeout"), `Expected startup timeout in stderr, got: ${result!.stderr.slice(0, 200)}`);
+    assert.equal(result!.exitCode, 1);
+    assert.equal(result!.stopReason, "error");
   });
 
   test("startup timeout works with special characters in task", async () => {
@@ -154,6 +159,8 @@ describe("runAgent: catch block covers spawn errors", async () => {
     assert.ok(result! !== undefined);
     assert.ok(typeof result!.exitCode === "number");
     assert.ok(result!.stderr.includes("startup timeout"));
+    assert.equal(result!.exitCode, 1);
+    assert.equal(result!.stopReason, "error");
   });
 
   test("unknown agent returns structured error result", async () => {
