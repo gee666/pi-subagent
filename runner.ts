@@ -39,6 +39,13 @@ const SIGKILL_TIMEOUT_MS = 5000;
 const HANG_GUARD_DELAY_MS = 5000;
 const DEFAULT_STARTUP_TIMEOUT_MS = 120_000; // only for startup (before first assistant turn)
 const SUBAGENT_STARTUP_TIMEOUT_ENV = "PI_SUBAGENT_STARTUP_TIMEOUT";
+// A startup timeout is almost always a transient cold-start stall (slow cli /
+// extension load, momentarily busy box) rather than a deterministic failure, so
+// re-spawn a clean child a few times before surfacing the error. This does NOT
+// change the per-attempt startup window.
+const DEFAULT_STARTUP_RETRIES = 2;
+const SUBAGENT_STARTUP_RETRIES_ENV = "PI_SUBAGENT_STARTUP_RETRIES";
+const STARTUP_RETRY_BASE_BACKOFF_MS = 1_000;
 const SUBAGENT_PI_COMMAND_ENV = "PI_SUBAGENT_PI_COMMAND";
 const SUBAGENT_PI_ARGS_PREFIX_ENV = "PI_SUBAGENT_PI_ARGS_PREFIX";
 
@@ -109,15 +116,30 @@ function getCurrentPiCliScript(): string | null {
   const script = process.argv[1];
   if (!script) return null;
 
-  // When this extension is loaded by pi, process.argv[1] is the pi CLI JS
-  // entrypoint. Reusing it with process.execPath avoids relying on PATH while
-  // still running the exact same pi installation as the parent process.
-  const normalized = script.replace(/\\/g, "/");
-  if (!normalized.includes("/pi-coding-agent/") || !normalized.endsWith("/dist/cli.js")) {
-    return null;
+  // When this extension is loaded by pi, process.argv[1] is the pi entrypoint.
+  // Reusing it with process.execPath avoids relying on PATH while still running
+  // the exact same pi installation as the parent process.
+  //
+  // On Linux/macOS the launched entrypoint is usually the npm `bin` symlink
+  // (e.g. <prefix>/bin/pi) that points at .../pi-coding-agent/dist/cli.js, so
+  // argv[1] does NOT end in /dist/cli.js. Resolve symlinks before matching —
+  // otherwise this check fails and we fall back to scanning PATH, which can
+  // pick a different (e.g. much slower, cross-filesystem) pi install than the
+  // one actually running.
+  const candidates = [script];
+  try {
+    const real = fs.realpathSync(script);
+    if (real && real !== script) candidates.push(real);
+  } catch {
+    // argv[1] not statable; fall through with the raw value.
   }
-
-  return script;
+  for (const candidate of candidates) {
+    const normalized = candidate.replace(/\\/g, "/");
+    if (normalized.includes("/pi-coding-agent/") && normalized.endsWith("/dist/cli.js")) {
+      return candidate;
+    }
+  }
+  return null;
 }
 
 function findPiCliScriptOnPath(): string | null {
@@ -127,6 +149,22 @@ function findPiCliScriptOnPath(): string | null {
     for (const shimName of process.platform === "win32" ? ["pi.cmd", "pi"] : ["pi"]) {
       const shimPath = path.join(dir, shimName);
       if (!fs.existsSync(shimPath)) continue;
+
+      // Common on Linux/macOS: the npm `bin/pi` entry is a symlink pointing
+      // straight at .../pi-coding-agent/dist/cli.js. Resolve it directly — its
+      // file *content* is JS (not a wrapper that names cli.js), so the text
+      // regex below would miss it and we'd skip this (often faster, same-
+      // filesystem) install in favour of a later PATH entry.
+      try {
+        const real = fs.realpathSync(shimPath);
+        const normalized = real.replace(/\\/g, "/");
+        if (normalized.includes("/pi-coding-agent/") && normalized.endsWith("/dist/cli.js")) {
+          return real;
+        }
+      } catch {
+        // not a resolvable symlink; fall through to the wrapper-text scan.
+      }
+
       let text = "";
       try {
         text = fs.readFileSync(shimPath, "utf8");
@@ -674,8 +712,17 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       fallbackModel,
     );
     let wasAborted = false;
+    const startupRetries = (() => {
+      const raw = process.env[SUBAGENT_STARTUP_RETRIES_ENV];
+      const parsed = parseNonNegativeInt(raw);
+      return parsed !== null ? parsed : DEFAULT_STARTUP_RETRIES;
+    })();
+    let startupTimedOut = false;
+    let exitCode = -1;
 
-    const exitCode = await new Promise<number>((resolve) => {
+    for (let attempt = 0; ; attempt++) {
+      startupTimedOut = false;
+      exitCode = await new Promise<number>((resolve) => {
       const nextDepth = Math.max(0, Math.floor(parentDepth)) + 1;
       const propagatedMaxDepth = Math.max(0, Math.floor(maxDepth));
       const propagatedStack = [...parentAgentStack, agentName];
@@ -822,6 +869,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       if (startupTimeoutMs > 0) {
         startupTimer = setTimeout(() => {
           if (resolved || receivedFirstEvent) return;
+          startupTimedOut = true;
           const message = `Subagent startup timeout: no JSON output after ${startupTimeoutMs}ms.`;
           forcedExitCode = 1;
           result.stopReason = "error";
@@ -876,7 +924,25 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
         if (signal.aborted) kill();
         else signal.addEventListener("abort", kill, { once: true });
       }
-    });
+      });
+
+      const noProgress = result.messages.length <= initialMessageCount;
+      const canRetry =
+        startupTimedOut && !wasAborted && noProgress && attempt < startupRetries;
+      if (!canRetry) break;
+
+      // Transient cold-start stall: clear the error markers the startup timer
+      // set on `result`, then re-spawn a clean child. The per-attempt startup
+      // window is unchanged; we just give the child another chance to boot.
+      result.exitCode = -1;
+      result.stopReason = undefined;
+      result.errorMessage = undefined;
+      result.stderr += `\n[pi-subagent] Startup timeout; retrying (attempt ${attempt + 2}/${startupRetries + 1}).`;
+      emitUpdate();
+      await new Promise<void>((resolve) =>
+        setTimeout(resolve, STARTUP_RETRY_BASE_BACKOFF_MS * (attempt + 1)),
+      );
+    }
 
     result.exitCode = exitCode;
     result.toolCalls = extractToolCalls(result.messages); // populate from parsed messages
