@@ -1,4 +1,7 @@
 import { strict as assert } from "node:assert";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { describe, it } from "node:test";
 
 import {
@@ -59,6 +62,7 @@ function completedLeaf(agent: string, finalText: string): SingleResult {
 		agentSource: "builtin",
 		task: `do ${agent} work`,
 		exitCode: 0,
+		finalOutput: finalText,
 		messages: [
 			{ role: "assistant", content: [{ type: "text", text: finalText }] } as any,
 		],
@@ -255,6 +259,59 @@ describe("renderTreeLines live activity", () => {
 		assert.ok(lines.includes(THINKING), `expected thinking line in:\n${lines}`);
 		assert.ok(lines.includes(`${ARROW} bash`), `expected bash tool_start in:\n${lines}`);
 		assert.ok(lines.includes("grep -rn FOO src"), `expected bash arg preview in:\n${lines}`);
+	});
+
+	it("reconstructs nested tree from referenced subagent session files", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-tree-"));
+		try {
+			const nestedDetails = {
+				mode: "single",
+				delegationMode: "spawn",
+				projectAgentsDir: null,
+				results: [completedLeaf("code-reviwer", "Review done.")],
+				aggregatedUsage: usage(),
+				aggregatedToolCalls: {},
+				usageTree: [],
+			} as SubagentDetails;
+			const sessionFile = path.join(dir, "session.jsonl");
+			fs.writeFileSync(sessionFile, [
+				JSON.stringify({ type: "session", id: "child-session" }),
+				JSON.stringify({
+					type: "message",
+					message: {
+						role: "assistant",
+						content: [{ type: "toolCall", name: "subagent", toolCallId: "nested", arguments: { tasks: [{ agent: "code-reviwer", task: "review" }] } }],
+					},
+				}),
+				JSON.stringify({ type: "message", message: { role: "toolResult", toolName: "subagent", toolCallId: "nested", isError: false, details: nestedDetails } }),
+			].join("\n") + "\n");
+
+			const compactParent = completedLeaf("team-lead", "Lead done.");
+			compactParent.messages = [];
+			compactParent.sessionDir = dir;
+			const details = { mode: "single", delegationMode: "spawn", projectAgentsDir: null, results: [compactParent] } as SubagentDetails;
+			const lines = renderTreeLines(buildTopLevelNodes(details), theme, false).join("\n");
+
+			assert.ok(lines.includes("team-lead"), `expected parent in:\n${lines}`);
+			assert.ok(lines.includes("code-reviwer"), `expected nested child reconstructed from session in:\n${lines}`);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("renders finalOutput preview when durable details omit full transcript messages", () => {
+		const compactCompleted = completedLeaf("code-writer", "Published from compact details.");
+		compactCompleted.messages = [];
+		const details = {
+			mode: "single",
+			delegationMode: "spawn",
+			projectAgentsDir: null,
+			results: [compactCompleted],
+		} as SubagentDetails;
+
+		const lines = renderTreeLines(buildTopLevelNodes(details), theme, true).join("\n");
+
+		assert.ok(lines.includes("Published from compact details."), `expected cached final output in:\n${lines}`);
 	});
 
 	it("does not emit live activity for completed (non-running) nodes", () => {

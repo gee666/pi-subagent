@@ -43,12 +43,19 @@ import {
   type SingleResult,
   type SubagentDetails,
   DEFAULT_DELEGATION_MODE,
+  buildLiveSubagentDetails,
   buildSubagentDetails,
   getFinalOutput,
   getNestedSubagentResults,
   isResultError,
   isSubagentDetails,
+  emptyUsage,
+  addUsage,
+  emptyUsageSummary,
+  addUsageSummary,
+  usageSummaryToUsageStats,
 } from "./types.js";
+import { formatCombinedUsageStatusLine } from "./tree.js";
 
 // ---------------------------------------------------------------------------
 // Limits
@@ -294,13 +301,49 @@ function makeDetailsFactory(
   projectAgentsDir: string | null,
   delegationMode: DelegationMode,
 ) {
-  return (mode: "single" | "parallel") =>
-    (results: SingleResult[]): SubagentDetails =>
+  return (mode: "single" | "parallel") => {
+    const makeDetails = (results: SingleResult[]): SubagentDetails =>
       buildSubagentDetails(mode, delegationMode, projectAgentsDir, results);
+    makeDetails.live = (results: SingleResult[]): SubagentDetails =>
+      buildLiveSubagentDetails(mode, delegationMode, projectAgentsDir, results);
+    return makeDetails;
+  };
 }
 
 function formatAgentNames(agents: AgentConfig[]): string {
   return agents.map((a) => `${a.name} (${a.source})`).join(", ") || "none";
+}
+
+function collectCombinedUsageStatusLine(ctx: any): string | undefined {
+  const entries = typeof ctx?.sessionManager?.getEntries === "function" || typeof ctx?.sessionManager?.getBranch === "function"
+    ? branchEntries(ctx)
+    : [];
+  if (entries.length === 0) return undefined;
+
+  const parentUsage = emptyUsage();
+  const subagents = emptyUsageSummary();
+  for (const entry of entries as any[]) {
+    if (entry?.type !== "message") continue;
+    const msg = entry.message;
+    if (!msg) continue;
+    if (msg.role === "assistant" && msg.provider !== RESUME_PROVIDER) {
+      const usage = msg.usage;
+      if (usage) {
+        parentUsage.input += usage.input || 0;
+        parentUsage.output += usage.output || 0;
+        parentUsage.cacheRead += usage.cacheRead || 0;
+        parentUsage.cacheWrite += usage.cacheWrite || 0;
+        parentUsage.cost += usage.cost?.total || 0;
+        parentUsage.turns += 1;
+      }
+    }
+    if (msg.role === "toolResult" && msg.toolName === "subagent" && isSubagentDetails(msg.details)) {
+      addUsageSummary(subagents, msg.details.usageSummary ?? emptyUsageSummary());
+    }
+  }
+  const subagentUsage = usageSummaryToUsageStats(subagents) ?? emptyUsage();
+  addUsage(parentUsage, subagentUsage);
+  return formatCombinedUsageStatusLine(parentUsage, subagents.subagentCount);
 }
 
 function getCycleViolations(
@@ -1006,6 +1049,20 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  // If the host exposes a status-line extension point, add a second line under
+  // the normal session stats with parent + active-branch subagent totals. Older
+  // Pi versions simply won't have this API, so keep this best-effort.
+  try {
+    const statusProvider = (ctx: any) => collectCombinedUsageStatusLine(ctx ?? latestSessionCtx);
+    if (typeof pi.registerStatusLine === "function") {
+      pi.registerStatusLine({ id: "subagent-combined-usage", placement: "after-session-stats", render: statusProvider });
+    } else if (typeof pi.addStatusLine === "function") {
+      pi.addStatusLine(statusProvider, { id: "subagent-combined-usage", placement: "after-session-stats" });
+    }
+  } catch (err) {
+    console.error("[pi-subagent] Failed to register combined subagent status line:", err);
+  }
+
   // Auto-discover agents on session start
   pi.on("session_start", async (event, ctx) => {
     latestSessionCtx = ctx;
@@ -1466,7 +1523,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
       const errorMsg =
         result.errorMessage ||
         result.stderr ||
-        getFinalOutput(result.messages) ||
+        getFinalOutput(result.messages, result.finalOutput) ||
         "(no output)";
       return {
         content: [
@@ -1483,7 +1540,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
       content: [
         {
           type: "text" as const,
-          text: getFinalOutput(result.messages) || "(no output)",
+          text: getFinalOutput(result.messages, result.finalOutput) || "(no output)",
         },
       ],
       details: makeDetails("single")([result]),

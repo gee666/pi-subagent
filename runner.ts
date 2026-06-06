@@ -48,6 +48,7 @@ const SUBAGENT_STARTUP_RETRIES_ENV = "PI_SUBAGENT_STARTUP_RETRIES";
 const STARTUP_RETRY_BASE_BACKOFF_MS = 1_000;
 const SUBAGENT_PI_COMMAND_ENV = "PI_SUBAGENT_PI_COMMAND";
 const SUBAGENT_PI_ARGS_PREFIX_ENV = "PI_SUBAGENT_PI_ARGS_PREFIX";
+const MAX_CAPTURED_STDERR_CHARS = 64_000;
 
 /**
  * Stop reasons that indicate the agent has truly finished its work.
@@ -59,6 +60,25 @@ const TERMINAL_STOP_REASONS = new Set(["end_turn", "stop", "max_tokens", "error"
 
 function isTerminalStopReason(reason: string | undefined): boolean {
   return reason !== undefined && TERMINAL_STOP_REASONS.has(reason);
+}
+
+function appendBoundedStderr(result: SingleResult, text: string): void {
+  if (!text) return;
+  result.stderr += text;
+  if (result.stderr.length <= MAX_CAPTURED_STDERR_CHARS) return;
+  const omittedNow = result.stderr.length - MAX_CAPTURED_STDERR_CHARS;
+  result.stderr = result.stderr.slice(-MAX_CAPTURED_STDERR_CHARS);
+  result.stderrTruncatedChars = (result.stderrTruncatedChars ?? 0) + omittedNow;
+}
+
+function isProgressOnlyEvent(line: string, result: SingleResult): boolean {
+  try {
+    const event = JSON.parse(line);
+    if (event?.type !== "subagent_progress") return false;
+  } catch {
+    return false;
+  }
+  return processJsonLine(line, result);
 }
 
 function endedWithSyntheticResumeFailure(messages: Message[]): boolean {
@@ -591,8 +611,8 @@ export interface RunAgentOptions {
   signal?: AbortSignal;
   /** Streaming update callback. */
   onUpdate?: OnUpdateCallback;
-  /** Factory to wrap results into SubagentDetails. */
-  makeDetails: (results: SingleResult[]) => SubagentDetails;
+  /** Factory to wrap results into durable SubagentDetails. Optional .live keeps transient TUI state. */
+  makeDetails: ((results: SingleResult[]) => SubagentDetails) & { live?: (results: SingleResult[]) => SubagentDetails };
   /** Dedicated session directory for this subagent process. */
   sessionDir?: string;
   /** Top-level root for all subagent session directories in this delegation tree. */
@@ -684,10 +704,10 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       content: [
         {
           type: "text",
-          text: getFinalOutput(result.messages) || "(running...)",
+          text: getFinalOutput(result.messages, result.finalOutput) || "(running...)",
         },
       ],
-      details: makeDetails([result]),
+      details: (makeDetails.live ?? makeDetails)([result]),
     });
   };
 
@@ -874,7 +894,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
           forcedExitCode = 1;
           result.stopReason = "error";
           result.errorMessage = message;
-          result.stderr += `\n[pi-subagent] Killed: ${message}`;
+          appendBoundedStderr(result, `\n[pi-subagent] Killed: ${message}`);
           try { proc.kill("SIGTERM"); } catch { /* already dead */ }
           setTimeout(() => {
             if (!resolved) {
@@ -891,22 +911,49 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
         for (const line of lines) flushLine(line);
       });
 
+      let stderrBuffer = "";
+      const flushStderrLine = (line: string) => {
+        if (!line) return;
+        if (isProgressOnlyEvent(line, result)) {
+          emitUpdate();
+          return;
+        }
+        appendBoundedStderr(result, `${line}\n`);
+      };
+
       proc.stderr.on("data", (chunk: Buffer) => {
-        result.stderr += chunk.toString();
+        stderrBuffer += chunk.toString();
+        const lines = stderrBuffer.split("\n");
+        stderrBuffer = lines.pop() || "";
+        for (const line of lines) flushStderrLine(line);
+        if (stderrBuffer.length > MAX_CAPTURED_STDERR_CHARS * 2) {
+          appendBoundedStderr(result, stderrBuffer.slice(0, -MAX_CAPTURED_STDERR_CHARS));
+          stderrBuffer = stderrBuffer.slice(-MAX_CAPTURED_STDERR_CHARS);
+        }
       });
 
+      const flushRemainingStderr = () => {
+        if (!stderrBuffer) return;
+        flushStderrLine(stderrBuffer);
+        stderrBuffer = "";
+      };
+
       proc.on("close", (code) => {
+        flushRemainingStderr();
         doResolve(forcedExitCode ?? code ?? 0);
       });
 
       proc.on("exit", (code) => {
         // If the process exits, resolve as soon as possible.
         // Give a tiny grace period for any remaining buffered stdout data.
-        setTimeout(() => doResolve(forcedExitCode ?? code ?? 0), 100);
+        setTimeout(() => {
+          flushRemainingStderr();
+          doResolve(forcedExitCode ?? code ?? 0);
+        }, 100);
       });
 
       proc.on("error", (err) => {
-        result.stderr += `Spawn error: ${err.message}`;
+        appendBoundedStderr(result, `Spawn error: ${err.message}`);
         result.stopReason = "error";
         result.errorMessage = `Failed to spawn pi process: ${err.message}`;
         doResolve(1);
@@ -937,7 +984,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       result.exitCode = -1;
       result.stopReason = undefined;
       result.errorMessage = undefined;
-      result.stderr += `\n[pi-subagent] Startup timeout; retrying (attempt ${attempt + 2}/${startupRetries + 1}).`;
+      appendBoundedStderr(result, `\n[pi-subagent] Startup timeout; retrying (attempt ${attempt + 2}/${startupRetries + 1}).`);
       emitUpdate();
       await new Promise<void>((resolve) =>
         setTimeout(resolve, STARTUP_RETRY_BASE_BACKOFF_MS * (attempt + 1)),
@@ -1006,7 +1053,7 @@ export async function executeParallelSubprocess(
   preventCycles: boolean,
   signal: AbortSignal | undefined,
   onUpdate: OnUpdateCallback | undefined,
-  makeDetails: (results: SingleResult[]) => SubagentDetails,
+  makeDetails: ((results: SingleResult[]) => SubagentDetails) & { live?: (results: SingleResult[]) => SubagentDetails },
   resumeResults?: SingleResult[],
   getSessionDir?: (index: number, task: { agent: string; task: string }) => string | undefined,
   resumeExistingSessions = false,
@@ -1073,7 +1120,7 @@ export async function executeParallelSubprocess(
           text: `Parallel: ${done}/${allResults.length} done, ${running} running...`,
         },
       ],
-      details: makeDetails([...allResults]),
+      details: (makeDetails.live ?? makeDetails)([...allResults]),
     });
   };
 
@@ -1139,7 +1186,7 @@ export async function executeParallelSubprocess(
 
   const successCount = results.filter((r) => r.exitCode === 0).length;
   const summaries = results.map((r) => {
-    const output = getFinalOutput(r.messages);
+    const output = getFinalOutput(r.messages, r.finalOutput);
     return `[${r.agent}] ${r.exitCode === 0 ? "completed" : "failed"}: ${output || "(no output)"}`;
   });
 

@@ -248,6 +248,10 @@ describe("getFinalOutput", () => {
     assert.equal(getFinalOutput([]), "");
   });
 
+  test("returns fallback when compact durable details omit transcript text", () => {
+    assert.equal(getFinalOutput([], "cached final"), "cached final");
+  });
+
   test("skips non-text parts and non-assistant messages", () => {
     const toolCallMsg = makeToolCallMessage("bash");
     const assistantTextMsg = makeTextMessage("result text");
@@ -382,11 +386,47 @@ describe("buildSubagentDetails", () => {
     assert.equal(d.aggregatedToolCalls.write, 3);
   });
 
-  test("builds usage tree nodes", () => {
+  test("durable details omit usage tree nodes", () => {
     const r = makeResult({ agent: "my-agent" });
     const d = buildSubagentDetails("single", "spawn", null, [r]);
-    assert.equal(d.usageTree.length, 1);
-    assert.equal(d.usageTree[0].agent, "my-agent");
+    assert.equal(d.usageTree.length, 0);
+  });
+
+  test("durable details keep final output but omit bulky non-subagent transcript text", () => {
+    const r = makeResult({
+      messages: [
+        makeTextMessage("large final report"),
+        makeToolCallMessage("bash", { command: "printf huge" }),
+      ],
+      stderr: "x".repeat(10000),
+    });
+    const d = buildSubagentDetails("single", "spawn", null, [r]);
+    const stored = d.results[0];
+    assert.equal(stored.finalOutput, "large final report");
+    assert.equal(stored.messages.length, 0, "ordinary text/tool transcript is stored only in child session");
+    assert.ok(stored.stderr.length < 5000, "stderr is tail-capped in parent details");
+    assert.ok((stored.stderrTruncatedChars ?? 0) > 0);
+  });
+
+  test("durable details omit nested subagent transcript/tree and keep only summaries", () => {
+    const nestedDetails = buildSubagentDetails("single", "spawn", null, [makeResult({ agent: "child" })]);
+    const parent = makeResult({
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "not durable" },
+            { type: "toolCall", name: "subagent", arguments: { tasks: [{ agent: "child", task: "work" }] }, toolCallId: "nested" },
+          ],
+        } as unknown as Message,
+        makeToolResultMessage("subagent", nestedDetails),
+      ],
+    });
+    const d = buildSubagentDetails("single", "spawn", null, [parent]);
+    const stored = d.results[0];
+    assert.equal(stored.messages.length, 0);
+    assert.deepEqual(d.usageTree, []);
+    assert.equal(getNestedSubagentResults(stored.messages).length, 0);
   });
 });
 

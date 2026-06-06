@@ -6,7 +6,9 @@
  * imports from here and wraps the produced lines in pi-tui Containers/Text.
  */
 
+import * as fs from "node:fs";
 import * as os from "node:os";
+import * as path from "node:path";
 import {
 	type LiveLogEntry,
 	type NestedSubagentResult,
@@ -19,6 +21,7 @@ import {
 	getNestedSubagentResults,
 	isResultError,
 	isSubagentDetails,
+	usageSummaryToUsageStats,
 } from "./types.js";
 
 export const OUTPUT_PREVIEW_LINE_COUNT = 6;
@@ -64,6 +67,17 @@ export function formatTokens(count: number): string {
 	if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
 	if (count < 1000000) return `${Math.round(count / 1000)}k`;
 	return `${(count / 1000000).toFixed(1)}M`;
+}
+
+export function formatCombinedUsageStatusLine(
+	usage: Partial<UsageStats>,
+	subagentCount: number,
+): string {
+	const input = usage.input ?? 0;
+	const output = usage.output ?? 0;
+	const cacheRead = usage.cacheRead ?? 0;
+	const cost = usage.cost ?? 0;
+	return `↑${formatTokens(input)} ↓${formatTokens(output)} R${formatTokens(cacheRead)} $${cost.toFixed(3)} (with ${subagentCount} subagents)`;
 }
 
 export function formatUsage(usage: Partial<UsageStats>, model?: string): string {
@@ -382,15 +396,64 @@ function buildLeafPreview(result: SingleResult): string[] | undefined {
 			lines.push(...lastNonEmptyLines(item.text, OUTPUT_PREVIEW_LINE_COUNT));
 		}
 	}
-	const finalOutput = getFinalOutput(result.messages);
+	const finalOutput = getFinalOutput(result.messages, result.finalOutput);
 	if (finalOutput) lines.push(...lastNonEmptyLines(finalOutput, OUTPUT_PREVIEW_LINE_COUNT));
 	const unique = lines.filter((line, index) => line && lines.indexOf(line) === index);
 	return unique.length > 0 ? unique.slice(-OUTPUT_PREVIEW_LINE_COUNT) : undefined;
 }
 
+const sessionMessageCache = new Map<string, { mtimeMs: number; messages: SingleResult["messages"] }>();
+
+function latestSessionFile(sessionDir: string): string | undefined {
+	try {
+		const entries = fs.readdirSync(sessionDir)
+			.filter((name) => name.endsWith(".jsonl"))
+			.map((name) => {
+				const file = path.join(sessionDir, name);
+				const stat = fs.statSync(file);
+				return { file, mtimeMs: stat.mtimeMs };
+			})
+			.sort((a, b) => b.mtimeMs - a.mtimeMs);
+		return entries[0]?.file;
+	} catch {
+		return undefined;
+	}
+}
+
+function loadMessagesFromSession(sessionDir: string | undefined): SingleResult["messages"] {
+	if (!sessionDir) return [];
+	const file = latestSessionFile(sessionDir);
+	if (!file) return [];
+	let mtimeMs = 0;
+	try { mtimeMs = fs.statSync(file).mtimeMs; } catch { return []; }
+	const cached = sessionMessageCache.get(file);
+	if (cached && cached.mtimeMs === mtimeMs) return cached.messages;
+
+	const messages: SingleResult["messages"] = [];
+	try {
+		for (const line of fs.readFileSync(file, "utf8").split("\n")) {
+			if (!line.trim()) continue;
+			let entry: any;
+			try { entry = JSON.parse(line); } catch { continue; }
+			if (entry?.type === "message" && entry.message) messages.push(entry.message);
+		}
+	} catch {
+		return [];
+	}
+	sessionMessageCache.set(file, { mtimeMs, messages });
+	return messages;
+}
+
+function hydrateResultFromSession(result: SingleResult): SingleResult {
+	if (result.messages?.length > 0) return result;
+	const messages = loadMessagesFromSession(result.sessionDir);
+	return messages.length > 0 ? { ...result, messages } : result;
+}
+
 function buildResultNode(result: SingleResult): TreeNode {
+	result = hydrateResultFromSession(result);
 	const status = statusFromResult(result);
-	const usage = formatUsage(result.usage, result.model);
+	const usage = formatUsage(result.usage ?? {}, result.model);
 	const metaParts: string[] = [result.agentSource];
 	if (usage) metaParts.push(usage);
 	if (status === "error") {
@@ -405,7 +468,7 @@ function buildResultNode(result: SingleResult): TreeNode {
 		status,
 		meta: metaParts.join(" • "),
 		task: result.task,
-		liveActivity: isRunning && result.liveLog?.length > 0 ? result.liveLog : undefined,
+		liveActivity: isRunning && (result.liveLog?.length ?? 0) > 0 ? result.liveLog : undefined,
 		outputPreview: !isRunning && children.length === 0 ? buildLeafPreview(result) : undefined,
 		children,
 	};
@@ -462,7 +525,7 @@ export function topLevelSummary(details: SubagentDetails, counts: TreeCounts): s
 	// aggregatedUsage includes own agents + all their nested descendants;
 	// fall back to summing only direct results for old serialised data lacking the field.
 	const totalUsage = formatUsage(
-		details.aggregatedUsage ?? aggregateUsage(details.results),
+		usageSummaryToUsageStats(details.usageSummary) ?? details.aggregatedUsage ?? aggregateUsage(details.results),
 	);
 	const parts = [
 		`${counts.running} running`,
