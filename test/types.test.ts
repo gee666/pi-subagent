@@ -203,6 +203,11 @@ describe("extractToolCalls", () => {
     assert.deepEqual(counts, {});
   });
 
+  test("returns empty for malformed non-array messages", () => {
+    const counts = extractToolCalls({ length: 1 } as unknown);
+    assert.deepEqual(counts, {});
+  });
+
   test("handles messages with no tool calls", () => {
     const msg = makeTextMessage("hello");
     const counts = extractToolCalls([msg]);
@@ -248,6 +253,10 @@ describe("getFinalOutput", () => {
     assert.equal(getFinalOutput([]), "");
   });
 
+  test("returns fallback for malformed non-array messages", () => {
+    assert.equal(getFinalOutput({ bad: true } as unknown, "cached final"), "cached final");
+  });
+
   test("returns fallback when compact durable details omit transcript text", () => {
     assert.equal(getFinalOutput([], "cached final"), "cached final");
   });
@@ -289,6 +298,10 @@ describe("getDisplayItems", () => {
 
   test("returns empty for no messages", () => {
     assert.deepEqual(getDisplayItems([]), []);
+  });
+
+  test("returns empty for malformed non-array messages", () => {
+    assert.deepEqual(getDisplayItems({ bad: true } as unknown), []);
   });
 });
 
@@ -438,6 +451,10 @@ describe("getNestedSubagentResults", () => {
   test("returns empty for no tool results", () => {
     const msgs = [makeTextMessage("hello")];
     assert.deepEqual(getNestedSubagentResults(msgs), []);
+  });
+
+  test("returns empty for malformed non-array messages", () => {
+    assert.deepEqual(getNestedSubagentResults({ bad: true } as unknown), []);
   });
 
   test("returns empty for tool results that are not subagent", () => {

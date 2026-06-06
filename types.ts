@@ -173,12 +173,16 @@ export function mergeToolCalls(target: ToolCallCounts, source: ToolCallCounts): 
   }
 }
 
+function asMessageArray(messages: unknown): Message[] {
+  return Array.isArray(messages) ? (messages as Message[]) : [];
+}
+
 /** Extract all tool calls made by assistant turns in a message list */
-export function extractToolCalls(messages: Message[]): ToolCallCounts {
+export function extractToolCalls(messages: unknown): ToolCallCounts {
   const counts: ToolCallCounts = {};
-  for (const msg of messages) {
+  for (const msg of asMessageArray(messages)) {
     if (msg.role !== "assistant") continue;
-    for (const part of (msg.content as any[]) ?? []) {
+    for (const part of (Array.isArray((msg as any).content) ? (msg as any).content : [])) {
       if ((part as any)?.type !== "toolCall") continue;
       const name: string = typeof (part as any).name === "string" ? (part as any).name : "unknown";
       counts[name] = (counts[name] ?? 0) + 1;
@@ -393,13 +397,14 @@ export function isSubagentDetails(value: unknown): value is SubagentDetails {
 }
 
 /** Extract the last assistant text from a message history. */
-export function getFinalOutput(messages: Message[], fallback?: string): string {
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const msg = messages[i];
-		if (msg.role === "assistant") {
-			for (let j = msg.content.length - 1; j >= 0; j--) {
-				const part = msg.content[j];
-				if (part.type === "text") return part.text;
+export function getFinalOutput(messages: unknown, fallback?: string): string {
+	const history = asMessageArray(messages);
+	for (let i = history.length - 1; i >= 0; i--) {
+		const msg = history[i];
+		if (msg.role === "assistant" && Array.isArray((msg as any).content)) {
+			for (let j = (msg as any).content.length - 1; j >= 0; j--) {
+				const part = (msg as any).content[j];
+				if (part?.type === "text") return part.text;
 			}
 		}
 	}
@@ -407,14 +412,14 @@ export function getFinalOutput(messages: Message[], fallback?: string): string {
 }
 
 /** Extract all display-worthy items from a message history. */
-export function getDisplayItems(messages: Message[]): DisplayItem[] {
+export function getDisplayItems(messages: unknown): DisplayItem[] {
 	const items: DisplayItem[] = [];
-	for (const msg of messages) {
-		if (msg.role === "assistant") {
-			for (const part of msg.content) {
-				if (part.type === "text") {
+	for (const msg of asMessageArray(messages)) {
+		if (msg.role === "assistant" && Array.isArray((msg as any).content)) {
+			for (const part of (msg as any).content) {
+				if (part?.type === "text") {
 					items.push({ type: "text", text: part.text });
-				} else if (part.type === "toolCall") {
+				} else if (part?.type === "toolCall") {
 					items.push({ type: "toolCall", name: part.name, args: part.arguments });
 				}
 			}
@@ -424,16 +429,16 @@ export function getDisplayItems(messages: Message[]): DisplayItem[] {
 }
 
 /** Extract nested subagent tool results from a message history. */
-export function getNestedSubagentResults(messages: Message[]): NestedSubagentResult[] {
+export function getNestedSubagentResults(messages: unknown): NestedSubagentResult[] {
 	const results: NestedSubagentResult[] = [];
-	for (const msg of messages) {
-		if (msg.role !== "toolResult") continue;
-		if (msg.toolName !== "subagent") continue;
-		if (!isSubagentDetails(msg.details)) continue;
+	for (const msg of asMessageArray(messages)) {
+		if ((msg as any)?.role !== "toolResult") continue;
+		if ((msg as any).toolName !== "subagent") continue;
+		if (!isSubagentDetails((msg as any).details)) continue;
 		results.push({
-			details: msg.details,
-			isError: msg.isError,
-			toolCallId: msg.toolCallId,
+			details: (msg as any).details,
+			isError: Boolean((msg as any).isError),
+			toolCallId: typeof (msg as any).toolCallId === "string" ? (msg as any).toolCallId : "",
 		});
 	}
 	return results;

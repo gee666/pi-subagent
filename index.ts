@@ -42,6 +42,7 @@ import {
   type DelegationMode,
   type SingleResult,
   type SubagentDetails,
+  type SubagentUsageSummary,
   DEFAULT_DELEGATION_MODE,
   buildLiveSubagentDetails,
   buildSubagentDetails,
@@ -54,6 +55,7 @@ import {
   emptyUsageSummary,
   addUsageSummary,
   usageSummaryToUsageStats,
+  usageSummaryFromUsage,
 } from "./types.js";
 import { formatCombinedUsageStatusLine } from "./tree.js";
 
@@ -314,11 +316,60 @@ function formatAgentNames(agents: AgentConfig[]): string {
   return agents.map((a) => `${a.name} (${a.source})`).join(", ") || "none";
 }
 
-function collectCombinedUsageStatusLine(ctx: any): string | undefined {
+function liveDetailsSignature(details: SubagentDetails): string {
+  return JSON.stringify(details.results.map((result) => ({
+    agent: result.agent,
+    task: result.task ?? "",
+  })));
+}
+
+function collectLiveUsageSummary(details: SubagentDetails): SubagentUsageSummary {
+  const summary = emptyUsageSummary();
+  for (const result of details.results) {
+    addUsageSummary(summary, usageSummaryFromUsage(result.usage));
+
+    const completedNested = getNestedSubagentResults(result.messages ?? []);
+    const completedNestedIds = new Set<string>();
+    const completedNestedSignatureCounts = new Map<string, number>();
+    for (const nested of completedNested) {
+      if (nested.toolCallId) completedNestedIds.add(nested.toolCallId);
+      const signature = liveDetailsSignature(nested.details);
+      completedNestedSignatureCounts.set(
+        signature,
+        (completedNestedSignatureCounts.get(signature) ?? 0) + 1,
+      );
+      addUsageSummary(
+        summary,
+        nested.details.usageSummary ?? collectLiveUsageSummary(nested.details),
+      );
+    }
+
+    for (const [liveToolCallId, liveNested] of Object.entries(result.liveNestedSubagents ?? {})) {
+      if (!isSubagentDetails(liveNested)) continue;
+      // Prefer durable completed toolResult messages over matching live progress.
+      // Some Pi versions key live progress differently than final tool results,
+      // so also de-dupe by requested child agent/task signature as a multiset.
+      if (completedNestedIds.has(liveToolCallId)) continue;
+      const signature = liveDetailsSignature(liveNested);
+      const completedSignatureCount = completedNestedSignatureCounts.get(signature) ?? 0;
+      if (completedSignatureCount > 0) {
+        completedNestedSignatureCounts.set(signature, completedSignatureCount - 1);
+        continue;
+      }
+      addUsageSummary(summary, collectLiveUsageSummary(liveNested));
+    }
+  }
+  return summary;
+}
+
+function collectCombinedUsageStatusLine(
+  ctx: any,
+  liveSummaries: SubagentUsageSummary[] = [],
+): string | undefined {
   const entries = typeof ctx?.sessionManager?.getEntries === "function" || typeof ctx?.sessionManager?.getBranch === "function"
     ? branchEntries(ctx)
     : [];
-  if (entries.length === 0) return undefined;
+  if (entries.length === 0 && liveSummaries.length === 0) return undefined;
 
   const parentUsage = emptyUsage();
   const subagents = emptyUsageSummary();
@@ -333,13 +384,19 @@ function collectCombinedUsageStatusLine(ctx: any): string | undefined {
         parentUsage.output += usage.output || 0;
         parentUsage.cacheRead += usage.cacheRead || 0;
         parentUsage.cacheWrite += usage.cacheWrite || 0;
-        parentUsage.cost += usage.cost?.total || 0;
+        parentUsage.cost += typeof usage.cost === "number" ? usage.cost : usage.cost?.total || 0;
         parentUsage.turns += 1;
       }
     }
     if (msg.role === "toolResult" && msg.toolName === "subagent" && isSubagentDetails(msg.details)) {
-      addUsageSummary(subagents, msg.details.usageSummary ?? emptyUsageSummary());
+      addUsageSummary(
+        subagents,
+        msg.details.usageSummary ?? usageSummaryFromUsage(msg.details.aggregatedUsage),
+      );
     }
+  }
+  for (const liveSummary of liveSummaries) {
+    addUsageSummary(subagents, liveSummary);
   }
   const subagentUsage = usageSummaryToUsageStats(subagents) ?? emptyUsage();
   addUsage(parentUsage, subagentUsage);
@@ -687,6 +744,7 @@ export default function (pi: ExtensionAPI) {
   let modelToRestoreAfterResume: any | undefined;
   const approvedProjectAgentDirsForSession = new Set<string>();
   const activeSubagents = new Map<number, { agent: string; task: string; handle: RunningSubagentHandle }>();
+  const activeSubagentUsageSummaries = new Map<string, SubagentUsageSummary>();
   const latestBroadcastTargets = {
     all: [] as BroadcastTarget[],
     youngest: [] as BroadcastTarget[],
@@ -858,9 +916,10 @@ export default function (pi: ExtensionAPI) {
   }
 
   function extractPendingSubagentTaskCounts(result: SingleResult): number[] {
-    const completedToolCallIds = new Set(getNestedSubagentResults(result.messages).map((nested) => nested.toolCallId));
+    const messages = Array.isArray((result as any).messages) ? (result as any).messages : [];
+    const completedToolCallIds = new Set(getNestedSubagentResults(messages).map((nested) => nested.toolCallId));
     const counts: number[] = [];
-    for (const message of result.messages as any[]) {
+    for (const message of messages) {
       if (message?.role !== "assistant" || !Array.isArray(message.content)) continue;
       for (const part of message.content) {
         if (part?.type !== "toolCall" || part?.name !== "subagent") continue;
@@ -1049,23 +1108,36 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  // If the host exposes a status-line extension point, add a second line under
-  // the normal session stats with parent + active-branch subagent totals. Older
-  // Pi versions simply won't have this API, so keep this best-effort.
-  try {
-    const statusProvider = (ctx: any) => collectCombinedUsageStatusLine(ctx ?? latestSessionCtx);
-    if (typeof pi.registerStatusLine === "function") {
-      pi.registerStatusLine({ id: "subagent-combined-usage", placement: "after-session-stats", render: statusProvider });
-    } else if (typeof pi.addStatusLine === "function") {
-      pi.addStatusLine(statusProvider, { id: "subagent-combined-usage", placement: "after-session-stats" });
+  // Pi exposes footer/status-line extension text through ctx.ui.setStatus().
+  // Keep a dedicated line updated with parent + active-branch subagent totals.
+  // This is shown by the normal footer underneath Pi's built-in session stats.
+  function formatFooterStatusText(ctx: any, text: string): string {
+    return typeof ctx?.ui?.theme?.fg === "function"
+      ? ctx.ui.theme.fg("dim", text)
+      : text;
+  }
+
+  function updateCombinedUsageStatus(ctx?: any): void {
+    const targetCtx = ctx ?? latestSessionCtx;
+    if (!targetCtx?.ui || typeof targetCtx.ui.setStatus !== "function") return;
+    try {
+      const line = collectCombinedUsageStatusLine(
+        targetCtx,
+        Array.from(activeSubagentUsageSummaries.values()),
+      );
+      targetCtx.ui.setStatus(
+        "subagent-usage",
+        line ? formatFooterStatusText(targetCtx, `total ${line}`) : undefined,
+      );
+    } catch (err) {
+      console.error("[pi-subagent] Failed to update combined subagent status line:", err);
     }
-  } catch (err) {
-    console.error("[pi-subagent] Failed to register combined subagent status line:", err);
   }
 
   // Auto-discover agents on session start
   pi.on("session_start", async (event, ctx) => {
     latestSessionCtx = ctx;
+    updateCombinedUsageStatus(ctx);
     try {
       // Always repair sessions left on the synthetic resume model, even in
       // nested subagents that can no longer delegate. Those leaf processes
@@ -1175,8 +1247,24 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  pi.on("agent_end", async () => {
+  pi.on("agent_end", async (_event, ctx) => {
+    updateCombinedUsageStatus(ctx);
     await restoreModelAfterResumeFailure();
+  });
+
+  pi.on("message_end", (_event, ctx) => {
+    latestSessionCtx = ctx;
+    updateCombinedUsageStatus(ctx);
+    setTimeout(() => updateCombinedUsageStatus(ctx), 0);
+  });
+
+  pi.on("tool_execution_end", (event, ctx) => {
+    latestSessionCtx = ctx;
+    if (event.toolName === "subagent") {
+      activeSubagentUsageSummaries.delete(event.toolCallId);
+      updateCombinedUsageStatus(ctx);
+      setTimeout(() => updateCombinedUsageStatus(ctx), 0);
+    }
   });
 
   pi.on("resources_discover", (_event, ctx) => {
@@ -1308,7 +1396,9 @@ calls one after another. Do NOT put dependent tasks in the same array.
           nextActiveSubagentId += tasks.length;
           const trackedOnUpdate = (partial: any) => {
             if (isSubagentDetails(partial?.details)) {
+              activeSubagentUsageSummaries.set(toolCallId, collectLiveUsageSummary(partial.details));
               updateLatestBroadcastTargets(partial.details, topLevelBaseId);
+              updateCombinedUsageStatus(ctx);
               emitNestedProgressToParent(toolCallId, partial.details);
             }
             onUpdate?.(partial);
