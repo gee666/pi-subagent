@@ -24,6 +24,7 @@ import {
   isSubagentToolName,
 } from "./types.js";
 import { SUBAGENT_SESSION_ROOT_ENV } from "./resume.js";
+import { SUBAGENT_NAMES_FILE_ENV } from "./names.js";
 import {
   DEFAULT_MAX_PARALLEL_TASKS,
   DEFAULT_MAX_CONCURRENCY,
@@ -632,6 +633,13 @@ export interface RunAgentOptions {
   sessionDir?: string;
   /** Top-level root for all subagent session directories in this delegation tree. */
   sessionRoot?: string;
+  /**
+   * Shared name-registry file for this delegation tree, passed to the child
+   * via its spawn environment. Deliberately NOT set on process.env of the
+   * parent itself: pi reloads extension modules on session switches, and a
+   * self-set env var would then masquerade as "inherited from a parent".
+   */
+  namesFile?: string;
   /** Continue the most recent session in sessionDir instead of creating a new one. */
   resumeSession?: boolean;
   /** Previously captured state for this same subagent, used to render resumed nested trees. */
@@ -784,6 +792,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
           [SUBAGENT_STACK_ENV]: JSON.stringify(propagatedStack),
           [SUBAGENT_PREVENT_CYCLES_ENV]: preventCycles ? "1" : "0",
           ...(sessionRoot ? { [SUBAGENT_SESSION_ROOT_ENV]: sessionRoot } : {}),
+          ...(opts.namesFile ? { [SUBAGENT_NAMES_FILE_ENV]: opts.namesFile } : {}),
           ...(fallbackModel ? { [SUBAGENT_FALLBACK_MODEL_ENV]: fallbackModel } : {}),
           // PI_OFFLINE is NOT forced here — see explanation near PI_OFFLINE_ENV.
         },
@@ -1093,6 +1102,8 @@ export async function executeParallelSubprocess(
     names?: Array<string | undefined>;
     /** Send each task text to the child verbatim (resume_subagents flow). */
     rawPrompts?: boolean;
+    /** Shared name-registry file passed to children via spawn env. */
+    namesFile?: string;
   },
 ): Promise<{
   content: Array<{ type: "text"; text: string }>;
@@ -1191,6 +1202,7 @@ export async function executeParallelSubprocess(
           task: t.task,
           subagentName: extras?.names?.[index],
           rawPrompt: extras?.rawPrompts === true,
+          namesFile: extras?.namesFile,
           parentDepth,
           parentAgentStack,
           maxDepth,

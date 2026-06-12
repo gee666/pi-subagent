@@ -39,18 +39,49 @@ export interface SubagentNamesIdentity {
   ownerId: string;
 }
 
-/** Extract the latest persisted names identity from session entries. */
+/** True when the registry file exists and contains at least one named agent. */
+function registryHasAgents(file: string): boolean {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    return !!parsed?.agents && typeof parsed.agents === "object" && Object.keys(parsed.agents).length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Extract the persisted names identity from session entries.
+ *
+ * A session may carry several identity entries (e.g. one written by a buggy
+ * or interrupted run pointing at an empty registry). Preference order:
+ *   1. the latest entry whose registry actually contains named agents
+ *   2. the latest entry whose registry file exists
+ *   3. the latest entry
+ */
 export function findPersistedNamesIdentity(entries: unknown): SubagentNamesIdentity | undefined {
   if (!Array.isArray(entries)) return undefined;
-  let found: SubagentNamesIdentity | undefined;
+  const candidates: SubagentNamesIdentity[] = [];
   for (const entry of entries as any[]) {
     if (entry?.type !== "custom" || entry.customType !== SUBAGENT_NAMES_CUSTOM_TYPE) continue;
     const data = entry.data;
     if (data && typeof data.namesFile === "string" && typeof data.ownerId === "string") {
-      found = { namesFile: data.namesFile, ownerId: data.ownerId };
+      candidates.push({ namesFile: data.namesFile, ownerId: data.ownerId });
     }
   }
-  return found;
+  if (candidates.length === 0) return undefined;
+  if (candidates.length === 1) return candidates[0];
+  const reversed = [...candidates].reverse();
+  return (
+    reversed.find((candidate) => registryHasAgents(candidate.namesFile)) ??
+    reversed.find((candidate) => {
+      try {
+        return fs.existsSync(candidate.namesFile);
+      } catch {
+        return false;
+      }
+    }) ??
+    reversed[0]
+  );
 }
 
 function readSessionHeader(sessionFilePath: string): any | undefined {

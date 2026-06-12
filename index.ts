@@ -30,7 +30,6 @@ import {
   resolveResumeTarget,
   updateNameRecord,
   SUBAGENT_NAMES_CUSTOM_TYPE,
-  SUBAGENT_NAMES_FILE_ENV,
 } from "./names.js";
 import { installSubagentFooter, type SubagentFooterController } from "./footer.js";
 import {
@@ -1286,19 +1285,21 @@ export default function (pi: ExtensionAPI) {
           // Pi assigns resumed/branched sessions a NEW session id, so the
           // registry path and ownership key must NOT be derived from the live
           // session id alone. Resolution order:
-          //   1. env (child subagent processes share the parent's registry)
-          //   2. identity persisted in the session metadata (custom entry)
+          //   1. identity persisted in the session metadata (custom entry) —
+          //      the session's own record always wins
+          //   2. env (a child subagent process's FIRST run, before it has
+          //      persisted anything)
           //   3. ancestor walk over header.parentSession (self-heals sessions
           //      from before the identity entry existed)
           //   4. fresh path from the current session id
           const inherited = getInheritedNamesFile();
           const persisted = findPersistedNamesIdentity(ctx.sessionManager.getEntries?.() ?? []);
-          if (inherited) {
-            currentNamesFile = inherited;
-            currentOwnerId = persisted?.ownerId ?? currentSessionId;
-          } else if (persisted) {
+          if (persisted) {
             currentNamesFile = persisted.namesFile;
             currentOwnerId = persisted.ownerId;
+          } else if (inherited) {
+            currentNamesFile = inherited;
+            currentOwnerId = currentSessionId;
           } else {
             const ancestor = findAncestorNamesFile(
               currentSubagentSessionRoot,
@@ -1308,9 +1309,11 @@ export default function (pi: ExtensionAPI) {
             currentNamesFile = ancestor?.namesFile ?? getNamesFilePath(currentSubagentSessionRoot, currentSessionId);
             currentOwnerId = ancestor?.ownerId ?? currentSessionId;
           }
-          // Children must share this exact registry so names stay unique across
-          // the whole delegation tree and forks resolve after restarts.
-          process.env[SUBAGENT_NAMES_FILE_ENV] = currentNamesFile;
+          // NOTE: the registry path is passed to child processes via their
+          // spawn env in the runner. It must NOT be set on process.env here:
+          // pi reloads extension modules on session switches, and a self-set
+          // env var would then masquerade as "inherited from a parent",
+          // overriding the identity persisted in the session being resumed.
           // Persist the identity into the session so the next resume/branch of
           // this session (with whatever new session id pi assigns) finds it.
           if (
@@ -2102,6 +2105,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
       makeDetails: makeDetails("single"),
       sessionDir: previousResult?.sessionDir ?? sessionDir,
       sessionRoot: currentSubagentSessionRoot,
+      namesFile: currentNamesFile || undefined,
       resumeSession: resumeExistingSession,
       initialResult: previousResult,
       fallbackModel,
@@ -2189,7 +2193,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
             updateLatestBroadcastTargets(undefined);
           }
         },
-        extras,
+        { ...extras, namesFile: currentNamesFile || undefined },
       );
     } finally {
       for (const id of taskIds.values()) activeSubagents.delete(id);

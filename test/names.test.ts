@@ -268,6 +268,25 @@ describe("findPersistedNamesIdentity", () => {
     assert.deepEqual(findPersistedNamesIdentity(entries), { namesFile: "/b.json", ownerId: "two" });
   });
 
+  it("prefers the latest entry whose registry actually has named agents", async () => {
+    // Simulates a session damaged by a buggy run: a later identity entry
+    // points at an empty registry while an earlier one has the real names.
+    const goodFile = path.join(tmpDir, "good", "subagent-names.json");
+    fs.mkdirSync(path.dirname(goodFile), { recursive: true });
+    await allocateSubagentNames(goodFile, "owner", [
+      { agent: "writer", task: "t", sessionDir: "/s/0" },
+    ]);
+    const emptyFile = path.join(tmpDir, "empty", "subagent-names.json");
+    fs.mkdirSync(path.dirname(emptyFile), { recursive: true });
+    fs.writeFileSync(emptyFile, JSON.stringify({ version: 1, counters: {}, agents: {} }));
+
+    const entries = [
+      { type: "custom", customType: SUBAGENT_NAMES_CUSTOM_TYPE, data: { namesFile: goodFile, ownerId: "good" } },
+      { type: "custom", customType: SUBAGENT_NAMES_CUSTOM_TYPE, data: { namesFile: emptyFile, ownerId: "bad" } },
+    ];
+    assert.deepEqual(findPersistedNamesIdentity(entries), { namesFile: goodFile, ownerId: "good" });
+  });
+
   it("ignores malformed entries and non-arrays", () => {
     assert.equal(findPersistedNamesIdentity(undefined), undefined);
     assert.equal(
