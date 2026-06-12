@@ -40,6 +40,8 @@ export interface TreeNode {
 	status: NodeStatus;
 	meta?: string;
 	task?: string;
+	/** Epoch ms when this subagent run started (rendered as a dim hh:mm:ss prefix). */
+	startedAt?: number;
 	outputPreview?: string[];
 	liveActivity?: LiveLogEntry[];
 	children: TreeNode[];
@@ -61,6 +63,12 @@ interface PendingSubagentCall {
 // ---------------------------------------------------------------------------
 // Formatting helpers
 // ---------------------------------------------------------------------------
+
+export function formatClockTime(epochMs: number): string {
+	const d = new Date(epochMs);
+	const pad = (n: number) => String(n).padStart(2, "0");
+	return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
 
 export function formatTokens(count: number): string {
 	if (count < 1000) return count.toString();
@@ -171,7 +179,7 @@ function extractPendingSubagentCalls(messages: SingleResult["messages"]): Pendin
 		if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
 		for (let partIndex = 0; partIndex < message.content.length; partIndex++) {
 			const part = message.content[partIndex] as any;
-			if (part?.type !== "toolCall" || part?.name !== "subagent") continue;
+			if (part?.type !== "toolCall" || (part?.name !== "subagent" && part?.name !== "resume_subagents")) continue;
 			const args = part.arguments && typeof part.arguments === "object" ? part.arguments : {};
 			const tasks = Array.isArray((args as any).tasks)
 				? (args as any).tasks
@@ -180,7 +188,14 @@ function extractPendingSubagentCalls(messages: SingleResult["messages"]): Pendin
 							agent: task.agent,
 							task: typeof task.task === "string" ? task.task : undefined,
 						}))
-				: [];
+				: (args as any).resumes
+					? (Array.isArray((args as any).resumes) ? (args as any).resumes : [(args as any).resumes])
+							.filter((resume: any) => resume && typeof resume.name === "string")
+							.map((resume: any) => ({
+								agent: resume.name,
+								task: typeof resume.prompt === "string" ? resume.prompt : undefined,
+							}))
+					: [];
 			calls.push({
 				toolCallId:
 					typeof part.toolCallId === "string"
@@ -358,6 +373,14 @@ export function formatLiveLogEntry(
 	entry: LiveLogEntry,
 	theme: { fg: ThemeFg },
 ): string {
+	const stamp = entry.at !== undefined ? theme.fg("dim", formatClockTime(entry.at)) + " " : "";
+	return stamp + formatLiveLogEntryBody(entry, theme);
+}
+
+function formatLiveLogEntryBody(
+	entry: LiveLogEntry,
+	theme: { fg: ThemeFg },
+): string {
 	switch (entry.kind) {
 		case "turn_start":
 			return theme.fg("muted", "\u27f3") + " " + theme.fg("dim", "thinking\u2026");
@@ -460,7 +483,9 @@ function buildResultNode(result: SingleResult): TreeNode {
 	result = hydrateResultFromSession(result);
 	const status = statusFromResult(result);
 	const usage = formatUsage(result.usage ?? {}, result.model);
-	const metaParts: string[] = [result.agentSource];
+	const metaParts: string[] = [];
+	if (result.name) metaParts.push(result.name);
+	metaParts.push(result.agentSource);
 	if (usage) metaParts.push(usage);
 	if (status === "error") {
 		const errorText = result.errorMessage || result.stderr || result.stopReason;
@@ -474,6 +499,7 @@ function buildResultNode(result: SingleResult): TreeNode {
 		status,
 		meta: metaParts.join(" • "),
 		task: result.task,
+		startedAt: result.startedAt,
 		liveActivity: isRunning && (result.liveLog?.length ?? 0) > 0 ? result.liveLog : undefined,
 		outputPreview: !isRunning && children.length === 0 ? buildLeafPreview(result) : undefined,
 		children,
@@ -497,7 +523,10 @@ export function renderTreeLines(
 		const indent = "  ".repeat(depth);
 		const number = prefix ? `${prefix}.${index + 1}` : `${index + 1}`;
 		const numberPrefix = broadcastNumberingActive ? `${number}. ` : "";
-		let line = `${indent}${numberPrefix}${statusEmoji(node.status, theme)} ${theme.fg("accent", node.label)}`;
+		const timePrefix = node.startedAt !== undefined
+			? `${theme.fg("dim", formatClockTime(node.startedAt))} `
+			: "";
+		let line = `${indent}${numberPrefix}${timePrefix}${statusEmoji(node.status, theme)} ${theme.fg("accent", node.label)}`;
 		if (node.meta) line += ` ${theme.fg("dim", node.meta)}`;
 		lines.push(line);
 

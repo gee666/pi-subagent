@@ -12,6 +12,7 @@ import {
 	type ThemeFg,
 	buildTopLevelNodes,
 	countNodes,
+	formatClockTime,
 	hasNestedChildren,
 	renderTreeLines,
 	setBroadcastNumberingActive,
@@ -22,13 +23,46 @@ import {
 export { setBroadcastNumberingActive };
 
 // ---------------------------------------------------------------------------
+// Call-start timestamps
+//
+// The execute() handlers record the wall-clock start per toolCallId; renderCall
+// looks it up via the render context. Historical calls re-rendered after a
+// session reload have no recorded start time and simply render without a
+// timestamp (better than showing a wrong one).
+// ---------------------------------------------------------------------------
+
+const callStartTimes = new Map<string, number>();
+const CALL_START_CACHE_LIMIT = 500;
+
+/** Record the start time of a subagent tool call. Called from execute(). */
+export function recordToolCallStart(toolCallId: string): void {
+	if (callStartTimes.has(toolCallId)) return;
+	callStartTimes.set(toolCallId, Date.now());
+	if (callStartTimes.size > CALL_START_CACHE_LIMIT) {
+		const oldest = callStartTimes.keys().next().value;
+		if (oldest !== undefined) callStartTimes.delete(oldest);
+	}
+}
+
+function getCallStartStamp(
+	context: { toolCallId?: string } | undefined,
+	theme: { fg: ThemeFg },
+): string {
+	const toolCallId = context?.toolCallId;
+	if (!toolCallId) return "";
+	const at = callStartTimes.get(toolCallId);
+	if (at === undefined) return "";
+	return `${theme.fg("dim", formatClockTime(at))} `;
+}
+
+// ---------------------------------------------------------------------------
 // renderCall — shown while the tool is being invoked
 // ---------------------------------------------------------------------------
 
 export function renderCall(
 	args: Record<string, any>,
 	theme: { fg: ThemeFg; bold: (s: string) => string },
-	context?: { isPartial?: boolean; isError?: boolean },
+	context?: { isPartial?: boolean; isError?: boolean; toolCallId?: string },
 ): Text {
 	const tasks = Array.isArray(args.tasks) ? args.tasks : [];
 	const count = tasks.length;
@@ -37,13 +71,44 @@ export function renderCall(
 			? theme.fg("error", "❌")
 			: theme.fg("success", "✅")
 		: theme.fg("warning", "⏳");
-	let text = `${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", `${count} task${count === 1 ? "" : "s"}`)}`;
+	const stamp = getCallStartStamp(context, theme);
+	let text = `${stamp}${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", `${count} task${count === 1 ? "" : "s"}`)}`;
 	for (const task of tasks.slice(0, 6)) {
 		const agent = typeof task?.agent === "string" ? task.agent : "...";
 		const preview = typeof task?.task === "string" ? ` ${truncate(task.task, 56)}` : "";
 		text += `\n  ${icon} ${theme.fg("accent", agent)}${theme.fg("dim", preview)}`;
 	}
 	if (tasks.length > 6) text += `\n  ${theme.fg("muted", `... +${tasks.length - 6} more`)}`;
+	return new Text(text, 0, 0);
+}
+
+/**
+ * renderCall for the resume_subagents tool: { resumes: [{ name, prompt }] }.
+ */
+export function renderResumeCall(
+	args: Record<string, any>,
+	theme: { fg: ThemeFg; bold: (s: string) => string },
+	context?: { isPartial?: boolean; isError?: boolean; toolCallId?: string },
+): Text {
+	const resumes = Array.isArray(args.resumes)
+		? args.resumes
+		: args.resumes && typeof args.resumes === "object"
+			? [args.resumes]
+			: [];
+	const count = resumes.length;
+	const icon = context?.isPartial === false
+		? context.isError
+			? theme.fg("error", "❌")
+			: theme.fg("success", "✅")
+		: theme.fg("warning", "⏳");
+	const stamp = getCallStartStamp(context, theme);
+	let text = `${stamp}${theme.fg("toolTitle", theme.bold("resume subagents "))}${theme.fg("accent", `${count} subagent${count === 1 ? "" : "s"}`)}`;
+	for (const resume of resumes.slice(0, 6)) {
+		const name = typeof resume?.name === "string" ? resume.name : "...";
+		const preview = typeof resume?.prompt === "string" ? ` ${truncate(resume.prompt, 56)}` : "";
+		text += `\n  ${icon} ${theme.fg("accent", name)}${theme.fg("dim", preview)}`;
+	}
+	if (resumes.length > 6) text += `\n  ${theme.fg("muted", `... +${resumes.length - 6} more`)}`;
 	return new Text(text, 0, 0);
 }
 

@@ -8,6 +8,7 @@
  *   - Multiple tasks: treated as a parallel delegation.
  */
 
+import * as fs from "node:fs";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
   createAssistantMessageEventStream,
@@ -15,7 +16,26 @@ import {
 } from "@mariozechner/pi-ai";
 import { Type } from "@sinclair/typebox";
 import { type AgentConfig, discoverAgents } from "./agents.js";
-import { renderCall, renderResult, setBroadcastNumberingActive } from "./render.js";
+import {
+  allocateSubagentNames,
+  clearResumeActive,
+  commitFork,
+  forkSessionInto,
+  getNamesFilePath,
+  markResumeActive,
+  readNamesRegistry,
+  resolveResumeTarget,
+  updateNameRecord,
+  SUBAGENT_NAMES_FILE_ENV,
+} from "./names.js";
+import { installSubagentFooter, type SubagentFooterController } from "./footer.js";
+import {
+  recordToolCallStart,
+  renderCall,
+  renderResult,
+  renderResumeCall,
+  setBroadcastNumberingActive,
+} from "./render.js";
 import { runAgentSubprocess, executeParallelSubprocess, type RunningSubagentHandle } from "./runner.js";
 import {
   SUBAGENT_RESUME_DISABLE_ENV,
@@ -96,6 +116,39 @@ const SubagentParams = Type.Object({
       "Array of {agent, task} objects. One task behaves like a single-agent delegation; multiple tasks run concurrently.",
   }),
 }, { additionalProperties: false });
+
+const ResumeItem = Type.Object({
+  name: Type.String({
+    description: "Unique subagent name returned by a previous subagent run (e.g. code-writer-01)",
+  }),
+  prompt: Type.String({
+    description: "New prompt for the resumed subagent. It keeps its previous context.",
+  }),
+}, { additionalProperties: false });
+
+// The single bare-object form is tolerated for robustness but deliberately
+// not documented: the description only advertises the array form.
+const ResumeSubagentsParams = Type.Object({
+  resumes: Type.Union(
+    [
+      Type.Array(ResumeItem, { minItems: 1 }),
+      ResumeItem,
+    ],
+    {
+      description:
+        "Array of {name, prompt} objects. Each named subagent is resumed in parallel with its new prompt.",
+    },
+  ),
+}, { additionalProperties: false });
+
+/** Accept both `resumes: [{...}]` and a single bare `resumes: {...}` object. */
+function normalizeResumes(raw: unknown): Array<{ name: string; prompt: string }> {
+  const items = Array.isArray(raw) ? raw : raw && typeof raw === "object" ? [raw] : [];
+  return items.filter(
+    (item: any): item is { name: string; prompt: string } =>
+      item && typeof item.name === "string" && typeof item.prompt === "string",
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -388,7 +441,7 @@ function collectCombinedUsageStatusLine(
         parentUsage.turns += 1;
       }
     }
-    if (msg.role === "toolResult" && msg.toolName === "subagent" && isSubagentDetails(msg.details)) {
+    if (msg.role === "toolResult" && (msg.toolName === "subagent" || msg.toolName === "resume_subagents") && isSubagentDetails(msg.details)) {
       addUsageSummary(
         subagents,
         msg.details.usageSummary ?? usageSummaryFromUsage(msg.details.aggregatedUsage),
@@ -450,8 +503,9 @@ function getProjectAgentSessionKey(projectAgentsDir: string | null): string {
 
 function ensureSubagentToolActive(pi: ExtensionAPI): void {
   const activeTools = pi.getActiveTools();
-  if (!activeTools.includes("subagent")) {
-    pi.setActiveTools([...activeTools, "subagent"]);
+  const missing = ["subagent", "resume_subagents"].filter((tool) => !activeTools.includes(tool));
+  if (missing.length > 0) {
+    pi.setActiveTools([...activeTools, ...missing]);
   }
 }
 
@@ -740,10 +794,14 @@ export default function (pi: ExtensionAPI) {
   let discoveredAgents: AgentConfig[] = [];
   let currentSessionId = "ephemeral";
   let currentSubagentSessionRoot = "";
+  let currentNamesFile = "";
+  let footerController: SubagentFooterController | null = null;
   let pendingResumePlans: ResumableSubagentCall[] = [];
   let modelToRestoreAfterResume: any | undefined;
   const approvedProjectAgentDirsForSession = new Set<string>();
-  const activeSubagents = new Map<number, { agent: string; task: string; taskIndex: number; handle: RunningSubagentHandle }>();
+  const activeSubagents = new Map<number, { agent: string; task: string; taskIndex: number; handle: RunningSubagentHandle; name?: string }>();
+  /** Names with a resume in flight in this process (same-process race guard). */
+  const activeResumeNames = new Set<string>();
   const activeSubagentUsageSummaries = new Map<string, SubagentUsageSummary>();
   const latestBroadcastTargets = {
     all: [] as BroadcastTarget[],
@@ -766,13 +824,13 @@ export default function (pi: ExtensionAPI) {
         .map((message: any) => {
           if (message?.role === "assistant" && Array.isArray(message.content)) {
             const subagentCalls = message.content.filter(
-              (part: any) => part?.type === "toolCall" && part?.name === "subagent",
+              (part: any) => part?.type === "toolCall" && (part?.name === "subagent" || part?.name === "resume_subagents"),
             );
             return subagentCalls.length > 0
               ? { ...message, content: subagentCalls }
               : null;
           }
-          if (message?.role === "toolResult" && message.toolName === "subagent") {
+          if (message?.role === "toolResult" && (message.toolName === "subagent" || message.toolName === "resume_subagents")) {
             return isSubagentDetails(message.details)
               ? { ...message, details: slimDetailsForProgress(message.details) }
               : message;
@@ -922,10 +980,17 @@ export default function (pi: ExtensionAPI) {
     for (const message of messages) {
       if (message?.role !== "assistant" || !Array.isArray(message.content)) continue;
       for (const part of message.content) {
-        if (part?.type !== "toolCall" || part?.name !== "subagent") continue;
+        if (part?.type !== "toolCall" || (part?.name !== "subagent" && part?.name !== "resume_subagents")) continue;
         const toolCallId = typeof part.toolCallId === "string" ? part.toolCallId : typeof part.id === "string" ? part.id : undefined;
         if (toolCallId && completedToolCallIds.has(toolCallId)) continue;
-        const tasks = Array.isArray(part.arguments?.tasks) ? part.arguments.tasks : [];
+        const rawResumes = part.arguments?.resumes;
+        const tasks = Array.isArray(part.arguments?.tasks)
+          ? part.arguments.tasks
+          : Array.isArray(rawResumes)
+            ? rawResumes
+            : rawResumes && typeof rawResumes === "object"
+              ? [rawResumes]
+              : [];
         if (tasks.length > 0) counts.push(tasks.length);
       }
     }
@@ -1129,12 +1194,24 @@ export default function (pi: ExtensionAPI) {
 
   function updateCombinedUsageStatus(ctx?: any): void {
     const targetCtx = ctx ?? latestSessionCtx;
-    if (!targetCtx?.ui || typeof targetCtx.ui.setStatus !== "function") return;
+    if (!targetCtx?.ui) return;
     try {
       const line = collectCombinedUsageStatusLine(
         targetCtx,
         Array.from(activeSubagentUsageSummaries.values()),
       );
+      if (footerController) {
+        // Custom footer renders the total directly below the builtin stats
+        // line; keep the single-line status slot empty so other extensions'
+        // statuses (e.g. SSH) get their own clean line below.
+        footerController.updateContext(targetCtx);
+        footerController.setTotalLine(line);
+        if (typeof targetCtx.ui.setStatus === "function") {
+          targetCtx.ui.setStatus("subagent-usage", undefined);
+        }
+        return;
+      }
+      if (typeof targetCtx.ui.setStatus !== "function") return;
       targetCtx.ui.setStatus(
         "subagent-usage",
         line ? formatFooterStatusText(targetCtx, `total ${line}`) : undefined,
@@ -1147,6 +1224,14 @@ export default function (pi: ExtensionAPI) {
   // Auto-discover agents on session start
   pi.on("session_start", async (event, ctx) => {
     latestSessionCtx = ctx;
+    if (!footerController && ctx.hasUI && !isRpcMode(process.argv)) {
+      try {
+        footerController = await installSubagentFooter(ctx, "subagent-usage");
+      } catch (err) {
+        console.error("[pi-subagent] Failed to install custom footer (falling back to status line):", err);
+        footerController = null;
+      }
+    }
     updateCombinedUsageStatus(ctx);
     try {
       // Always repair sessions left on the synthetic resume model, even in
@@ -1167,6 +1252,15 @@ export default function (pi: ExtensionAPI) {
       discoveredAgents = discovery.agents;
       currentSessionId = ctx.sessionManager.getSessionId?.() ?? "ephemeral";
       currentSubagentSessionRoot = getDefaultSubagentSessionRoot(ctx);
+      try {
+        currentNamesFile = getNamesFilePath(currentSubagentSessionRoot, currentSessionId);
+        // Children must share this exact registry so names stay unique across
+        // the whole delegation tree and forks resolve after restarts.
+        process.env[SUBAGENT_NAMES_FILE_ENV] = currentNamesFile;
+      } catch (err) {
+        console.error("[pi-subagent] Failed to initialize subagent name registry:", err);
+        currentNamesFile = "";
+      }
 
       if (discoveredAgents.length > 0 && ctx.hasUI) {
         const list = discoveredAgents
@@ -1328,7 +1422,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("tool_execution_end", (event, ctx) => {
     latestSessionCtx = ctx;
-    if (event.toolName === "subagent") {
+    if (event.toolName === "subagent" || event.toolName === "resume_subagents") {
       activeSubagentUsageSummaries.delete(event.toolCallId);
       updateCombinedUsageStatus(ctx);
       setTimeout(() => updateCombinedUsageStatus(ctx), 0);
@@ -1415,6 +1509,24 @@ calls one after another. Do NOT put dependent tasks in the same array.
 
 - Max depth: current depth ${currentDepth}, max depth ${maxDepth}
 - Max subagents per tool call: ${maxParallelTasks}
+
+### Resumable subagents
+
+Every subagent run is assigned a unique, durable name (e.g. \`code-writer-01\`,
+\`code-reviewer-02\`) which is returned together with its results. Use the
+\`resume_subagents\` tool to continue named subagents with a new prompt while
+keeping their full previous context:
+
+\`\`\`json
+{ "resumes": [{ "name": "code-writer-01", "prompt": "Now also update the tests." }] }
+\`\`\`
+
+- All resumes in one call run in parallel.
+- You may include subagent names in the task text you give YOUR OWN subagents.
+  A subagent that resumes a name created by an ancestor works on a private fork
+  of that subagent, so your original subagent's context stays untouched. Each
+  subagent gets exactly one fork per name and keeps reusing it.
+- Names survive restarts; you can resume them in a later session of this conversation.
 `,
       };
     } catch (err) {
@@ -1444,6 +1556,7 @@ calls one after another. Do NOT put dependent tasks in the same array.
 
       async execute(toolCallId, params, signal, onUpdate, ctx) {
         try {
+          recordToolCallStart(toolCallId);
           updateLatestBroadcastTargets(undefined);
           const discovery = discoverAgents(ctx.cwd, "both");
           const { agents } = discovery;
@@ -1565,6 +1678,42 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
             pendingResumePlans.splice(resumePlanIndex, 1);
           }
 
+          // Assign durable, tree-unique names (code-writer-01, ...). Resumed
+          // runs keep the names already recorded in the previous results.
+          const names: Array<string | undefined> = tasks.map(
+            (_task, index) => resumePlan?.details?.results[index]?.name,
+          );
+          if (currentNamesFile) {
+            const pendingAllocation = tasks
+              .map((task, index) => ({ task, index }))
+              .filter(({ index }) => !names[index]);
+            if (pendingAllocation.length > 0) {
+              try {
+                const allocated = await allocateSubagentNames(
+                  currentNamesFile,
+                  currentSessionId,
+                  pendingAllocation.map(({ task, index }) => {
+                    const agentConfig = agents.find((agent) => agent.name === task.agent);
+                    return {
+                      agent: task.agent,
+                      task: task.task,
+                      model: agentConfig?.model,
+                      tools: agentConfig?.tools,
+                      sessionDir:
+                        resumePlan?.details?.results[index]?.sessionDir ??
+                        getSessionDirForTask(resumePlan?.previousToolCallId ?? toolCallId, index),
+                    };
+                  }),
+                );
+                pendingAllocation.forEach(({ index }, allocIndex) => {
+                  names[index] = allocated[allocIndex];
+                });
+              } catch (err) {
+                console.warn("[pi-subagent] Failed to allocate subagent names (continuing without):", err);
+              }
+            }
+          }
+
           if (tasks.length === 1) {
             const [task] = tasks;
             return executeSingle(
@@ -1584,6 +1733,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
               // can change while the parent session is long-running.
               formatModelFlag(modelToRestoreAfterResume ?? ctx.model ?? lastRestorableModel),
               topLevelBaseId,
+              names[0],
             );
           }
 
@@ -1599,6 +1749,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
             !!resumePlan,
             formatModelFlag(modelToRestoreAfterResume ?? ctx.model ?? lastRestorableModel),
             topLevelBaseId,
+            { names },
           );
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -1616,6 +1767,218 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
       renderResult: (result, { expanded }, theme) =>
         renderResult(result, expanded, theme),
     });
+
+    pi.registerTool({
+      name: "resume_subagents",
+      label: "Resume subagents",
+      description: [
+        "Resume previously run subagents by name with a new prompt, keeping their full context.",
+        "",
+        "Every subagent run returns a unique name (e.g. code-writer-01). Pass those names",
+        "here to continue them. All resumes in one call run IN PARALLEL.",
+        "",
+        "If a name was created by an ancestor agent (not by you), you transparently work on",
+        "your own private fork of that subagent: the original's context stays untouched, and",
+        "your subsequent resumes of the same name keep using the same fork.",
+        "",
+         'Example: { resumes: [{ name: "code-writer-01", prompt: "Also update the tests." }] }',
+      ].join("\n"),
+      parameters: ResumeSubagentsParams,
+
+      async execute(toolCallId, params, signal, onUpdate, ctx) {
+        const markedNames: string[] = [];
+        try {
+          recordToolCallStart(toolCallId);
+          updateLatestBroadcastTargets(undefined);
+          const discovery = discoverAgents(ctx.cwd, "both");
+          const makeDetails = makeDetailsFactory(
+            discovery.projectAgentsDir,
+            DEFAULT_DELEGATION_MODE,
+          );
+          const fail = (text: string) => ({
+            content: [{ type: "text" as const, text }],
+            details: makeDetails("parallel")([]),
+            isError: true,
+          });
+
+          const resumes = normalizeResumes((params as any).resumes);
+          if (resumes.length === 0) {
+            return fail("Invalid parameters. Provide a non-empty resumes array of {name, prompt} objects (both fields are required strings).");
+          }
+
+          const duplicates = resumes
+            .map((resume) => resume.name)
+            .filter((name, index, all) => all.indexOf(name) !== index);
+          if (duplicates.length > 0) {
+            return fail(`Duplicate subagent names in one resume call: ${Array.from(new Set(duplicates)).join(", ")}. Resume each name at most once per call.`);
+          }
+
+          if (!currentNamesFile) {
+            return fail("No subagent name registry is available in this session (sessions may be disabled). Subagents cannot be resumed by name here.");
+          }
+
+          // Refuse to resume subagents that are still running or being resumed
+          // in this process: continuing a session file while another process is
+          // writing it corrupts it. (Cross-process protection comes from the
+          // registry markers below.)
+          const runningNames = new Set(
+            Array.from(activeSubagents.values())
+              .map((item) => item.name)
+              .filter((name): name is string => typeof name === "string"),
+          );
+          for (const name of activeResumeNames) runningNames.add(name);
+          const stillRunning = resumes.filter((resume) => runningNames.has(resume.name));
+          if (stillRunning.length > 0) {
+            return fail(`Cannot resume subagents that are still running: ${stillRunning.map((r) => r.name).join(", ")}. Wait for them to finish first.`);
+          }
+          for (const resume of resumes) activeResumeNames.add(resume.name);
+          const localGuardedNames = resumes.map((resume) => resume.name);
+          const releaseLocalGuards = () => {
+            for (const name of localGuardedNames) activeResumeNames.delete(name);
+          };
+
+          try {
+            // Resolve every name to a target session dir (own session or private fork).
+            const errors: string[] = [];
+            const targets: Array<{
+              agent: string;
+              prompt: string;
+              sessionDir: string;
+              name: string;
+              model?: string;
+              tools?: string[];
+            }> = [];
+            const hasSessionFiles = (dir: string): boolean => {
+              try {
+                return fs.existsSync(dir) && fs.readdirSync(dir).some((f) => f.endsWith(".jsonl"));
+              } catch {
+                return false;
+              }
+            };
+            for (const resume of resumes) {
+              const resolution = await resolveResumeTarget(currentNamesFile, resume.name, currentSessionId);
+              if ("error" in resolution) {
+                errors.push(resolution.error);
+                continue;
+              }
+              if (resolution.isFork) {
+                if (!hasSessionFiles(resolution.sessionDir)) {
+                  if (!forkSessionInto(resolution.record.sessionDir, resolution.sessionDir)) {
+                    errors.push(`Cannot fork subagent "${resume.name}": no session files found in ${resolution.record.sessionDir}.`);
+                    continue;
+                  }
+                }
+                if (resolution.forkCreated) {
+                  await commitFork(currentNamesFile, resume.name, currentSessionId, resolution.sessionDir);
+                }
+              } else if (!hasSessionFiles(resolution.sessionDir)) {
+                errors.push(`Cannot resume subagent "${resume.name}": its session directory ${resolution.sessionDir} has no saved session files (the original run may have failed before doing anything).`);
+                continue;
+              }
+              targets.push({
+                agent: resolution.record.agent,
+                prompt: resume.prompt,
+                sessionDir: resolution.sessionDir,
+                name: resume.name,
+                model: resolution.record.model,
+                tools: resolution.record.tools,
+              });
+            }
+            if (errors.length > 0) {
+              releaseLocalGuards();
+              const known = Object.keys(readNamesRegistry(currentNamesFile).agents).sort();
+              return fail(`${errors.join("\n")}\n\nKnown subagent names: ${known.length > 0 ? known.join(", ") : "(none)"}.`);
+            }
+
+            // Cross-process in-flight markers: another live pi process resuming
+            // the same target must not race us into the same session file.
+            const markerErrors: string[] = [];
+            for (const target of targets) {
+              const marked = await markResumeActive(currentNamesFile, target.name, currentSessionId);
+              if ("error" in marked) {
+                markerErrors.push(marked.error);
+              } else {
+                markedNames.push(target.name);
+              }
+            }
+            if (markerErrors.length > 0) {
+              releaseLocalGuards();
+              return fail(markerErrors.join("\n"));
+            }
+
+            for (const target of targets) {
+              await updateNameRecord(currentNamesFile, target.name, { lastResumePrompt: target.prompt });
+            }
+
+            // Resumed agents may reference agent types whose definition files no
+            // longer exist; the session itself carries all needed context, so
+            // synthesize a config from the registry record instead of failing.
+            const agentsForResume: AgentConfig[] = [...discovery.agents];
+            for (const target of targets) {
+              if (!agentsForResume.some((agent) => agent.name === target.agent)) {
+                agentsForResume.push({
+                  name: target.agent,
+                  description: "(resumed subagent; original agent definition not found)",
+                  systemPrompt: "",
+                  model: target.model,
+                  tools: target.tools,
+                  source: "builtin",
+                  filePath: "",
+                });
+              }
+            }
+
+            const tasks = targets.map((target) => ({ agent: target.agent, task: target.prompt }));
+            const topLevelBaseId = nextActiveSubagentId;
+            nextActiveSubagentId += tasks.length;
+            const trackedOnUpdate = (partial: any) => {
+              if (isSubagentDetails(partial?.details)) {
+                activeSubagentUsageSummaries.set(toolCallId, collectLiveUsageSummary(partial.details));
+                updateLatestBroadcastTargets(partial.details, topLevelBaseId);
+                updateCombinedUsageStatus(ctx);
+                emitNestedProgressToParent(toolCallId, partial.details);
+              }
+              onUpdate?.(partial);
+            };
+
+            return await executeParallel(
+              tasks,
+              agentsForResume,
+              ctx.cwd,
+              signal,
+              trackedOnUpdate,
+              makeDetails,
+              undefined,
+              (index) => targets[index].sessionDir,
+              true,
+              formatModelFlag(modelToRestoreAfterResume ?? ctx.model ?? lastRestorableModel),
+              topLevelBaseId,
+              { names: targets.map((target) => target.name), rawPrompts: true },
+            );
+          } finally {
+            releaseLocalGuards();
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          const stack = err instanceof Error && err.stack ? `\n\n${err.stack}` : "";
+          return {
+            content: [{ type: "text" as const, text: `[pi-subagent] Unexpected error: ${msg}${stack}` }],
+            details: buildSubagentDetails("parallel", DEFAULT_DELEGATION_MODE, null, []),
+            isError: true,
+          };
+        } finally {
+          if (currentNamesFile) {
+            for (const name of markedNames) {
+              await clearResumeActive(currentNamesFile, name, currentSessionId);
+            }
+          }
+        }
+      },
+
+      renderCall: (args, theme, context) => renderResumeCall(args, theme, context),
+      renderResult: (result, { expanded }, theme) =>
+        renderResult(result, expanded, theme),
+    });
   }
 
   function getSessionDirForTask(toolCallId: string, index: number): string {
@@ -1628,6 +1991,10 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
   // -----------------------------------------------------------------------
   // Mode implementations
   // -----------------------------------------------------------------------
+
+  function formatNameSuffix(result: SingleResult | undefined): string {
+    return result?.name ? `\n\n(subagent name: ${result.name} — resumable via resume_subagents)` : "";
+  }
 
   async function executeSingle(
     agentName: string,
@@ -1642,13 +2009,14 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
     resumeExistingSession: boolean,
     fallbackModel: string | undefined,
     topLevelBaseId: number,
+    subagentName?: string,
   ) {
     if (previousResult && isFinishedResult(previousResult)) {
       return {
         content: [
           {
             type: "text" as const,
-            text: getFinalOutput(previousResult.messages) || "(no output)",
+            text: (getFinalOutput(previousResult.messages) || "(no output)") + formatNameSuffix(previousResult),
           },
         ],
         details: makeDetails("single")([previousResult]),
@@ -1661,6 +2029,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
       agents,
       agentName,
       task,
+      subagentName,
       parentDepth: currentDepth,
       parentAgentStack: ancestorAgentStack,
       maxDepth,
@@ -1675,7 +2044,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
       fallbackModel,
       onHandle: (handle) => {
         activeId = topLevelBaseId;
-        activeSubagents.set(activeId, { agent: agentName, task, taskIndex: 0, handle });
+        activeSubagents.set(activeId, { agent: agentName, task, taskIndex: 0, handle, name: subagentName });
         updateLatestBroadcastTargets(undefined);
       },
     });
@@ -1705,7 +2074,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
       content: [
         {
           type: "text" as const,
-          text: getFinalOutput(result.messages, result.finalOutput) || "(no output)",
+          text: (getFinalOutput(result.messages, result.finalOutput) || "(no output)") + formatNameSuffix(result),
         },
       ],
       details: makeDetails("single")([result]),
@@ -1724,6 +2093,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
     resumeExistingSessions: boolean,
     fallbackModel: string | undefined,
     topLevelBaseId: number,
+    extras?: { names?: Array<string | undefined>; rawPrompts?: boolean },
   ) {
     const taskIds = new Map<number, number>();
     try {
@@ -1746,7 +2116,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
         (index, task, handle) => {
           const id = topLevelBaseId + index;
           taskIds.set(index, id);
-          activeSubagents.set(id, { agent: task.agent, task: task.task, taskIndex: index, handle });
+          activeSubagents.set(id, { agent: task.agent, task: task.task, taskIndex: index, handle, name: extras?.names?.[index] });
           updateLatestBroadcastTargets(undefined);
         },
         (index) => {
@@ -1756,6 +2126,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
             updateLatestBroadcastTargets(undefined);
           }
         },
+        extras,
       );
     } finally {
       for (const id of taskIds.values()) activeSubagents.delete(id);

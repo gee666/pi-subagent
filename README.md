@@ -120,6 +120,18 @@ pi --no-subagent-prevent-cycles   # allow cycles (not recommended)
 | `PI_SUBAGENT_MAX_PARALLEL_TASKS` | `30`    | Max tasks per single call                |
 | `PI_SUBAGENT_MAX_CONCURRENCY`    | `8`     | Max subagents running simultaneously     |
 
+## Timestamps & Status Footer
+
+Subagent tool calls and live activity lines render a dim `hh:mm:ss` timestamp
+(call start, per-subagent run start, and each live log entry).
+
+In the interactive TUI the extension also replaces the footer with a wrapped
+version of Pi's builtin footer so that the combined `total` usage line (parent
++ all subagents, recursively) renders directly below the normal stats line
+(prefixed `parent`), with other extensions' statuses (e.g. SSH) on their own
+line below. If the builtin footer component cannot be wrapped (e.g. pi
+internals changed), the extension falls back to the plain single-line status.
+
 ## Steering Running Subagents
 
 While a `subagent` tool call is running, mid-stream steering input can be broadcast to one or more child agents. The extension uses Pi's `InputEvent.streamingBehavior` metadata when available, so idle prompts and queued follow-ups continue to the parent normally; only true `steer` inputs open the broadcast routing prompt.
@@ -139,6 +151,45 @@ The same detection also runs after navigating the session tree in the TUI (Esc n
 | --- | --- | --- |
 | `PI_SUBAGENT_RESUME_PROMPT` | `true` | Set to `false` to suppress the TUI yes/no prompt and auto-resume. |
 | `PI_SUBAGENT_DISABLE_RESUME` | `false` | Set to `true` to disable automatic subagent resume detection entirely. |
+
+Note: crash-resume covers `subagent` calls only. An interrupted `resume_subagents` call is not replayed automatically — the model can simply issue it again, since names stay valid (see below).
+
+## Resumable Subagents by Name (`resume_subagents`)
+
+Every subagent run is assigned a unique, durable name derived from its agent
+type plus a per-type counter — `code-writer-01`, `code-writer-02`,
+`code-reviewer-01`, ... The name is returned together with the subagent's
+results and shown in the TUI tree.
+
+The `resume_subagents` tool continues named subagents with a new prompt while
+preserving their full previous context:
+
+```json
+{ "resumes": [{ "name": "code-writer-01", "prompt": "Now also update the tests." }] }
+```
+
+- All resumes in one call run **in parallel**.
+- Names are unique within one delegation tree (everything spawned from one
+  top-level session) and are persisted in a registry file under the subagent
+  session root, so they survive restarts: you can resume a subagent in a later
+  session of the same conversation.
+- **Ownership & forks**: the agent that spawned a subagent (its *owner*)
+  resumes the original session. A parent may pass names to its own subagents
+  (in their task text); when a child resumes a name created by an ancestor, it
+  transparently gets a **private fork** of that subagent (a copy of its
+  session), so the owner's copy is never polluted by the child's continuation.
+  Each child gets exactly **one fork per name** and keeps reusing it on
+  subsequent resumes. Fork session locations are persisted too.
+- Concurrent resumes of the same target are rejected (in-process and
+  cross-process via crash-tolerant registry markers), because two processes
+  continuing the same session file would corrupt it.
+- If the original agent definition file has been removed, the resume still
+  works: the registry remembers the agent's model/tool restrictions and the
+  session itself carries the context.
+
+| Env Var | Description |
+| --- | --- |
+| `PI_SUBAGENT_NAMES_FILE` | Internal: path of the shared name registry, propagated to child processes so the whole delegation tree allocates unique names. |
 
 ## Agent Discovery
 

@@ -200,6 +200,11 @@ function findPiCliScriptOnPath(): string | null {
   return null;
 }
 
+/** Resolve the dist/cli.js of the currently running pi installation, if findable. */
+export function getPiCliScriptPath(): string | null {
+  return getCurrentPiCliScript() ?? findPiCliScriptOnPath();
+}
+
 function getPiSpawnCommand(override?: { command: string; argsPrefix?: string[] }): { command: string; argsPrefix: string[] } {
   if (override?.command) return { command: override.command, argsPrefix: override.argsPrefix ?? [] };
 
@@ -402,6 +407,7 @@ const _inheritedCliArgs = parseInheritedCliArgs(process.argv);
 // ---------------------------------------------------------------------------
 
 function pushLiveLog(result: SingleResult, entry: LiveLogEntry): void {
+  if (entry.at === undefined) entry.at = Date.now();
   result.liveLog.push(entry);
   if (result.liveLog.length > MAX_LIVE_LOG_ENTRIES) result.liveLog.shift();
 }
@@ -474,7 +480,7 @@ export function processJsonLine(line: string, result: SingleResult): boolean {
   if (event.type === "tool_result_end" && event.message) {
     const msg = event.message as Message;
     if (!hasMessage(result, msg)) result.messages.push(msg);
-    if ((msg as any).toolName === "subagent" && typeof (msg as any).toolCallId === "string") {
+    if (((msg as any).toolName === "subagent" || (msg as any).toolName === "resume_subagents") && typeof (msg as any).toolCallId === "string") {
       delete result.liveNestedSubagents?.[(msg as any).toolCallId];
     }
     return true;
@@ -541,6 +547,7 @@ function buildPiArgs(
   sessionDir: string | undefined,
   resumeSession: boolean,
   fallbackModelOverride?: string,
+  rawPrompt = false,
 ): { args: string[]; prompt: string } {
   const args: string[] = [
     "--mode",
@@ -580,9 +587,11 @@ function buildPiArgs(
   if (systemPromptPath) args.push("--append-system-prompt", systemPromptPath);
   return {
     args,
-    prompt: resumeSession
-      ? `Continue the previous task from where you left off. Original task: ${task}`
-      : `Task: ${task}`,
+    prompt: rawPrompt
+      ? task
+      : resumeSession
+        ? `Continue the previous task from where you left off. Original task: ${task}`
+        : `Task: ${task}`,
   };
 }
 
@@ -599,6 +608,10 @@ export interface RunAgentOptions {
   agentName: string;
   /** Task description. */
   task: string;
+  /** Unique resumable name assigned to this subagent (e.g. "code-writer-01"). */
+  subagentName?: string;
+  /** When true, send the task text to the child verbatim (no "Task:" / resume preamble). */
+  rawPrompt?: boolean;
   /** Current delegation depth of the caller process. */
   parentDepth: number;
   /** Delegation stack from the caller process (ancestor agent names). */
@@ -665,6 +678,8 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       agent: agentName,
       agentSource: "unknown",
       task,
+      name: opts.subagentName,
+      startedAt: Date.now(),
       exitCode: 1,
       messages: [],
       stderr: `Unknown agent: "${agentName}". Available agents: ${available}.`,
@@ -685,6 +700,8 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
     agent: agentName,
     agentSource: agent.source,
     task,
+    name: opts.subagentName ?? initialResult?.name,
+    startedAt: initialResult?.startedAt ?? Date.now(),
     exitCode: -1,
     messages: initialResult?.messages ? [...initialResult.messages] : [],
     stderr: initialResult?.stderr ?? "",
@@ -730,6 +747,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       sessionDir,
       shouldContinueSession,
       fallbackModel,
+      opts.rawPrompt === true,
     );
     let wasAborted = false;
     const startupRetries = (() => {
@@ -1068,6 +1086,12 @@ export async function executeParallelSubprocess(
   fallbackModel?: string,
   onHandleForTask?: (index: number, task: { agent: string; task: string }, handle: RunningSubagentHandle) => void,
   onTaskDone?: (index: number, task: { agent: string; task: string }) => void,
+  extras?: {
+    /** Per-task resumable names (aligned with tasks by index). */
+    names?: Array<string | undefined>;
+    /** Send each task text to the child verbatim (resume_subagents flow). */
+    rawPrompts?: boolean;
+  },
 ): Promise<{
   content: Array<{ type: "text"; text: string }>;
   details: SubagentDetails;
@@ -1106,6 +1130,8 @@ export async function executeParallelSubprocess(
     agent: t.agent,
     agentSource: "unknown" as const,
     task: t.task,
+    name: extras?.names?.[index],
+    startedAt: Date.now(),
     exitCode: -1,
     messages: [],
     stderr: "",
@@ -1161,6 +1187,8 @@ export async function executeParallelSubprocess(
           agents,
           agentName: t.agent,
           task: t.task,
+          subagentName: extras?.names?.[index],
+          rawPrompt: extras?.rawPrompts === true,
           parentDepth,
           parentAgentStack,
           maxDepth,
@@ -1194,7 +1222,8 @@ export async function executeParallelSubprocess(
   const successCount = results.filter((r) => r.exitCode === 0).length;
   const summaries = results.map((r) => {
     const output = getFinalOutput(r.messages, r.finalOutput);
-    return `[${r.agent}] ${r.exitCode === 0 ? "completed" : "failed"}: ${output || "(no output)"}`;
+    const nameTag = r.name ? ` • name: ${r.name}` : "";
+    return `[${r.agent}${nameTag}] ${r.exitCode === 0 ? "completed" : "failed"}: ${output || "(no output)"}`;
   });
 
   return {
