@@ -23,6 +23,85 @@ import * as path from "node:path";
 
 export const SUBAGENT_NAMES_FILE_ENV = "PI_SUBAGENT_NAMES_FILE";
 
+/**
+ * Custom session-entry type used to persist the delegation-tree identity
+ * (registry file path + stable owner id) inside the session itself. Pi copies
+ * custom entries into branched sessions and keeps them across resumes, so the
+ * identity survives restarts even though pi assigns the resumed/branched
+ * session a brand-new session id.
+ */
+export const SUBAGENT_NAMES_CUSTOM_TYPE = "pi-subagent-names";
+
+export interface SubagentNamesIdentity {
+  /** Absolute path of the shared name registry for this delegation tree. */
+  namesFile: string;
+  /** Stable identity used as the ownership / fork key for this session. */
+  ownerId: string;
+}
+
+/** Extract the latest persisted names identity from session entries. */
+export function findPersistedNamesIdentity(entries: unknown): SubagentNamesIdentity | undefined {
+  if (!Array.isArray(entries)) return undefined;
+  let found: SubagentNamesIdentity | undefined;
+  for (const entry of entries as any[]) {
+    if (entry?.type !== "custom" || entry.customType !== SUBAGENT_NAMES_CUSTOM_TYPE) continue;
+    const data = entry.data;
+    if (data && typeof data.namesFile === "string" && typeof data.ownerId === "string") {
+      found = { namesFile: data.namesFile, ownerId: data.ownerId };
+    }
+  }
+  return found;
+}
+
+function readSessionHeader(sessionFilePath: string): any | undefined {
+  try {
+    const fd = fs.openSync(sessionFilePath, "r");
+    try {
+      const buf = Buffer.alloc(64 * 1024);
+      const bytes = fs.readSync(fd, buf, 0, buf.length, 0);
+      const firstLine = buf.toString("utf8", 0, bytes).split("\n")[0];
+      const parsed = JSON.parse(firstLine);
+      return parsed && typeof parsed === "object" && parsed.type === "session" ? parsed : undefined;
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return undefined;
+  }
+}
+
+const ANCESTOR_WALK_LIMIT = 20;
+
+/**
+ * Self-healing fallback for sessions that predate the persisted identity
+ * entry: pi gives resumed/branched sessions a new id, but records the previous
+ * session file in the header's `parentSession` chain. Walk that chain and
+ * return the first ancestor whose derived registry file actually exists, along
+ * with that ancestor's session id (which is what its registry used as the
+ * ownership key back then).
+ */
+export function findAncestorNamesFile(
+  sessionRoot: string,
+  currentSessionId: string,
+  currentHeader: any,
+): { namesFile: string; ownerId: string } | undefined {
+  let id: string | undefined = currentSessionId;
+  let header: any = currentHeader;
+  for (let depth = 0; depth < ANCESTOR_WALK_LIMIT && id; depth++) {
+    const candidate = path.join(sessionRoot, sanitizePathComponent(id), "subagent-names.json");
+    try {
+      if (fs.existsSync(candidate)) return { namesFile: candidate, ownerId: id };
+    } catch {
+      /* keep walking */
+    }
+    const parentPath: unknown = header?.parentSession;
+    if (typeof parentPath !== "string" || parentPath.length === 0) return undefined;
+    header = readSessionHeader(parentPath);
+    id = typeof header?.id === "string" ? header.id : undefined;
+  }
+  return undefined;
+}
+
 const LOCK_RETRY_INTERVAL_MS = 25;
 const LOCK_TIMEOUT_MS = 5_000;
 const LOCK_STALE_MS = 15_000;
@@ -82,6 +161,11 @@ function sanitizePathComponent(value: string): string {
  * would wrongly inherit the previous session's registry.
  */
 const INHERITED_NAMES_FILE = process.env[SUBAGENT_NAMES_FILE_ENV];
+
+/** Registry path inherited from the parent pi process (child subagents only). */
+export function getInheritedNamesFile(): string | undefined {
+  return INHERITED_NAMES_FILE;
+}
 
 /**
  * Compute the registry file path for a delegation tree.
@@ -316,14 +400,21 @@ function latestSessionFile(sessionDir: string): string | undefined {
 
 /**
  * Fork a subagent session by copying its newest session file into a new
- * directory. If the source session file's header carries a session id, it is
- * rewritten so the fork is a distinct session.
+ * directory.
+ *
+ * The copy is rewritten so the fork is a distinct session:
+ *   - the session header id gets a `-fork-...` suffix
+ *   - persisted names-identity entries get a fresh ownerId, so the forked
+ *     subagent does not inherit the original's ownership of ITS OWN nested
+ *     subagents (its resumes of those names fork too, instead of polluting
+ *     the originals).
  */
 export function forkSessionInto(originalSessionDir: string, forkSessionDir: string): boolean {
   const source = latestSessionFile(originalSessionDir);
   if (!source) return false;
   fs.mkdirSync(forkSessionDir, { recursive: true });
   const target = path.join(forkSessionDir, path.basename(source));
+  const forkSuffix = `fork-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
   try {
     const lines = fs.readFileSync(source, "utf8").split("\n");
@@ -331,14 +422,21 @@ export function forkSessionInto(originalSessionDir: string, forkSessionDir: stri
       if (!lines[i].trim()) continue;
       try {
         const entry = JSON.parse(lines[i]);
-        if (entry && typeof entry === "object" && entry.type === "session" && typeof entry.id === "string") {
-          entry.id = `${entry.id}-fork-${Date.now().toString(36)}`;
+        if (!entry || typeof entry !== "object") continue;
+        if (entry.type === "session" && typeof entry.id === "string") {
+          entry.id = `${entry.id}-${forkSuffix}`;
+          lines[i] = JSON.stringify(entry);
+        } else if (
+          entry.type === "custom" &&
+          entry.customType === SUBAGENT_NAMES_CUSTOM_TYPE &&
+          entry.data && typeof entry.data.ownerId === "string"
+        ) {
+          entry.data.ownerId = `${entry.data.ownerId}-${forkSuffix}`;
           lines[i] = JSON.stringify(entry);
         }
       } catch {
         /* leave the line untouched */
       }
-      break; // only the header line needs rewriting
     }
     fs.writeFileSync(target, lines.join("\n"), "utf8");
     return true;

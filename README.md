@@ -180,6 +180,12 @@ subagent *instance* by its unique name.
   top-level session) and are persisted in a registry file under the subagent
   session root, so they survive restarts: you can resume a subagent in a later
   session of the same conversation.
+- The registry location and the session's ownership identity are stored in the
+  session itself (a custom metadata entry). Pi assigns resumed/branched
+  sessions a new internal session id, but the persisted identity (plus a
+  `parentSession` ancestor-walk fallback for sessions created before it
+  existed) keeps the whole tree's names alive across process restarts — for
+  the top-level session and every nested subagent alike.
 - **Ownership & forks**: the agent that spawned a subagent (its *owner*)
   resumes the original session. A parent may pass names to its own subagents
   (in their task text); when a child resumes a name created by an ancestor, it

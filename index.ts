@@ -20,12 +20,16 @@ import {
   allocateSubagentNames,
   clearResumeActive,
   commitFork,
+  findAncestorNamesFile,
+  findPersistedNamesIdentity,
   forkSessionInto,
+  getInheritedNamesFile,
   getNamesFilePath,
   markResumeActive,
   readNamesRegistry,
   resolveResumeTarget,
   updateNameRecord,
+  SUBAGENT_NAMES_CUSTOM_TYPE,
   SUBAGENT_NAMES_FILE_ENV,
 } from "./names.js";
 import { installSubagentFooter, type SubagentFooterController } from "./footer.js";
@@ -815,6 +819,8 @@ export default function (pi: ExtensionAPI) {
   let currentSessionId = "ephemeral";
   let currentSubagentSessionRoot = "";
   let currentNamesFile = "";
+  /** Stable ownership/fork key for this session's delegation tree position. */
+  let currentOwnerId = "ephemeral";
   let footerController: SubagentFooterController | null = null;
   let pendingResumePlans: ResumableSubagentCall[] = [];
   let modelToRestoreAfterResume: any | undefined;
@@ -1274,15 +1280,52 @@ export default function (pi: ExtensionAPI) {
       currentSubagentSessionRoot = getDefaultSubagentSessionRoot(ctx);
       if (resumableSubagentsDisabled()) {
         currentNamesFile = "";
+        currentOwnerId = currentSessionId;
       } else {
         try {
-          currentNamesFile = getNamesFilePath(currentSubagentSessionRoot, currentSessionId);
+          // Pi assigns resumed/branched sessions a NEW session id, so the
+          // registry path and ownership key must NOT be derived from the live
+          // session id alone. Resolution order:
+          //   1. env (child subagent processes share the parent's registry)
+          //   2. identity persisted in the session metadata (custom entry)
+          //   3. ancestor walk over header.parentSession (self-heals sessions
+          //      from before the identity entry existed)
+          //   4. fresh path from the current session id
+          const inherited = getInheritedNamesFile();
+          const persisted = findPersistedNamesIdentity(ctx.sessionManager.getEntries?.() ?? []);
+          if (inherited) {
+            currentNamesFile = inherited;
+            currentOwnerId = persisted?.ownerId ?? currentSessionId;
+          } else if (persisted) {
+            currentNamesFile = persisted.namesFile;
+            currentOwnerId = persisted.ownerId;
+          } else {
+            const ancestor = findAncestorNamesFile(
+              currentSubagentSessionRoot,
+              currentSessionId,
+              (ctx.sessionManager as any).getHeader?.(),
+            );
+            currentNamesFile = ancestor?.namesFile ?? getNamesFilePath(currentSubagentSessionRoot, currentSessionId);
+            currentOwnerId = ancestor?.ownerId ?? currentSessionId;
+          }
           // Children must share this exact registry so names stay unique across
           // the whole delegation tree and forks resolve after restarts.
           process.env[SUBAGENT_NAMES_FILE_ENV] = currentNamesFile;
+          // Persist the identity into the session so the next resume/branch of
+          // this session (with whatever new session id pi assigns) finds it.
+          if (
+            (!persisted || persisted.namesFile !== currentNamesFile || persisted.ownerId !== currentOwnerId) &&
+            typeof (pi as any).appendEntry === "function"
+          ) {
+            (pi as any).appendEntry(SUBAGENT_NAMES_CUSTOM_TYPE, {
+              namesFile: currentNamesFile,
+              ownerId: currentOwnerId,
+            });
+          }
         } catch (err) {
           console.error("[pi-subagent] Failed to initialize subagent name registry:", err);
           currentNamesFile = "";
+          currentOwnerId = currentSessionId;
         }
       }
 
@@ -1715,7 +1758,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
               try {
                 const allocated = await allocateSubagentNames(
                   currentNamesFile,
-                  currentSessionId,
+                  currentOwnerId,
                   pendingAllocation.map(({ task, index }) => {
                     const agentConfig = agents.find((agent) => agent.name === task.agent);
                     return {
@@ -1876,7 +1919,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
               }
             };
             for (const resume of resumes) {
-              const resolution = await resolveResumeTarget(currentNamesFile, resume.name, currentSessionId);
+              const resolution = await resolveResumeTarget(currentNamesFile, resume.name, currentOwnerId);
               if ("error" in resolution) {
                 errors.push(resolution.error);
                 continue;
@@ -1889,7 +1932,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
                   }
                 }
                 if (resolution.forkCreated) {
-                  await commitFork(currentNamesFile, resume.name, currentSessionId, resolution.sessionDir);
+                  await commitFork(currentNamesFile, resume.name, currentOwnerId, resolution.sessionDir);
                 }
               } else if (!hasSessionFiles(resolution.sessionDir)) {
                 errors.push(`Cannot resume subagent "${resume.name}": its session directory ${resolution.sessionDir} has no saved session files (the original run may have failed before doing anything).`);
@@ -1914,7 +1957,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
             // the same target must not race us into the same session file.
             const markerErrors: string[] = [];
             for (const target of targets) {
-              const marked = await markResumeActive(currentNamesFile, target.name, currentSessionId);
+              const marked = await markResumeActive(currentNamesFile, target.name, currentOwnerId);
               if ("error" in marked) {
                 markerErrors.push(marked.error);
               } else {
@@ -1989,7 +2032,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
         } finally {
           if (currentNamesFile) {
             for (const name of markedNames) {
-              await clearResumeActive(currentNamesFile, name, currentSessionId);
+              await clearResumeActive(currentNamesFile, name, currentOwnerId);
             }
           }
         }
