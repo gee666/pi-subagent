@@ -128,12 +128,9 @@ pi --no-subagent-prevent-cycles   # allow cycles (not recommended)
 Subagent tool calls and live activity lines render a dim `hh:mm:ss` timestamp
 (call start, per-subagent run start, and each live log entry).
 
-In the interactive TUI the extension also replaces the footer with a wrapped
-version of Pi's builtin footer so that the combined `total` usage line (parent
-+ all subagents, recursively) renders directly below the normal stats line
-(prefixed `parent`), with other extensions' statuses (e.g. SSH) on their own
-line below. If the builtin footer component cannot be wrapped (e.g. pi
-internals changed), the extension falls back to the plain single-line status.
+In the interactive TUI the extension publishes the combined `total` usage line
+(parent + all subagents, recursively) via Pi's normal `ctx.ui.setStatus()`
+status line. Pi renders all extension statuses on the same footer status line.
 
 ## Steering Running Subagents
 

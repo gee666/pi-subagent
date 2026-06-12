@@ -31,7 +31,6 @@ import {
   updateNameRecord,
   SUBAGENT_NAMES_CUSTOM_TYPE,
 } from "./names.js";
-import { installSubagentFooter, type SubagentFooterController } from "./footer.js";
 import {
   recordToolCallStart,
   renderCall,
@@ -820,7 +819,6 @@ export default function (pi: ExtensionAPI) {
   let currentNamesFile = "";
   /** Stable ownership/fork key for this session's delegation tree position. */
   let currentOwnerId = "ephemeral";
-  let footerController: SubagentFooterController | null = null;
   let pendingResumePlans: ResumableSubagentCall[] = [];
   let modelToRestoreAfterResume: any | undefined;
   const approvedProjectAgentDirsForSession = new Set<string>();
@@ -1225,17 +1223,6 @@ export default function (pi: ExtensionAPI) {
         targetCtx,
         Array.from(activeSubagentUsageSummaries.values()),
       );
-      if (footerController) {
-        // Custom footer renders the total directly below the builtin stats
-        // line; keep the single-line status slot empty so other extensions'
-        // statuses (e.g. SSH) get their own clean line below.
-        footerController.updateContext(targetCtx);
-        footerController.setTotalLine(line);
-        if (typeof targetCtx.ui.setStatus === "function") {
-          targetCtx.ui.setStatus("subagent-usage", undefined);
-        }
-        return;
-      }
       if (typeof targetCtx.ui.setStatus !== "function") return;
       targetCtx.ui.setStatus(
         "subagent-usage",
@@ -1249,14 +1236,6 @@ export default function (pi: ExtensionAPI) {
   // Auto-discover agents on session start
   pi.on("session_start", async (event, ctx) => {
     latestSessionCtx = ctx;
-    if (!footerController && ctx.hasUI && !isRpcMode(process.argv)) {
-      try {
-        footerController = await installSubagentFooter(ctx, "subagent-usage");
-      } catch (err) {
-        console.error("[pi-subagent] Failed to install custom footer (falling back to status line):", err);
-        footerController = null;
-      }
-    }
     updateCombinedUsageStatus(ctx);
     try {
       // Always repair sessions left on the synthetic resume model, even in
