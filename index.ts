@@ -1548,10 +1548,8 @@ keeping their full previous context:
 - \`agent\` (in \`subagents\`) is an agent TYPE; \`subagent\` (in \`resume_subagents\`)
   is the unique name of an already-run subagent instance.
 - All resumes in one call run in parallel.
-- You may include subagent names in the task text you give YOUR OWN subagents.
-  A subagent that resumes a name created by an ancestor works on a private fork
-  of that subagent, so your original subagent's context stays untouched. Each
-  subagent gets exactly one fork per name and keeps reusing it.
+- You may include subagent names in the task text you give YOUR OWN subagents,
+  so they can resume those subagents themselves.
 - Names survive restarts; you can resume them in a later session of this conversation.
 `}`,
       };
@@ -1803,11 +1801,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
         "Every subagent run returns a unique name (e.g. code-writer-01). Pass those names",
         "as `subagent` to continue them. All resumes in one call run IN PARALLEL.",
         "",
-        "If a name was created by an ancestor agent (not by you), you transparently work on",
-        "your own private fork of that subagent: the original's context stays untouched, and",
-        "your subsequent resumes of the same name keep using the same fork.",
-        "",
-         'Example: { resumes: [{ subagent: "code-writer-01", task: "Also update the tests." }] }',
+        'Example: { resumes: [{ subagent: "code-writer-01", task: "Also update the tests." }] }',
       ].join("\n"),
       parameters: ResumeSubagentsParams,
 
