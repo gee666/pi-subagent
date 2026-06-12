@@ -743,7 +743,7 @@ export default function (pi: ExtensionAPI) {
   let pendingResumePlans: ResumableSubagentCall[] = [];
   let modelToRestoreAfterResume: any | undefined;
   const approvedProjectAgentDirsForSession = new Set<string>();
-  const activeSubagents = new Map<number, { agent: string; task: string; handle: RunningSubagentHandle }>();
+  const activeSubagents = new Map<number, { agent: string; task: string; taskIndex: number; handle: RunningSubagentHandle }>();
   const activeSubagentUsageSummaries = new Map<string, SubagentUsageSummary>();
   const latestBroadcastTargets = {
     all: [] as BroadcastTarget[],
@@ -1026,11 +1026,21 @@ export default function (pi: ExtensionAPI) {
   async function askBroadcastForSteering(message: string, ctx: any): Promise<"continue" | "handled"> {
     const nested = decodeNestedBroadcast(message);
     if (nested) {
-      const available = Array.from(activeSubagents.keys()).sort((a, b) => a - b);
-      if (available.length === 0) return "handled";
-      const [nextId, ...restPath] = nested.path;
-      if (!available.includes(nextId)) return "handled";
-      sendBroadcastToTargets(nested.message, [{ display: nested.path.join("."), topLevelId: nextId, restPath }], ctx);
+      if (activeSubagents.size === 0) return "handled";
+      const [rawTarget, ...restPath] = nested.path;
+      // Path components below the top level are 1-based task indexes within the
+      // subagent tool call running in THIS process. Internal active ids keep
+      // growing across sequential tool calls (and process restarts), so resolve
+      // by task index first; fall back to a direct id match for compatibility.
+      let resolvedId: number | undefined;
+      for (const [id, item] of activeSubagents) {
+        if (item.taskIndex === rawTarget - 1 && (resolvedId === undefined || id > resolvedId)) {
+          resolvedId = id;
+        }
+      }
+      if (resolvedId === undefined && activeSubagents.has(rawTarget)) resolvedId = rawTarget;
+      if (resolvedId === undefined) return "handled";
+      sendBroadcastToTargets(nested.message, [{ display: nested.path.join("."), topLevelId: resolvedId, restPath }], ctx);
       return "handled";
     }
 
@@ -1171,78 +1181,136 @@ export default function (pi: ExtensionAPI) {
       const resumeDisabled = parseBooleanEnv(process.env[SUBAGENT_RESUME_DISABLE_ENV]) === true;
       if (resumeDisabled || (event.reason !== "resume" && event.reason !== "startup")) return;
 
-      const plans = findLatestResumableSubagentCalls(ctx);
-      if (plans.length === 0) return;
-      const totalTaskCount = plans.reduce((sum, plan) => sum + plan.tasks.length, 0);
-
-      let shouldResume = true;
-      const shouldPrompt = parseBooleanEnv(process.env[SUBAGENT_RESUME_PROMPT_ENV]) !== false;
-      const rpcMode = isRpcMode(process.argv);
-      if (ctx.hasUI && !rpcMode && shouldPrompt) {
-        shouldResume = await ctx.ui.confirm(
-          "Resume subagents?",
-          `The resumed session has ${plans.length === 1 ? "an" : String(plans.length)} unfinished subagent call${plans.length === 1 ? "" : "s"} (${totalTaskCount} task${totalTaskCount === 1 ? "" : "s"}). Resume from saved subagent sessions?`,
-        );
-      }
-      if (!shouldResume) {
-        if (ctx.model?.provider === RESUME_PROVIDER) {
-          if (restorableModel) {
-            await pi.setModel(restorableModel);
-          } else {
-            ctx.ui.notify(
-              `Subagent resume was declined, but the current model is the synthetic resume model and no real fallback model is available. Select a real model before continuing, or set ${SUBAGENT_FALLBACK_MODEL_ENV}=provider/model.`,
-              "error",
-            );
-          }
-        }
-        return;
-      }
-
-      if (!restorableModel && ctx.model?.provider === RESUME_PROVIDER) {
-        ctx.ui.notify(
-          `Cannot resume subagents while on the synthetic resume model because no real fallback model is available. Select a real model or set ${SUBAGENT_FALLBACK_MODEL_ENV}=provider/model.`,
-          "error",
-        );
-        return;
-      }
-
-      pendingResumePlans = [...plans];
-      const resumeState = getSyntheticResumeState();
-      resumeState.plans = [...plans];
-      resumeState.phase = "tool";
-      // Headless subprocess/RPC subagents cannot answer a visible resume
-      // prompt. They already receive an initial RPC prompt from the parent
-      // runner, so inject the synthetic resume tool call into that next model
-      // request. Interactive top-level sessions keep using a visible prompt so
-      // the user sees exactly what is happening.
-      const injectOnNextRequest = rpcMode || hasCliInitialPrompt(process.argv) || !ctx.hasUI;
-      resumeState.trigger = injectOnNextRequest ? "nextRequest" : "resumePrompt";
-      modelToRestoreAfterResume = restorableModel ?? ctx.model;
-      resumeModelRegistry = ctx.modelRegistry;
-      ensureSubagentToolActive(pi);
-      const resumeModel = ctx.modelRegistry.find(RESUME_PROVIDER, RESUME_MODEL_ID);
-      if (!resumeModel || !(await pi.setModel(resumeModel))) {
-        ctx.ui.notify("Failed to switch to synthetic subagent resume model.", "error");
-        await restoreModelAfterResumeFailure(ctx);
-        return;
-      }
-
-      // In print/json subprocesses there is already an initial CLI prompt about
-      // to be sent. That prompt will be answered by the synthetic provider with
-      // a real assistant subagent tool call. In interactive mode, submit a short
-      // visible prompt that triggers the same synthetic provider path.
-      if (injectOnNextRequest) {
-        if (ctx.hasUI) ctx.ui.notify(`Resuming ${totalTaskCount} subagents...`, "info");
-      } else {
-        // Do not start the synthetic resume turn from session_start. Pi renders
-        // the resumed chat only after session_start/resources_discover complete;
-        // starting now lets that render wipe out the live tool component, so no
-        // real-time updates appear. Queue it for resources_discover instead,
-        // which is the last extension hook before the initial chat render.
-        pendingInteractiveResumePrompt = `Resuming ${totalTaskCount} subagents...`;
-      }
+      await maybeOfferSubagentResume(ctx, { deferInteractivePrompt: true });
     } catch (err) {
       console.error("[pi-subagent] Error in session_start:", err);
+      await restoreModelAfterResumeFailure(ctx);
+    }
+  });
+
+  /**
+   * Detect unfinished subagent calls at the current branch leaf and offer to
+   * resume them. Shared between session_start (startup/resume) and
+   * session_tree (TUI tree navigation back to a subagent point).
+   *
+   * When deferInteractivePrompt is true, the interactive resume prompt is
+   * queued for resources_discover (only valid during session_start, before the
+   * initial chat render). Otherwise the prompt is sent directly after a short
+   * delay.
+   */
+  async function maybeOfferSubagentResume(
+    ctx: any,
+    opts: { deferInteractivePrompt: boolean },
+  ): Promise<void> {
+    const restorableModel = getRestorableModel(ctx);
+    if (restorableModel) {
+      lastRestorableModel = restorableModel;
+      resumeModelRegistry = ctx.modelRegistry;
+    }
+
+    const plans = findLatestResumableSubagentCalls(ctx);
+    if (plans.length === 0) return;
+    const totalTaskCount = plans.reduce((sum, plan) => sum + plan.tasks.length, 0);
+
+    let shouldResume = true;
+    const shouldPrompt = parseBooleanEnv(process.env[SUBAGENT_RESUME_PROMPT_ENV]) !== false;
+    const rpcMode = isRpcMode(process.argv);
+    if (ctx.hasUI && !rpcMode && shouldPrompt) {
+      shouldResume = await ctx.ui.confirm(
+        "Resume subagents?",
+        `The resumed session has ${plans.length === 1 ? "an" : String(plans.length)} unfinished subagent call${plans.length === 1 ? "" : "s"} (${totalTaskCount} task${totalTaskCount === 1 ? "" : "s"}). Resume from saved subagent sessions?`,
+      );
+    }
+    if (!shouldResume) {
+      if (ctx.model?.provider === RESUME_PROVIDER) {
+        if (restorableModel) {
+          await pi.setModel(restorableModel);
+        } else {
+          ctx.ui.notify(
+            `Subagent resume was declined, but the current model is the synthetic resume model and no real fallback model is available. Select a real model before continuing, or set ${SUBAGENT_FALLBACK_MODEL_ENV}=provider/model.`,
+            "error",
+          );
+        }
+      }
+      return;
+    }
+
+    if (!restorableModel && ctx.model?.provider === RESUME_PROVIDER) {
+      ctx.ui.notify(
+        `Cannot resume subagents while on the synthetic resume model because no real fallback model is available. Select a real model or set ${SUBAGENT_FALLBACK_MODEL_ENV}=provider/model.`,
+        "error",
+      );
+      return;
+    }
+
+    pendingResumePlans = [...plans];
+    const resumeState = getSyntheticResumeState();
+    resumeState.plans = [...plans];
+    resumeState.phase = "tool";
+    // Headless subprocess/RPC subagents cannot answer a visible resume
+    // prompt. They already receive an initial RPC prompt from the parent
+    // runner, so inject the synthetic resume tool call into that next model
+    // request. Interactive top-level sessions keep using a visible prompt so
+    // the user sees exactly what is happening.
+    const injectOnNextRequest = rpcMode || hasCliInitialPrompt(process.argv) || !ctx.hasUI;
+    resumeState.trigger = injectOnNextRequest ? "nextRequest" : "resumePrompt";
+    modelToRestoreAfterResume = restorableModel ?? ctx.model;
+    resumeModelRegistry = ctx.modelRegistry;
+    ensureSubagentToolActive(pi);
+    const resumeModel = ctx.modelRegistry.find(RESUME_PROVIDER, RESUME_MODEL_ID);
+    if (!resumeModel || !(await pi.setModel(resumeModel))) {
+      ctx.ui.notify("Failed to switch to synthetic subagent resume model.", "error");
+      await restoreModelAfterResumeFailure(ctx);
+      return;
+    }
+
+    // In print/json subprocesses there is already an initial CLI prompt about
+    // to be sent. That prompt will be answered by the synthetic provider with
+    // a real assistant subagent tool call. In interactive mode, submit a short
+    // visible prompt that triggers the same synthetic provider path.
+    if (injectOnNextRequest) {
+      if (ctx.hasUI) ctx.ui.notify(`Resuming ${totalTaskCount} subagents...`, "info");
+    } else if (opts.deferInteractivePrompt) {
+      // Do not start the synthetic resume turn from session_start. Pi renders
+      // the resumed chat only after session_start/resources_discover complete;
+      // starting now lets that render wipe out the live tool component, so no
+      // real-time updates appear. Queue it for resources_discover instead,
+      // which is the last extension hook before the initial chat render.
+      pendingInteractiveResumePrompt = `Resuming ${totalTaskCount} subagents...`;
+    } else {
+      setTimeout(() => {
+        try {
+          pi.sendUserMessage(`Resuming ${totalTaskCount} subagents...`);
+        } catch (err) {
+          console.error("[pi-subagent] Failed to start resume turn after tree navigation:", err);
+          void restoreModelAfterResumeFailure(ctx);
+        }
+      }, RESUME_INTERACTIVE_DELAY_MS);
+    }
+  }
+
+  // Offer to resume subagents after the user navigates the session tree (Esc
+  // navigation in the TUI) back to a point with an unfinished subagent call.
+  pi.on("session_tree", async (event: any, ctx) => {
+    latestSessionCtx = ctx;
+    updateCombinedUsageStatus(ctx);
+    try {
+      if (!canDelegate) return;
+      // Skip extension-driven navigation (e.g. compaction) and any state where
+      // a resume is already pending or subagents are still running.
+      if (event?.fromExtension) return;
+      if (activeSubagents.size > 0) return;
+      if (pendingResumePlans.length > 0) return;
+      if (pendingInteractiveResumePrompt) return;
+      if (ctx.model?.provider === RESUME_PROVIDER) return;
+      if (typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
+
+      const resumeDisabled = parseBooleanEnv(process.env[SUBAGENT_RESUME_DISABLE_ENV]) === true;
+      if (resumeDisabled) return;
+
+      await maybeOfferSubagentResume(ctx, { deferInteractivePrompt: false });
+    } catch (err) {
+      console.error("[pi-subagent] Error in session_tree:", err);
       await restoreModelAfterResumeFailure(ctx);
     }
   });
@@ -1283,6 +1351,13 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("input", async (event, ctx) => {
     try {
+      // Encoded nested-broadcast envelopes must never leak into this agent's
+      // conversation as literal text. Intercept them unconditionally: if the
+      // target subagent is gone, the message is dropped (best effort).
+      if (decodeNestedBroadcast(event.text)) {
+        await askBroadcastForSteering(event.text, ctx);
+        return { action: "handled" as const };
+      }
       // Pi emits this before it applies the built-in streaming behavior. When a
       // subagent tool is running, only mid-stream steering messages should be
       // candidates for child broadcast. Idle prompts and queued follow-ups must
@@ -1600,7 +1675,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
       fallbackModel,
       onHandle: (handle) => {
         activeId = topLevelBaseId;
-        activeSubagents.set(activeId, { agent: agentName, task, handle });
+        activeSubagents.set(activeId, { agent: agentName, task, taskIndex: 0, handle });
         updateLatestBroadcastTargets(undefined);
       },
     });
@@ -1671,7 +1746,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
         (index, task, handle) => {
           const id = topLevelBaseId + index;
           taskIds.set(index, id);
-          activeSubagents.set(id, { agent: task.agent, task: task.task, handle });
+          activeSubagents.set(id, { agent: task.agent, task: task.task, taskIndex: index, handle });
           updateLatestBroadcastTargets(undefined);
         },
         (index) => {

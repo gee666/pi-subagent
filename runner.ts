@@ -782,7 +782,14 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
 
       opts.onHandle?.({
         steer(message: string) {
-          sendRpc({ type: "steer", message });
+          // Use "prompt" with streamingBehavior "steer" instead of the raw
+          // "steer" RPC command. Pi's `session.steer()` bypasses the `input`
+          // extension hook entirely, so the child's pi-subagent extension would
+          // never see encoded nested-broadcast messages and could not forward
+          // them to its own (grand)children. `session.prompt()` emits the
+          // `input` event first and still queues the message as a steering
+          // message while the child is streaming.
+          sendRpc({ type: "prompt", message, streamingBehavior: "steer" });
         },
       });
 

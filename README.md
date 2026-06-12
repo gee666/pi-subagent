@@ -128,6 +128,8 @@ While a `subagent` tool call is running, mid-stream steering input can be broadc
 
 Subagent subprocesses save sessions in `sessions-subagents`. When a main Pi session is resumed and its latest branch contains an unfinished `subagent` tool call (aborted, errored, or closed by Pi's synthetic unfinished-tool error), the extension can resume that delegation from the saved subagent sessions.
 
+The same detection also runs after navigating the session tree in the TUI (Esc navigation): if you jump back to a point whose branch ends in an unfinished `subagent` call, the extension offers to resume those subagents from their saved sessions.
+
 - TUI mode asks: **Resume subagents?**
 - Non-UI modes (`pi -p`, JSON/RPC) resume automatically.
 - Already-finished subagents are reused as completed; unfinished ones continue from their own saved sessions.
