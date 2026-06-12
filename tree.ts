@@ -92,7 +92,7 @@ export function formatCombinedUsageStatusLine(
 	const cache = cacheRead || cacheWrite
 		? ` R${formatTokens(cacheRead)} W${formatTokens(cacheWrite)}`
 		: "";
-	return `Σ ↑${formatTokens(input)} ↓${formatTokens(output)}${cache} T${formatTokens(total)} • ${turns} turn${turns === 1 ? "" : "s"} • $${cost.toFixed(4)} • ${subagentCount} subagent${subagentCount === 1 ? "" : "s"}`;
+	return `with subagents (${subagentCount}) Σ $${cost.toFixed(4)} • ↑${formatTokens(input)} ↓${formatTokens(output)}${cache} T${formatTokens(total)} • ${turns} turn${turns === 1 ? "" : "s"}`;
 }
 
 export function formatUsage(usage: Partial<UsageStats>, model?: string): string {

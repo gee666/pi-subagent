@@ -1226,7 +1226,7 @@ export default function (pi: ExtensionAPI) {
       if (typeof targetCtx.ui.setStatus !== "function") return;
       targetCtx.ui.setStatus(
         "subagent-usage",
-        line ? formatFooterStatusText(targetCtx, `total ${line}`) : undefined,
+        line ? formatFooterStatusText(targetCtx, line) : undefined,
       );
     } catch (err) {
       console.error("[pi-subagent] Failed to update combined subagent status line:", err);
