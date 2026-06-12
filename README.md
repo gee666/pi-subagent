@@ -36,6 +36,9 @@ only the **final text output** from subagents (no tool calls, no reasoning).
 
 ## Tool Call Shape
 
+The delegation tool is called `subagents` (older sessions may contain the
+legacy name `subagent`, which is still recognized when reading history):
+
 ```json
 { "tasks": [{ "agent": "code-writer", "task": "Implement the API" }] }
 ```
@@ -51,7 +54,7 @@ Multiple tasks run in parallel:
 }
 ```
 
-Each task supports `agent` and `task`.
+Each task supports `agent` (the agent *type* to spawn) and `task`.
 
 ## Bundled Agents
 
@@ -134,13 +137,13 @@ internals changed), the extension falls back to the plain single-line status.
 
 ## Steering Running Subagents
 
-While a `subagent` tool call is running, mid-stream steering input can be broadcast to one or more child agents. The extension uses Pi's `InputEvent.streamingBehavior` metadata when available, so idle prompts and queued follow-ups continue to the parent normally; only true `steer` inputs open the broadcast routing prompt.
+While a `subagents` tool call is running, mid-stream steering input can be broadcast to one or more child agents. The extension uses Pi's `InputEvent.streamingBehavior` metadata when available, so idle prompts and queued follow-ups continue to the parent normally; only true `steer` inputs open the broadcast routing prompt.
 
 ## Subagent Session Resume
 
-Subagent subprocesses save sessions in `sessions-subagents`. When a main Pi session is resumed and its latest branch contains an unfinished `subagent` tool call (aborted, errored, or closed by Pi's synthetic unfinished-tool error), the extension can resume that delegation from the saved subagent sessions.
+Subagent subprocesses save sessions in `sessions-subagents`. When a main Pi session is resumed and its latest branch contains an unfinished `subagents` tool call (aborted, errored, or closed by Pi's synthetic unfinished-tool error), the extension can resume that delegation from the saved subagent sessions.
 
-The same detection also runs after navigating the session tree in the TUI (Esc navigation): if you jump back to a point whose branch ends in an unfinished `subagent` call, the extension offers to resume those subagents from their saved sessions.
+The same detection also runs after navigating the session tree in the TUI (Esc navigation): if you jump back to a point whose branch ends in an unfinished `subagents` call, the extension offers to resume those subagents from their saved sessions.
 
 - TUI mode asks: **Resume subagents?**
 - Non-UI modes (`pi -p`, JSON/RPC) resume automatically.
@@ -152,7 +155,7 @@ The same detection also runs after navigating the session tree in the TUI (Esc n
 | `PI_SUBAGENT_RESUME_PROMPT` | `true` | Set to `false` to suppress the TUI yes/no prompt and auto-resume. |
 | `PI_SUBAGENT_DISABLE_RESUME` | `false` | Set to `true` to disable automatic subagent resume detection entirely. |
 
-Note: crash-resume covers `subagent` calls only. An interrupted `resume_subagents` call is not replayed automatically — the model can simply issue it again, since names stay valid (see below).
+Note: crash-resume covers `subagents` calls only. An interrupted `resume_subagents` call is not replayed automatically — the model can simply issue it again, since names stay valid (see below).
 
 ## Resumable Subagents by Name (`resume_subagents`)
 
@@ -161,12 +164,16 @@ type plus a per-type counter — `code-writer-01`, `code-writer-02`,
 `code-reviewer-01`, ... The name is returned together with the subagent's
 results and shown in the TUI tree.
 
-The `resume_subagents` tool continues named subagents with a new prompt while
+The `resume_subagents` tool continues named subagents with a new task while
 preserving their full previous context:
 
 ```json
-{ "resumes": [{ "name": "code-writer-01", "prompt": "Now also update the tests." }] }
+{ "resumes": [{ "subagent": "code-writer-01", "task": "Now also update the tests." }] }
 ```
+
+Naming is deliberately unambiguous: `agent` (in `subagents`) selects an agent
+*type* to spawn; `subagent` (in `resume_subagents`) addresses an already-run
+subagent *instance* by its unique name.
 
 - All resumes in one call run **in parallel**.
 - Names are unique within one delegation tree (everything spawned from one
@@ -187,9 +194,10 @@ preserving their full previous context:
   works: the registry remembers the agent's model/tool restrictions and the
   session itself carries the context.
 
-| Env Var | Description |
-| --- | --- |
-| `PI_SUBAGENT_NAMES_FILE` | Internal: path of the shared name registry, propagated to child processes so the whole delegation tree allocates unique names. |
+| Env Var | Default | Description |
+| --- | --- | --- |
+| `DISABLE_RESUMABLE_SUBAGENTS` | `false` | Set to `true`/`on`/`1` to disable resumable subagents entirely: no names are allocated, the `resume_subagents` tool is not registered, and the system prompt omits the feature. |
+| `PI_SUBAGENT_NAMES_FILE` | (internal) | Path of the shared name registry, propagated to child processes so the whole delegation tree allocates unique names. |
 
 ## Agent Discovery
 
@@ -237,7 +245,7 @@ extension manages itself are blocked from being forwarded.
 ## Programmatic Usage (JSON RPC)
 
 When running `pi` programmatically with `--mode rpc` (or `--mode json`), the stream contains
-`tool_result_end` events whenever the agent completes a `subagent` tool call. The `details` field
+`tool_result_end` events whenever the agent completes a `subagents` tool call. The `details` field
 of these events carries the full stats for that delegation — including recursive usage and tool
 call counts from all subagents in the tree.
 
@@ -247,7 +255,7 @@ call counts from all subagents in the tree.
 tool_result_end
 └── message
     ├── role:        "toolResult"
-    ├── toolName:    "subagent"
+    ├── toolName:    "subagents"
     ├── toolCallId:  string
     ├── isError:     boolean
     ├── content:     [{ type: "text", text: "<final output>" }]
@@ -298,7 +306,7 @@ interface UsageStats {
   turns: number;                        // number of assistant turns
 }
 
-// toolName → call count, e.g. { "bash": 5, "read": 3, "subagent": 1 }
+// toolName → call count, e.g. { "bash": 5, "read": 3, "subagents": 1 }
 type ToolCallCounts = Record<string, number>;
 
 interface UsageTreeNode {
@@ -321,8 +329,8 @@ interface UsageTreeNode {
   subtree.
 - **`contextTokens`** is a point-in-time snapshot of the context window size at the last turn of that
   agent. It is **not** summed in aggregated stats (it would be meaningless as a cross-process sum).
-- **`toolCalls`** includes **all** tool calls an agent made, including the `"subagent"` call itself.
-  You can use the `"subagent"` count to see how many nested delegations an agent spawned.
+- **`toolCalls`** includes **all** tool calls an agent made, including the `"subagents"` call itself.
+  You can use the `"subagents"` count to see how many nested delegations an agent spawned.
 
 ### Annotated example JSON
 
@@ -334,7 +342,7 @@ delegates to `code-reviwer` before finishing.
   "type": "tool_result_end",
   "message": {
     "role": "toolResult",
-    "toolName": "subagent",
+    "toolName": "subagents",
     "toolCallId": "toolu_01XYZ",
     "isError": false,
     "content": [
@@ -361,7 +369,7 @@ delegates to `code-reviwer` before finishing.
         "read":     3,
         "bash":     2,
         "edit":     1,
-        "subagent": 1
+        "subagents": 1
       },
 
       "usageTree": [
@@ -381,7 +389,7 @@ delegates to `code-reviwer` before finishing.
             "read":     1,
             "bash":     1,
             "edit":     1,
-            "subagent": 1
+            "subagents": 1
           },
           "aggregatedUsage": {
             "input": 2180,
@@ -396,7 +404,7 @@ delegates to `code-reviwer` before finishing.
             "read":     3,
             "bash":     2,
             "edit":     1,
-            "subagent": 1
+            "subagents": 1
           },
           "children": [
             {
@@ -456,7 +464,7 @@ delegates to `code-reviwer` before finishing.
             "read":     1,
             "bash":     1,
             "edit":     1,
-            "subagent": 1
+            "subagents": 1
           },
           "messages": [
             "... full conversation history of code-writer (includes the nested subagent tool_result) ..."
@@ -472,7 +480,7 @@ delegates to `code-reviwer` before finishing.
 
 If you are consuming the JSON stream programmatically and want to track the total cost and tool
 usage across all subagent work in a session, listen for every `tool_result_end` event where
-`message.toolName === "subagent"` and sum `message.details.aggregatedUsage` across them.
+`message.toolName === "subagents"` (or the legacy `"subagent"` in old sessions) and sum `message.details.aggregatedUsage` across them.
 
 ```js
 let totalCost = 0;
@@ -482,7 +490,7 @@ for await (const line of jsonLines) {
   const event = JSON.parse(line);
   if (
     event.type === "tool_result_end" &&
-    event.message?.toolName === "subagent" &&
+    ["subagents", "subagent", "resume_subagents"].includes(event.message?.toolName) &&
     event.message?.details
   ) {
     const { aggregatedUsage, aggregatedToolCalls } = event.message.details;

@@ -21,6 +21,7 @@ import {
 	getNestedSubagentResults,
 	isResultError,
 	isSubagentDetails,
+	isSubagentToolName,
 	usageSummaryToUsageStats,
 } from "./types.js";
 
@@ -179,7 +180,7 @@ function extractPendingSubagentCalls(messages: SingleResult["messages"]): Pendin
 		if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
 		for (let partIndex = 0; partIndex < message.content.length; partIndex++) {
 			const part = message.content[partIndex] as any;
-			if (part?.type !== "toolCall" || (part?.name !== "subagent" && part?.name !== "resume_subagents")) continue;
+			if (part?.type !== "toolCall" || !isSubagentToolName(part?.name)) continue;
 			const args = part.arguments && typeof part.arguments === "object" ? part.arguments : {};
 			const tasks = Array.isArray((args as any).tasks)
 				? (args as any).tasks
@@ -190,11 +191,12 @@ function extractPendingSubagentCalls(messages: SingleResult["messages"]): Pendin
 						}))
 				: (args as any).resumes
 					? (Array.isArray((args as any).resumes) ? (args as any).resumes : [(args as any).resumes])
-							.filter((resume: any) => resume && typeof resume.name === "string")
+							// Current shape is {subagent, task}; tolerate legacy {name, prompt}.
 							.map((resume: any) => ({
-								agent: resume.name,
-								task: typeof resume.prompt === "string" ? resume.prompt : undefined,
+								agent: typeof resume?.subagent === "string" ? resume.subagent : resume?.name,
+								task: typeof resume?.task === "string" ? resume.task : typeof resume?.prompt === "string" ? resume.prompt : undefined,
 							}))
+							.filter((entry: any) => typeof entry.agent === "string")
 					: [];
 			calls.push({
 				toolCallId:
@@ -360,9 +362,15 @@ function formatToolArgPreview(toolName: string, args: Record<string, unknown>): 
 		case "find":
 			return truncateTo((args.pattern ?? "*") as string, 30) +
 				   (args.path ? ` in ${shorten(args.path as string)}` : "");
-		case "subagent": {
+		case "subagent":
+		case "subagents": {
 			const tasks = (args.tasks as any[]) ?? [];
 			return tasks.map((t: any) => t.agent).join(", ");
+		}
+		case "resume_subagents": {
+			const raw = (args as any).resumes;
+			const resumes = Array.isArray(raw) ? raw : raw ? [raw] : [];
+			return resumes.map((r: any) => r?.subagent ?? r?.name).filter(Boolean).join(", ");
 		}
 		default:
 			return "";

@@ -70,6 +70,9 @@ import {
   getNestedSubagentResults,
   isResultError,
   isSubagentDetails,
+  isSubagentToolName,
+  RESUME_SUBAGENTS_TOOL_NAME,
+  SUBAGENT_TOOL_NAME,
   emptyUsage,
   addUsage,
   emptyUsageSummary,
@@ -118,11 +121,11 @@ const SubagentParams = Type.Object({
 }, { additionalProperties: false });
 
 const ResumeItem = Type.Object({
-  name: Type.String({
-    description: "Unique subagent name returned by a previous subagent run (e.g. code-writer-01)",
+  subagent: Type.String({
+    description: "Unique subagent name returned by a previous subagents run (e.g. code-writer-01)",
   }),
-  prompt: Type.String({
-    description: "New prompt for the resumed subagent. It keeps its previous context.",
+  task: Type.String({
+    description: "New task for the resumed subagent. It keeps its previous context.",
   }),
 }, { additionalProperties: false });
 
@@ -136,18 +139,32 @@ const ResumeSubagentsParams = Type.Object({
     ],
     {
       description:
-        "Array of {name, prompt} objects. Each named subagent is resumed in parallel with its new prompt.",
+        "Array of {subagent, task} objects. Each named subagent is resumed in parallel with its new task.",
     },
   ),
 }, { additionalProperties: false });
 
-/** Accept both `resumes: [{...}]` and a single bare `resumes: {...}` object. */
-function normalizeResumes(raw: unknown): Array<{ name: string; prompt: string }> {
+/**
+ * Accept both `resumes: [{...}]` and a single bare `resumes: {...}` object.
+ * Also tolerates the legacy {name, prompt} field names from older sessions.
+ */
+function normalizeResumes(raw: unknown): Array<{ name: string; task: string }> {
   const items = Array.isArray(raw) ? raw : raw && typeof raw === "object" ? [raw] : [];
-  return items.filter(
-    (item: any): item is { name: string; prompt: string } =>
-      item && typeof item.name === "string" && typeof item.prompt === "string",
-  );
+  const normalized: Array<{ name: string; task: string }> = [];
+  for (const item of items as any[]) {
+    if (!item || typeof item !== "object") continue;
+    const name = typeof item.subagent === "string" ? item.subagent : typeof item.name === "string" ? item.name : undefined;
+    const task = typeof item.task === "string" ? item.task : typeof item.prompt === "string" ? item.prompt : undefined;
+    if (name !== undefined && task !== undefined) normalized.push({ name, task });
+  }
+  return normalized;
+}
+
+/** Resumable named subagents are on by default; set to 1/true/on to disable. */
+const DISABLE_RESUMABLE_SUBAGENTS_ENV = "DISABLE_RESUMABLE_SUBAGENTS";
+
+function resumableSubagentsDisabled(): boolean {
+  return parseBoolean(process.env[DISABLE_RESUMABLE_SUBAGENTS_ENV]) === true;
 }
 
 // ---------------------------------------------------------------------------
@@ -441,7 +458,7 @@ function collectCombinedUsageStatusLine(
         parentUsage.turns += 1;
       }
     }
-    if (msg.role === "toolResult" && (msg.toolName === "subagent" || msg.toolName === "resume_subagents") && isSubagentDetails(msg.details)) {
+    if (msg.role === "toolResult" && isSubagentToolName(msg.toolName) && isSubagentDetails(msg.details)) {
       addUsageSummary(
         subagents,
         msg.details.usageSummary ?? usageSummaryFromUsage(msg.details.aggregatedUsage),
@@ -503,7 +520,10 @@ function getProjectAgentSessionKey(projectAgentsDir: string | null): string {
 
 function ensureSubagentToolActive(pi: ExtensionAPI): void {
   const activeTools = pi.getActiveTools();
-  const missing = ["subagent", "resume_subagents"].filter((tool) => !activeTools.includes(tool));
+  const wanted = resumableSubagentsDisabled()
+    ? [SUBAGENT_TOOL_NAME]
+    : [SUBAGENT_TOOL_NAME, RESUME_SUBAGENTS_TOOL_NAME];
+  const missing = wanted.filter((tool) => !activeTools.includes(tool));
   if (missing.length > 0) {
     pi.setActiveTools([...activeTools, ...missing]);
   }
@@ -703,7 +723,7 @@ export default function (pi: ExtensionAPI) {
         const toolCalls = plans.map((plan, index) => ({
           type: "toolCall" as const,
           id: `resume_subagent_${Date.now()}_${index}`,
-          name: "subagent",
+          name: SUBAGENT_TOOL_NAME,
           arguments: { tasks: plan.tasks },
         }));
         const message = {
@@ -824,13 +844,13 @@ export default function (pi: ExtensionAPI) {
         .map((message: any) => {
           if (message?.role === "assistant" && Array.isArray(message.content)) {
             const subagentCalls = message.content.filter(
-              (part: any) => part?.type === "toolCall" && (part?.name === "subagent" || part?.name === "resume_subagents"),
+              (part: any) => part?.type === "toolCall" && isSubagentToolName(part?.name),
             );
             return subagentCalls.length > 0
               ? { ...message, content: subagentCalls }
               : null;
           }
-          if (message?.role === "toolResult" && (message.toolName === "subagent" || message.toolName === "resume_subagents")) {
+          if (message?.role === "toolResult" && isSubagentToolName(message.toolName)) {
             return isSubagentDetails(message.details)
               ? { ...message, details: slimDetailsForProgress(message.details) }
               : message;
@@ -980,7 +1000,7 @@ export default function (pi: ExtensionAPI) {
     for (const message of messages) {
       if (message?.role !== "assistant" || !Array.isArray(message.content)) continue;
       for (const part of message.content) {
-        if (part?.type !== "toolCall" || (part?.name !== "subagent" && part?.name !== "resume_subagents")) continue;
+        if (part?.type !== "toolCall" || !isSubagentToolName(part?.name)) continue;
         const toolCallId = typeof part.toolCallId === "string" ? part.toolCallId : typeof part.id === "string" ? part.id : undefined;
         if (toolCallId && completedToolCallIds.has(toolCallId)) continue;
         const rawResumes = part.arguments?.resumes;
@@ -1252,14 +1272,18 @@ export default function (pi: ExtensionAPI) {
       discoveredAgents = discovery.agents;
       currentSessionId = ctx.sessionManager.getSessionId?.() ?? "ephemeral";
       currentSubagentSessionRoot = getDefaultSubagentSessionRoot(ctx);
-      try {
-        currentNamesFile = getNamesFilePath(currentSubagentSessionRoot, currentSessionId);
-        // Children must share this exact registry so names stay unique across
-        // the whole delegation tree and forks resolve after restarts.
-        process.env[SUBAGENT_NAMES_FILE_ENV] = currentNamesFile;
-      } catch (err) {
-        console.error("[pi-subagent] Failed to initialize subagent name registry:", err);
+      if (resumableSubagentsDisabled()) {
         currentNamesFile = "";
+      } else {
+        try {
+          currentNamesFile = getNamesFilePath(currentSubagentSessionRoot, currentSessionId);
+          // Children must share this exact registry so names stay unique across
+          // the whole delegation tree and forks resolve after restarts.
+          process.env[SUBAGENT_NAMES_FILE_ENV] = currentNamesFile;
+        } catch (err) {
+          console.error("[pi-subagent] Failed to initialize subagent name registry:", err);
+          currentNamesFile = "";
+        }
       }
 
       if (discoveredAgents.length > 0 && ctx.hasUI) {
@@ -1422,7 +1446,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("tool_execution_end", (event, ctx) => {
     latestSessionCtx = ctx;
-    if (event.toolName === "subagent" || event.toolName === "resume_subagents") {
+    if (isSubagentToolName(event.toolName)) {
       activeSubagentUsageSummaries.delete(event.toolCallId);
       updateCombinedUsageStatus(ctx);
       setTimeout(() => updateCombinedUsageStatus(ctx), 0);
@@ -1482,11 +1506,11 @@ export default function (pi: ExtensionAPI) {
           event.systemPrompt +
           `\n\n## Available Subagents
 
-The following subagents are available via the \`subagent\` tool:
+The following subagents are available via the \`subagents\` tool:
 
 ${agentList}
 
-### How to call the subagent tool
+### How to call the subagents tool
 
 Each subagent runs in an **isolated process**.
 
@@ -1509,36 +1533,38 @@ calls one after another. Do NOT put dependent tasks in the same array.
 
 - Max depth: current depth ${currentDepth}, max depth ${maxDepth}
 - Max subagents per tool call: ${maxParallelTasks}
-
+${resumableSubagentsDisabled() ? "" : `
 ### Resumable subagents
 
 Every subagent run is assigned a unique, durable name (e.g. \`code-writer-01\`,
 \`code-reviewer-02\`) which is returned together with its results. Use the
-\`resume_subagents\` tool to continue named subagents with a new prompt while
+\`resume_subagents\` tool to continue named subagents with a new task while
 keeping their full previous context:
 
 \`\`\`json
-{ "resumes": [{ "name": "code-writer-01", "prompt": "Now also update the tests." }] }
+{ "resumes": [{ "subagent": "code-writer-01", "task": "Now also update the tests." }] }
 \`\`\`
 
+- \`agent\` (in \`subagents\`) is an agent TYPE; \`subagent\` (in \`resume_subagents\`)
+  is the unique name of an already-run subagent instance.
 - All resumes in one call run in parallel.
 - You may include subagent names in the task text you give YOUR OWN subagents.
   A subagent that resumes a name created by an ancestor works on a private fork
   of that subagent, so your original subagent's context stays untouched. Each
   subagent gets exactly one fork per name and keeps reusing it.
 - Names survive restarts; you can resume them in a later session of this conversation.
-`,
+`}`,
       };
     } catch (err) {
       console.error("[pi-subagent] Error in before_agent_start:", err);
     }
   });
 
-  // Register the subagent tool
+  // Register the subagents tool
   if (canDelegate) {
     pi.registerTool({
-      name: "subagent",
-      label: "Subagent",
+      name: SUBAGENT_TOOL_NAME,
+      label: "Subagents",
       description: [
         "Delegate work to specialized subagents running as isolated pi processes.",
         "",
@@ -1768,20 +1794,20 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
         renderResult(result, expanded, theme),
     });
 
-    pi.registerTool({
-      name: "resume_subagents",
+    if (!resumableSubagentsDisabled()) pi.registerTool({
+      name: RESUME_SUBAGENTS_TOOL_NAME,
       label: "Resume subagents",
       description: [
-        "Resume previously run subagents by name with a new prompt, keeping their full context.",
+        "Resume previously run subagents by name with a new task, keeping their full context.",
         "",
         "Every subagent run returns a unique name (e.g. code-writer-01). Pass those names",
-        "here to continue them. All resumes in one call run IN PARALLEL.",
+        "as `subagent` to continue them. All resumes in one call run IN PARALLEL.",
         "",
         "If a name was created by an ancestor agent (not by you), you transparently work on",
         "your own private fork of that subagent: the original's context stays untouched, and",
         "your subsequent resumes of the same name keep using the same fork.",
         "",
-         'Example: { resumes: [{ name: "code-writer-01", prompt: "Also update the tests." }] }',
+         'Example: { resumes: [{ subagent: "code-writer-01", task: "Also update the tests." }] }',
       ].join("\n"),
       parameters: ResumeSubagentsParams,
 
@@ -1803,7 +1829,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
 
           const resumes = normalizeResumes((params as any).resumes);
           if (resumes.length === 0) {
-            return fail("Invalid parameters. Provide a non-empty resumes array of {name, prompt} objects (both fields are required strings).");
+            return fail("Invalid parameters. Provide a non-empty resumes array of {subagent, task} objects (both fields are required strings).");
           }
 
           const duplicates = resumes
@@ -1842,7 +1868,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
             const errors: string[] = [];
             const targets: Array<{
               agent: string;
-              prompt: string;
+              task: string;
               sessionDir: string;
               name: string;
               model?: string;
@@ -1877,7 +1903,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
               }
               targets.push({
                 agent: resolution.record.agent,
-                prompt: resume.prompt,
+                task: resume.task,
                 sessionDir: resolution.sessionDir,
                 name: resume.name,
                 model: resolution.record.model,
@@ -1907,7 +1933,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
             }
 
             for (const target of targets) {
-              await updateNameRecord(currentNamesFile, target.name, { lastResumePrompt: target.prompt });
+              await updateNameRecord(currentNamesFile, target.name, { lastResumePrompt: target.task });
             }
 
             // Resumed agents may reference agent types whose definition files no
@@ -1928,7 +1954,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
               }
             }
 
-            const tasks = targets.map((target) => ({ agent: target.agent, task: target.prompt }));
+            const tasks = targets.map((target) => ({ agent: target.agent, task: target.task }));
             const topLevelBaseId = nextActiveSubagentId;
             nextActiveSubagentId += tasks.length;
             const trackedOnUpdate = (partial: any) => {

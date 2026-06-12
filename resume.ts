@@ -1,7 +1,13 @@
 import * as path from "node:path";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { parseBoolean, RESUME_PROVIDER } from "./shared.js";
-import { isResultError, isSubagentDetails, type SingleResult, type SubagentDetails } from "./types.js";
+import {
+  isResultError,
+  isSubagentDetails,
+  isSubagentLaunchToolName,
+  type SingleResult,
+  type SubagentDetails,
+} from "./types.js";
 
 export const SUBAGENT_RESUME_PROMPT_ENV = "PI_SUBAGENT_RESUME_PROMPT";
 export const SUBAGENT_RESUME_DISABLE_ENV = "PI_SUBAGENT_DISABLE_RESUME";
@@ -60,7 +66,7 @@ function getSubagentToolCalls(message: any): Array<{ id: string; args: any }> {
   if (!message || message.role !== "assistant" || !Array.isArray(message.content)) return [];
   const calls: Array<{ id: string; args: any }> = [];
   for (const part of message.content) {
-    if (part?.type !== "toolCall" || part.name !== "subagent") continue;
+    if (part?.type !== "toolCall" || !isSubagentLaunchToolName(part.name)) continue;
     const id = typeof part.id === "string"
       ? part.id
       : typeof part.toolCallId === "string"
@@ -194,7 +200,7 @@ export function findLatestResumableSubagentCalls(ctx: ExtensionContext): Resumab
       const tasks = normalizeTasks(call.args);
       if (tasks) calls.set(call.id, { tasks, order });
     }
-    if (msg?.role === "toolResult" && msg.toolName === "subagent" && typeof msg.toolCallId === "string") {
+    if (msg?.role === "toolResult" && isSubagentLaunchToolName(msg.toolName) && typeof msg.toolCallId === "string") {
       results.set(msg.toolCallId, {
         details: isSubagentDetails(msg.details) ? msg.details : undefined,
         isError: msg.isError === true,

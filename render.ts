@@ -72,7 +72,7 @@ export function renderCall(
 			: theme.fg("success", "✅")
 		: theme.fg("warning", "⏳");
 	const stamp = getCallStartStamp(context, theme);
-	let text = `${stamp}${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", `${count} task${count === 1 ? "" : "s"}`)}`;
+	let text = `${stamp}${theme.fg("toolTitle", theme.bold("subagents "))}${theme.fg("accent", `${count} task${count === 1 ? "" : "s"}`)}`;
 	for (const task of tasks.slice(0, 6)) {
 		const agent = typeof task?.agent === "string" ? task.agent : "...";
 		const preview = typeof task?.task === "string" ? ` ${truncate(task.task, 56)}` : "";
@@ -83,7 +83,8 @@ export function renderCall(
 }
 
 /**
- * renderCall for the resume_subagents tool: { resumes: [{ name, prompt }] }.
+ * renderCall for the resume_subagents tool: { resumes: [{ subagent, task }] }.
+ * Tolerates the legacy { name, prompt } field names from older sessions.
  */
 export function renderResumeCall(
 	args: Record<string, any>,
@@ -104,8 +105,13 @@ export function renderResumeCall(
 	const stamp = getCallStartStamp(context, theme);
 	let text = `${stamp}${theme.fg("toolTitle", theme.bold("resume subagents "))}${theme.fg("accent", `${count} subagent${count === 1 ? "" : "s"}`)}`;
 	for (const resume of resumes.slice(0, 6)) {
-		const name = typeof resume?.name === "string" ? resume.name : "...";
-		const preview = typeof resume?.prompt === "string" ? ` ${truncate(resume.prompt, 56)}` : "";
+		const name = typeof resume?.subagent === "string"
+			? resume.subagent
+			: typeof resume?.name === "string"
+				? resume.name
+				: "...";
+		const task = typeof resume?.task === "string" ? resume.task : typeof resume?.prompt === "string" ? resume.prompt : undefined;
+		const preview = task !== undefined ? ` ${truncate(task, 56)}` : "";
 		text += `\n  ${icon} ${theme.fg("accent", name)}${theme.fg("dim", preview)}`;
 	}
 	if (resumes.length > 6) text += `\n  ${theme.fg("muted", `... +${resumes.length - 6} more`)}`;

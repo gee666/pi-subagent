@@ -4,6 +4,20 @@
 
 import type { Message } from "@mariozechner/pi-ai";
 
+/** Current tool names. "subagent" is the legacy launch tool name kept for old sessions. */
+export const SUBAGENT_TOOL_NAME = "subagents";
+export const RESUME_SUBAGENTS_TOOL_NAME = "resume_subagents";
+
+/** Matches the launch tool, current or legacy ("subagents" / "subagent"). */
+export function isSubagentLaunchToolName(name: unknown): boolean {
+	return name === SUBAGENT_TOOL_NAME || name === "subagent";
+}
+
+/** Matches any delegation tool: launch (current or legacy) or resume. */
+export function isSubagentToolName(name: unknown): boolean {
+	return isSubagentLaunchToolName(name) || name === RESUME_SUBAGENTS_TOOL_NAME;
+}
+
 /** Context mode for delegated runs. */
 export type DelegationMode = "spawn";
 
@@ -439,7 +453,7 @@ export function getNestedSubagentResults(messages: unknown): NestedSubagentResul
 	const results: NestedSubagentResult[] = [];
 	for (const msg of asMessageArray(messages)) {
 		if ((msg as any)?.role !== "toolResult") continue;
-		if ((msg as any).toolName !== "subagent" && (msg as any).toolName !== "resume_subagents") continue;
+		if (!isSubagentToolName((msg as any).toolName)) continue;
 		if (!isSubagentDetails((msg as any).details)) continue;
 		results.push({
 			details: (msg as any).details,

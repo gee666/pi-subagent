@@ -21,6 +21,7 @@ import {
   getFinalOutput,
   getNestedSubagentErrorSummary,
   isSubagentDetails,
+  isSubagentToolName,
 } from "./types.js";
 import { SUBAGENT_SESSION_ROOT_ENV } from "./resume.js";
 import {
@@ -480,7 +481,7 @@ export function processJsonLine(line: string, result: SingleResult): boolean {
   if (event.type === "tool_result_end" && event.message) {
     const msg = event.message as Message;
     if (!hasMessage(result, msg)) result.messages.push(msg);
-    if (((msg as any).toolName === "subagent" || (msg as any).toolName === "resume_subagents") && typeof (msg as any).toolCallId === "string") {
+    if (isSubagentToolName((msg as any).toolName) && typeof (msg as any).toolCallId === "string") {
       delete result.liveNestedSubagents?.[(msg as any).toolCallId];
     }
     return true;
@@ -568,12 +569,13 @@ function buildPiArgs(
 
   // agent.tools is set only when the agent file specifies tools (length > 0)
   if (agent.tools && agent.tools.length > 0) {
-    // Always include "subagent" so children can re-delegate when depth allows.
-    // The child extension only registers the tool when canDelegate is true,
-    // so listing it here is harmless when nested delegation is disabled.
-    const toolsWithSubagent = agent.tools.includes("subagent")
-      ? agent.tools
-      : [...agent.tools, "subagent"];
+    // Always include the delegation tools so children can re-delegate and
+    // resume when depth allows. The child extension only registers them when
+    // canDelegate is true, so listing them here is harmless otherwise.
+    const toolsWithSubagent = [...agent.tools];
+    for (const tool of ["subagents", "resume_subagents"]) {
+      if (!toolsWithSubagent.includes(tool)) toolsWithSubagent.push(tool);
+    }
     args.push("--tools", toolsWithSubagent.join(","));
   } else if (agent.tools === undefined) {
     // Agent didn't restrict tools — inherit parent's preference
