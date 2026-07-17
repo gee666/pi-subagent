@@ -21,6 +21,7 @@ import {
 	getNestedSubagentResults,
 	isResultError,
 	isSubagentDetails,
+	isSubagentToolName,
 	usageSummaryToUsageStats,
 } from "./types.js";
 
@@ -40,6 +41,8 @@ export interface TreeNode {
 	status: NodeStatus;
 	meta?: string;
 	task?: string;
+	/** Epoch ms when this subagent run started (rendered as a dim hh:mm:ss prefix). */
+	startedAt?: number;
 	outputPreview?: string[];
 	liveActivity?: LiveLogEntry[];
 	children: TreeNode[];
@@ -62,6 +65,12 @@ interface PendingSubagentCall {
 // Formatting helpers
 // ---------------------------------------------------------------------------
 
+export function formatClockTime(epochMs: number): string {
+	const d = new Date(epochMs);
+	const pad = (n: number) => String(n).padStart(2, "0");
+	return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
 export function formatTokens(count: number): string {
 	if (count < 1000) return count.toString();
 	if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
@@ -83,7 +92,7 @@ export function formatCombinedUsageStatusLine(
 	const cache = cacheRead || cacheWrite
 		? ` R${formatTokens(cacheRead)} W${formatTokens(cacheWrite)}`
 		: "";
-	return `Σ ↑${formatTokens(input)} ↓${formatTokens(output)}${cache} T${formatTokens(total)} • ${turns} turn${turns === 1 ? "" : "s"} • $${cost.toFixed(4)} • ${subagentCount} subagent${subagentCount === 1 ? "" : "s"}`;
+	return `WITH SUBS: (${subagentCount}) Σ $${cost.toFixed(4)} • ↑${formatTokens(input)} ↓${formatTokens(output)}${cache} T${formatTokens(total)} • ${turns} turn${turns === 1 ? "" : "s"}`;
 }
 
 export function formatUsage(usage: Partial<UsageStats>, model?: string): string {
@@ -171,7 +180,7 @@ function extractPendingSubagentCalls(messages: SingleResult["messages"]): Pendin
 		if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
 		for (let partIndex = 0; partIndex < message.content.length; partIndex++) {
 			const part = message.content[partIndex] as any;
-			if (part?.type !== "toolCall" || part?.name !== "subagent") continue;
+			if (part?.type !== "toolCall" || !isSubagentToolName(part?.name)) continue;
 			const args = part.arguments && typeof part.arguments === "object" ? part.arguments : {};
 			const tasks = Array.isArray((args as any).tasks)
 				? (args as any).tasks
@@ -180,7 +189,15 @@ function extractPendingSubagentCalls(messages: SingleResult["messages"]): Pendin
 							agent: task.agent,
 							task: typeof task.task === "string" ? task.task : undefined,
 						}))
-				: [];
+				: (args as any).resumes
+					? (Array.isArray((args as any).resumes) ? (args as any).resumes : [(args as any).resumes])
+							// Current shape is {subagent, task}; tolerate legacy {name, prompt}.
+							.map((resume: any) => ({
+								agent: typeof resume?.subagent === "string" ? resume.subagent : resume?.name,
+								task: typeof resume?.task === "string" ? resume.task : typeof resume?.prompt === "string" ? resume.prompt : undefined,
+							}))
+							.filter((entry: any) => typeof entry.agent === "string")
+					: [];
 			calls.push({
 				toolCallId:
 					typeof part.toolCallId === "string"
@@ -345,9 +362,15 @@ function formatToolArgPreview(toolName: string, args: Record<string, unknown>): 
 		case "find":
 			return truncateTo((args.pattern ?? "*") as string, 30) +
 				   (args.path ? ` in ${shorten(args.path as string)}` : "");
-		case "subagent": {
+		case "subagent":
+		case "subagents": {
 			const tasks = (args.tasks as any[]) ?? [];
 			return tasks.map((t: any) => t.agent).join(", ");
+		}
+		case "resume_subagents": {
+			const raw = (args as any).resumes;
+			const resumes = Array.isArray(raw) ? raw : raw ? [raw] : [];
+			return resumes.map((r: any) => r?.subagent ?? r?.name).filter(Boolean).join(", ");
 		}
 		default:
 			return "";
@@ -355,6 +378,14 @@ function formatToolArgPreview(toolName: string, args: Record<string, unknown>): 
 }
 
 export function formatLiveLogEntry(
+	entry: LiveLogEntry,
+	theme: { fg: ThemeFg },
+): string {
+	const stamp = entry.at !== undefined ? theme.fg("dim", formatClockTime(entry.at)) + " " : "";
+	return stamp + formatLiveLogEntryBody(entry, theme);
+}
+
+function formatLiveLogEntryBody(
 	entry: LiveLogEntry,
 	theme: { fg: ThemeFg },
 ): string {
@@ -460,7 +491,9 @@ function buildResultNode(result: SingleResult): TreeNode {
 	result = hydrateResultFromSession(result);
 	const status = statusFromResult(result);
 	const usage = formatUsage(result.usage ?? {}, result.model);
-	const metaParts: string[] = [result.agentSource];
+	const metaParts: string[] = [];
+	if (result.name) metaParts.push(result.name);
+	metaParts.push(result.agentSource);
 	if (usage) metaParts.push(usage);
 	if (status === "error") {
 		const errorText = result.errorMessage || result.stderr || result.stopReason;
@@ -474,6 +507,7 @@ function buildResultNode(result: SingleResult): TreeNode {
 		status,
 		meta: metaParts.join(" • "),
 		task: result.task,
+		startedAt: result.startedAt,
 		liveActivity: isRunning && (result.liveLog?.length ?? 0) > 0 ? result.liveLog : undefined,
 		outputPreview: !isRunning && children.length === 0 ? buildLeafPreview(result) : undefined,
 		children,
@@ -497,7 +531,10 @@ export function renderTreeLines(
 		const indent = "  ".repeat(depth);
 		const number = prefix ? `${prefix}.${index + 1}` : `${index + 1}`;
 		const numberPrefix = broadcastNumberingActive ? `${number}. ` : "";
-		let line = `${indent}${numberPrefix}${statusEmoji(node.status, theme)} ${theme.fg("accent", node.label)}`;
+		const timePrefix = node.startedAt !== undefined
+			? `${theme.fg("dim", formatClockTime(node.startedAt))} `
+			: "";
+		let line = `${indent}${numberPrefix}${timePrefix}${statusEmoji(node.status, theme)} ${theme.fg("accent", node.label)}`;
 		if (node.meta) line += ` ${theme.fg("dim", node.meta)}`;
 		lines.push(line);
 

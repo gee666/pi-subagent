@@ -21,8 +21,10 @@ import {
   getFinalOutput,
   getNestedSubagentErrorSummary,
   isSubagentDetails,
+  isSubagentToolName,
 } from "./types.js";
 import { SUBAGENT_SESSION_ROOT_ENV } from "./resume.js";
+import { SUBAGENT_NAMES_FILE_ENV } from "./names.js";
 import {
   DEFAULT_MAX_PARALLEL_TASKS,
   DEFAULT_MAX_CONCURRENCY,
@@ -198,6 +200,11 @@ function findPiCliScriptOnPath(): string | null {
     }
   }
   return null;
+}
+
+/** Resolve the dist/cli.js of the currently running pi installation, if findable. */
+export function getPiCliScriptPath(): string | null {
+  return getCurrentPiCliScript() ?? findPiCliScriptOnPath();
 }
 
 function getPiSpawnCommand(override?: { command: string; argsPrefix?: string[] }): { command: string; argsPrefix: string[] } {
@@ -402,6 +409,7 @@ const _inheritedCliArgs = parseInheritedCliArgs(process.argv);
 // ---------------------------------------------------------------------------
 
 function pushLiveLog(result: SingleResult, entry: LiveLogEntry): void {
+  if (entry.at === undefined) entry.at = Date.now();
   result.liveLog.push(entry);
   if (result.liveLog.length > MAX_LIVE_LOG_ENTRIES) result.liveLog.shift();
 }
@@ -474,7 +482,7 @@ export function processJsonLine(line: string, result: SingleResult): boolean {
   if (event.type === "tool_result_end" && event.message) {
     const msg = event.message as Message;
     if (!hasMessage(result, msg)) result.messages.push(msg);
-    if ((msg as any).toolName === "subagent" && typeof (msg as any).toolCallId === "string") {
+    if (isSubagentToolName((msg as any).toolName) && typeof (msg as any).toolCallId === "string") {
       delete result.liveNestedSubagents?.[(msg as any).toolCallId];
     }
     return true;
@@ -541,6 +549,7 @@ function buildPiArgs(
   sessionDir: string | undefined,
   resumeSession: boolean,
   fallbackModelOverride?: string,
+  rawPrompt = false,
 ): { args: string[]; prompt: string } {
   const args: string[] = [
     "--mode",
@@ -561,12 +570,13 @@ function buildPiArgs(
 
   // agent.tools is set only when the agent file specifies tools (length > 0)
   if (agent.tools && agent.tools.length > 0) {
-    // Always include "subagent" so children can re-delegate when depth allows.
-    // The child extension only registers the tool when canDelegate is true,
-    // so listing it here is harmless when nested delegation is disabled.
-    const toolsWithSubagent = agent.tools.includes("subagent")
-      ? agent.tools
-      : [...agent.tools, "subagent"];
+    // Always include the delegation tools so children can re-delegate and
+    // resume when depth allows. The child extension only registers them when
+    // canDelegate is true, so listing them here is harmless otherwise.
+    const toolsWithSubagent = [...agent.tools];
+    for (const tool of ["subagents", "resume_subagents"]) {
+      if (!toolsWithSubagent.includes(tool)) toolsWithSubagent.push(tool);
+    }
     args.push("--tools", toolsWithSubagent.join(","));
   } else if (agent.tools === undefined) {
     // Agent didn't restrict tools — inherit parent's preference
@@ -580,9 +590,11 @@ function buildPiArgs(
   if (systemPromptPath) args.push("--append-system-prompt", systemPromptPath);
   return {
     args,
-    prompt: resumeSession
-      ? `Continue the previous task from where you left off. Original task: ${task}`
-      : `Task: ${task}`,
+    prompt: rawPrompt
+      ? task
+      : resumeSession
+        ? `Continue the previous task from where you left off. Original task: ${task}`
+        : `Task: ${task}`,
   };
 }
 
@@ -599,6 +611,10 @@ export interface RunAgentOptions {
   agentName: string;
   /** Task description. */
   task: string;
+  /** Unique resumable name assigned to this subagent (e.g. "code-writer-01"). */
+  subagentName?: string;
+  /** When true, send the task text to the child verbatim (no "Task:" / resume preamble). */
+  rawPrompt?: boolean;
   /** Current delegation depth of the caller process. */
   parentDepth: number;
   /** Delegation stack from the caller process (ancestor agent names). */
@@ -617,6 +633,13 @@ export interface RunAgentOptions {
   sessionDir?: string;
   /** Top-level root for all subagent session directories in this delegation tree. */
   sessionRoot?: string;
+  /**
+   * Shared name-registry file for this delegation tree, passed to the child
+   * via its spawn environment. Deliberately NOT set on process.env of the
+   * parent itself: pi reloads extension modules on session switches, and a
+   * self-set env var would then masquerade as "inherited from a parent".
+   */
+  namesFile?: string;
   /** Continue the most recent session in sessionDir instead of creating a new one. */
   resumeSession?: boolean;
   /** Previously captured state for this same subagent, used to render resumed nested trees. */
@@ -665,6 +688,8 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       agent: agentName,
       agentSource: "unknown",
       task,
+      name: opts.subagentName,
+      startedAt: Date.now(),
       exitCode: 1,
       messages: [],
       stderr: `Unknown agent: "${agentName}". Available agents: ${available}.`,
@@ -685,6 +710,8 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
     agent: agentName,
     agentSource: agent.source,
     task,
+    name: opts.subagentName ?? initialResult?.name,
+    startedAt: initialResult?.startedAt ?? Date.now(),
     exitCode: -1,
     messages: initialResult?.messages ? [...initialResult.messages] : [],
     stderr: initialResult?.stderr ?? "",
@@ -730,6 +757,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       sessionDir,
       shouldContinueSession,
       fallbackModel,
+      opts.rawPrompt === true,
     );
     let wasAborted = false;
     const startupRetries = (() => {
@@ -764,6 +792,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
           [SUBAGENT_STACK_ENV]: JSON.stringify(propagatedStack),
           [SUBAGENT_PREVENT_CYCLES_ENV]: preventCycles ? "1" : "0",
           ...(sessionRoot ? { [SUBAGENT_SESSION_ROOT_ENV]: sessionRoot } : {}),
+          ...(opts.namesFile ? { [SUBAGENT_NAMES_FILE_ENV]: opts.namesFile } : {}),
           ...(fallbackModel ? { [SUBAGENT_FALLBACK_MODEL_ENV]: fallbackModel } : {}),
           // PI_OFFLINE is NOT forced here — see explanation near PI_OFFLINE_ENV.
         },
@@ -1068,6 +1097,14 @@ export async function executeParallelSubprocess(
   fallbackModel?: string,
   onHandleForTask?: (index: number, task: { agent: string; task: string }, handle: RunningSubagentHandle) => void,
   onTaskDone?: (index: number, task: { agent: string; task: string }) => void,
+  extras?: {
+    /** Per-task resumable names (aligned with tasks by index). */
+    names?: Array<string | undefined>;
+    /** Send each task text to the child verbatim (resume_subagents flow). */
+    rawPrompts?: boolean;
+    /** Shared name-registry file passed to children via spawn env. */
+    namesFile?: string;
+  },
 ): Promise<{
   content: Array<{ type: "text"; text: string }>;
   details: SubagentDetails;
@@ -1106,6 +1143,8 @@ export async function executeParallelSubprocess(
     agent: t.agent,
     agentSource: "unknown" as const,
     task: t.task,
+    name: extras?.names?.[index],
+    startedAt: Date.now(),
     exitCode: -1,
     messages: [],
     stderr: "",
@@ -1161,6 +1200,9 @@ export async function executeParallelSubprocess(
           agents,
           agentName: t.agent,
           task: t.task,
+          subagentName: extras?.names?.[index],
+          rawPrompt: extras?.rawPrompts === true,
+          namesFile: extras?.namesFile,
           parentDepth,
           parentAgentStack,
           maxDepth,
@@ -1194,7 +1236,8 @@ export async function executeParallelSubprocess(
   const successCount = results.filter((r) => r.exitCode === 0).length;
   const summaries = results.map((r) => {
     const output = getFinalOutput(r.messages, r.finalOutput);
-    return `[${r.agent}] ${r.exitCode === 0 ? "completed" : "failed"}: ${output || "(no output)"}`;
+    const nameTag = r.name ? ` • name: ${r.name}` : "";
+    return `[${r.agent}${nameTag}] ${r.exitCode === 0 ? "completed" : "failed"}: ${output || "(no output)"}`;
   });
 
   return {

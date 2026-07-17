@@ -1,6 +1,6 @@
 {
   "name": "oira666_pi-subagent",
-  "version": "0.2.32",
+  "version": "0.3.4",
   "description": "Subagent extension for Pi coding agent. Delegate tasks to specialized agents.",
   "type": "module",
   "main": "index.ts",
@@ -10,6 +10,7 @@
     "runner.ts",
     "resume.ts",
     "resumeStream.ts",
+    "names.ts",
     "shared.ts",
     "render.ts",
     "tree.ts",

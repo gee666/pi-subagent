@@ -11,7 +11,12 @@
 import { beforeEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import subagentExtension from "../index.js";
-import { buildSubagentDetails, emptyUsage, type SingleResult } from "../types.js";
+import {
+  buildSubagentDetails,
+  emptyUsage,
+  SUBAGENT_TOOL_NAME,
+  type SingleResult,
+} from "../types.js";
 import { RESUME_MODEL_ID, RESUME_PROVIDER } from "../shared.js";
 
 const RESUME_STATE_KEY = "__piSubagentResumeState";
@@ -170,7 +175,7 @@ describe("synthetic resume provider streamSimple", () => {
 
     const toolCallEnds = events.filter((e) => e.type === "toolcall_end");
     assert.equal(toolCallEnds.length, 1, "expected exactly one injected tool call");
-    assert.equal(toolCallEnds[0].toolCall.name, "subagent");
+    assert.equal(toolCallEnds[0].toolCall.name, SUBAGENT_TOOL_NAME);
     assert.deepEqual(toolCallEnds[0].toolCall.arguments.tasks, tasks);
     assert.ok(
       String(toolCallEnds[0].toolCall.id).startsWith("resume_subagent_"),

@@ -113,6 +113,8 @@ declare module "@mariozechner/pi-tui" {
   export class Container {
     addChild(child: unknown): void;
   }
+  export function truncateToWidth(text: string, width: number, ellipsis?: string): string;
+  export function visibleWidth(text: string): number;
 }
 
 declare module "express" {

@@ -4,6 +4,20 @@
 
 import type { Message } from "@mariozechner/pi-ai";
 
+/** Current tool names. "subagent" is the legacy launch tool name kept for old sessions. */
+export const SUBAGENT_TOOL_NAME = "subagents";
+export const RESUME_SUBAGENTS_TOOL_NAME = "resume_subagents";
+
+/** Matches the launch tool, current or legacy ("subagents" / "subagent"). */
+export function isSubagentLaunchToolName(name: unknown): boolean {
+	return name === SUBAGENT_TOOL_NAME || name === "subagent";
+}
+
+/** Matches any delegation tool: launch (current or legacy) or resume. */
+export function isSubagentToolName(name: unknown): boolean {
+	return isSubagentLaunchToolName(name) || name === RESUME_SUBAGENTS_TOOL_NAME;
+}
+
 /** Context mode for delegated runs. */
 export type DelegationMode = "spawn";
 
@@ -36,10 +50,10 @@ export interface SubagentUsageSummary {
 export type ToolCallCounts = Record<string, number>;
 
 export type LiveLogEntry =
-	| { kind: "turn_start" }
-	| { kind: "turn_end";   turn: number; inputTokens: number; outputTokens: number }
-	| { kind: "tool_start"; toolName: string; args: Record<string, unknown> }
-	| { kind: "tool_end";   toolName: string };
+	| { kind: "turn_start"; at?: number }
+	| { kind: "turn_end";   turn: number; inputTokens: number; outputTokens: number; at?: number }
+	| { kind: "tool_start"; toolName: string; args: Record<string, unknown>; at?: number }
+	| { kind: "tool_end";   toolName: string; at?: number };
 
 export const MAX_LIVE_LOG_ENTRIES = 6;
 
@@ -49,6 +63,10 @@ export interface SingleResult {
 	agent: string;
 	agentSource: "user" | "project" | "builtin" | "unknown";
 	task: string;
+	/** Unique resumable name for this subagent within the delegation tree (e.g. "code-writer-01"). */
+	name?: string;
+	/** Epoch ms when this subagent run started (used for TUI timestamps). */
+	startedAt?: number;
 	exitCode: number;
 	messages: Message[];
 	stderr: string;
@@ -232,6 +250,8 @@ export function compactSingleResultForDurableDetails(result: SingleResult): Sing
     agentSource: result.agentSource,
     task: result.task,
     exitCode: result.exitCode,
+    ...(result.name !== undefined ? { name: result.name } : {}),
+    ...(result.startedAt !== undefined ? { startedAt: result.startedAt } : {}),
     ...(result.stopReason !== undefined ? { stopReason: result.stopReason } : {}),
     ...(result.errorMessage !== undefined ? { errorMessage: result.errorMessage } : {}),
     ...(result.sessionDir !== undefined ? { sessionDir: result.sessionDir } : {}),
@@ -433,7 +453,7 @@ export function getNestedSubagentResults(messages: unknown): NestedSubagentResul
 	const results: NestedSubagentResult[] = [];
 	for (const msg of asMessageArray(messages)) {
 		if ((msg as any)?.role !== "toolResult") continue;
-		if ((msg as any).toolName !== "subagent") continue;
+		if (!isSubagentToolName((msg as any).toolName)) continue;
 		if (!isSubagentDetails((msg as any).details)) continue;
 		results.push({
 			details: (msg as any).details,
