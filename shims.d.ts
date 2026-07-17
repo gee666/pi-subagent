@@ -12,7 +12,57 @@ declare module "@mariozechner/pi-ai" {
   export type Message = any;
 
   export function createAssistantMessageEventStream(): any;
-  export function streamSimple(model: any, context: any, options: any): any;
+  export function lazyStream(model: any, setup: () => Promise<any>): any;
+  export type AssistantMessageEventStream = any;
+  export type ProviderStreams = { stream: (...args: any[]) => any; streamSimple: (...args: any[]) => any };
+
+  // First-class faux provider primitives used by the synthetic resume provider.
+  export function createFauxCore(options: any): {
+    api: string;
+    provider: string;
+    models: any[];
+    stream: (...args: any[]) => any;
+    streamSimple: (...args: any[]) => any;
+    getModel: (id?: string) => any;
+    state: { callCount: number };
+    setResponses: (responses: any[]) => void;
+    appendResponses: (responses: any[]) => void;
+    getPendingResponseCount: () => number;
+  };
+  export function fauxAssistantMessage(content: any, options?: any): any;
+  export function fauxToolCall(name: string, args: any, options?: { id?: string }): any;
+  export function fauxText(text: string): any;
+}
+
+declare module "@mariozechner/pi-ai/api/openai-responses.lazy" {
+  export const openAIResponsesApi: () => any;
+}
+declare module "@mariozechner/pi-ai/api/openai-completions.lazy" {
+  export const openAICompletionsApi: () => any;
+}
+declare module "@mariozechner/pi-ai/api/azure-openai-responses.lazy" {
+  export const azureOpenAIResponsesApi: () => any;
+}
+declare module "@mariozechner/pi-ai/api/openai-codex-responses.lazy" {
+  export const openAICodexResponsesApi: () => any;
+}
+declare module "@mariozechner/pi-ai/api/anthropic-messages.lazy" {
+  export const anthropicMessagesApi: () => any;
+}
+declare module "@mariozechner/pi-ai/api/bedrock-converse-stream.lazy" {
+  export const bedrockConverseStreamApi: () => any;
+}
+declare module "@mariozechner/pi-ai/api/google-generative-ai.lazy" {
+  export const googleGenerativeAIApi: () => any;
+}
+declare module "@mariozechner/pi-ai/api/google-vertex.lazy" {
+  export const googleVertexApi: () => any;
+}
+declare module "@mariozechner/pi-ai/api/mistral-conversations.lazy" {
+  export const mistralConversationsApi: () => any;
+}
+declare module "@mariozechner/pi-ai/api/pi-messages.lazy" {
+  export const piMessagesApi: () => any;
 }
 
 declare module "@mariozechner/pi-agent-core" {

@@ -9,10 +9,11 @@
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import {
-  createAssistantMessageEventStream,
-  streamSimple as streamModelSimple,
-} from "@mariozechner/pi-ai";
+import { createFauxCore, fauxAssistantMessage, fauxToolCall } from "@mariozechner/pi-ai";
+// The synthetic resume provider forwards to the real fallback model through a
+// small dispatcher built on stable pi-ai exports. This deliberately avoids the
+// deprecated/temporary `@mariozechner/pi-ai/compat` global `streamSimple`.
+import { streamSimpleForModel as streamModelSimple } from "./resumeStream.js";
 import { Type } from "@sinclair/typebox";
 import { type AgentConfig, discoverAgents } from "./agents.js";
 import { renderCall, renderResult, setBroadcastNumberingActive } from "./render.js";
@@ -510,16 +511,22 @@ function getSyntheticResumeState(): SyntheticResumeState {
   return g[RESUME_STATE_KEY] as SyntheticResumeState;
 }
 
-function emptyModelUsage() {
-  return {
-    input: 0,
-    output: 0,
-    cacheRead: 0,
-    cacheWrite: 0,
-    totalTokens: 0,
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-  };
-}
+// Model definition for the synthetic subagent-resume provider. Shared between
+// the faux core (which produces the canned assistant turn) and the provider
+// registration below.
+const RESUME_MODEL_DEF = {
+  id: RESUME_MODEL_ID,
+  name: "Pi Subagent Resume",
+  reasoning: false,
+  input: ["text"] as ("text" | "image")[],
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  // Keep this large so Pi's pre-prompt auto-compaction does not invoke the
+  // synthetic provider before the visible resume prompt is appended. That would
+  // consume the tool-call phase during compaction and the real resume turn
+  // would only see the final text message.
+  contextWindow: 1_000_000,
+  maxTokens: 16,
+};
 
 function getMessageText(message: any): string {
   const content = message?.content;
@@ -620,12 +627,20 @@ export default function (pi: ExtensionAPI) {
     type: "boolean",
   });
 
+  // The synthetic resume provider injects the resumed subagent tool call(s) as
+  // a canned assistant turn using pi-ai's first-class faux provider, instead of
+  // hand-rolling an AssistantMessageEventStream.
+  const resumeCore = createFauxCore({
+    api: "openai-responses",
+    provider: RESUME_PROVIDER,
+    models: [RESUME_MODEL_DEF],
+  });
+
   pi.registerProvider(RESUME_PROVIDER, {
     baseUrl: "http://127.0.0.1/pi-subagent-resume",
     api: "openai-responses",
     apiKey: "pi-subagent-resume-noop-key",
     streamSimple: async (model, context, options) => {
-      const stream = createAssistantMessageEventStream();
       const state = getSyntheticResumeState();
       const discoveredPlans = state.plans.length > 0
         ? state.plans
@@ -644,42 +659,38 @@ export default function (pi: ExtensionAPI) {
       const triggerMatches =
         state.trigger === "nextRequest" ||
         (totalTaskCount > 0 ? isSyntheticResumePrompt(context, totalTaskCount) : false);
+
+      // Happy path: emit the resumed subagent tool call(s) as one canned
+      // assistant turn. The faux core streams the message we build with
+      // `fauxToolCall`/`fauxAssistantMessage` as proper stream events.
       if (plans.length > 0 && phase === "tool" && triggerMatches) {
         state.phase = "final";
-        const toolCalls = plans.map((plan, index) => ({
-          type: "toolCall" as const,
-          id: `resume_subagent_${Date.now()}_${index}`,
-          name: "subagent",
-          arguments: { tasks: plan.tasks },
-        }));
-        const message = {
-          role: "assistant" as const,
-          content: toolCalls,
-          api: model.api,
-          provider: model.provider,
-          model: model.id,
-          usage: emptyModelUsage(),
-          stopReason: "toolUse" as const,
-          timestamp: Date.now(),
-        };
-        queueMicrotask(() => {
-          stream.push({ type: "start", partial: message });
-          toolCalls.forEach((toolCall, contentIndex) => {
-            stream.push({ type: "toolcall_start", contentIndex, partial: message });
-            stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: message });
+        const toolCalls = plans.map((plan, index) =>
+          fauxToolCall(
+            "subagent",
+            { tasks: plan.tasks },
+            { id: `resume_subagent_${Date.now()}_${index}` },
+          ),
+        );
+        resumeCore.setResponses([
+          () => fauxAssistantMessage(toolCalls, { stopReason: "toolUse" }),
+        ]);
+        const stream = resumeCore.streamSimple(model, context, options);
+        // Restore the real model once the injected turn has fully streamed so
+        // the TUI does not appear stuck on `pi-subagent-resume` while the
+        // subagent tool execution is still running.
+        void stream
+          .result()
+          .catch(() => {})
+          .finally(() => {
+            void restoreVisibleModelForResume();
           });
-          stream.push({ type: "done", reason: "toolUse", message });
-          stream.end(message);
-
-          // The synthetic provider's only job is to inject the resumed subagent
-          // tool calls. Restore the real model immediately after that handoff so
-          // the TUI does not appear stuck on `pi-subagent-resume` while the
-          // subagent tool execution is still running.
-          void restoreVisibleModelForResume();
-        });
         return stream;
       }
 
+      // Defensive: the synthetic model is still active but this is not the
+      // injection turn (e.g. a request raced ahead of the model restore).
+      // Forward the request to the real fallback model instead.
       if (phase === "final") {
         const restore = await restoreVisibleModelForResume();
         const delegated = await streamWithRealModelFallback(context, options, restore);
@@ -690,44 +701,19 @@ export default function (pi: ExtensionAPI) {
       const fallback = await streamWithRealModelFallback(context, options, restore ?? lastRestorableModel);
       if (fallback) return fallback;
 
+      // No real model to fall back to: surface a clear error turn.
       if (!(plans.length > 0 && phase === "tool")) {
         state.plans = [];
         state.phase = "tool";
       }
-      const message = {
-        role: "assistant" as const,
-        content: [{ type: "text" as const, text: "Subagent resume failed: synthetic resume provider was invoked without a valid resume plan." }],
-        api: model.api,
-        provider: model.provider,
-        model: model.id,
-        usage: emptyModelUsage(),
-        stopReason: "error" as const,
-        errorMessage: "Subagent resume failed: synthetic resume provider was invoked without a valid resume plan.",
-        timestamp: Date.now(),
-      };
-      queueMicrotask(() => {
-        stream.push({ type: "start", partial: message });
-        stream.push({ type: "error", reason: "error", error: message });
-        stream.end(message);
-      });
-      return stream;
+      const errorText =
+        "Subagent resume failed: synthetic resume provider was invoked without a valid resume plan.";
+      resumeCore.setResponses([
+        () => fauxAssistantMessage([], { stopReason: "error", errorMessage: errorText }),
+      ]);
+      return resumeCore.streamSimple(model, context, options);
     },
-    models: [
-      {
-        id: RESUME_MODEL_ID,
-        name: "Pi Subagent Resume",
-        api: "openai-responses",
-        reasoning: false,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        // Keep this large so Pi's pre-prompt auto-compaction does not call the
-        // synthetic provider before the visible resume prompt is appended. That
-        // would consume the tool-call phase during compaction and the real
-        // resume turn would only see the final text message.
-        contextWindow: 1_000_000,
-        maxTokens: 16,
-      },
-    ],
+    models: [{ ...RESUME_MODEL_DEF, api: "openai-responses" }],
   });
 
   const depthConfig = resolveDelegationDepthConfig(pi);
