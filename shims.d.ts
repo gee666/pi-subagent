@@ -12,6 +12,7 @@ declare module "@mariozechner/pi-ai" {
   export type Message = any;
 
   export function createAssistantMessageEventStream(): any;
+  export function createProvider(options: any): any;
   export function lazyStream(model: any, setup: () => Promise<any>): any;
   export type AssistantMessageEventStream = any;
   export type ProviderStreams = { stream: (...args: any[]) => any; streamSimple: (...args: any[]) => any };
@@ -90,6 +91,7 @@ declare module "@mariozechner/pi-coding-agent" {
   export interface ExtensionAPI {
     registerFlag(name: string, config: any): void;
     getFlag(name: string): unknown;
+    registerProvider(provider: any): void;
     registerProvider(name: string, provider: any): void;
     registerTool(tool: any): void;
     addBeforeAgentStart(hook: (ctx: ExtensionContext) => unknown): void;

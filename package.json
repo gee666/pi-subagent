@@ -1,6 +1,6 @@
 {
   "name": "oira666_pi-subagent",
-  "version": "0.3.4",
+  "version": "0.3.6",
   "description": "Subagent extension for Pi coding agent. Delegate tasks to specialized agents.",
   "type": "module",
   "main": "index.ts",
@@ -9,7 +9,6 @@
     "agents.ts",
     "runner.ts",
     "resume.ts",
-    "resumeStream.ts",
     "names.ts",
     "shared.ts",
     "render.ts",
@@ -53,10 +52,10 @@
     "typescript": "^5.9.3"
   },
   "peerDependencies": {
-    "@mariozechner/pi-agent-core": ">=0.37.0",
-    "@mariozechner/pi-ai": ">=0.37.0",
-    "@mariozechner/pi-coding-agent": ">=0.37.0",
-    "@mariozechner/pi-tui": ">=0.37.0"
+    "@mariozechner/pi-agent-core": ">=0.81.0",
+    "@mariozechner/pi-ai": ">=0.81.0",
+    "@mariozechner/pi-coding-agent": ">=0.81.0",
+    "@mariozechner/pi-tui": ">=0.81.0"
   },
   "peerDependenciesMeta": {
     "@mariozechner/pi-agent-core": {

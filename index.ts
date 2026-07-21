@@ -10,11 +10,13 @@
 
 import * as fs from "node:fs";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { createFauxCore, fauxAssistantMessage, fauxToolCall } from "@mariozechner/pi-ai";
-// The synthetic resume provider forwards to the real fallback model through a
-// small dispatcher built on stable pi-ai exports. This deliberately avoids the
-// deprecated/temporary `@mariozechner/pi-ai/compat` global `streamSimple`.
-import { streamSimpleForModel as streamModelSimple } from "./resumeStream.js";
+import {
+  createFauxCore,
+  createProvider,
+  fauxAssistantMessage,
+  fauxToolCall,
+  lazyStream,
+} from "@mariozechner/pi-ai";
 import { Type } from "@sinclair/typebox";
 import { type AgentConfig, discoverAgents } from "./agents.js";
 import {
@@ -562,7 +564,6 @@ function isStreamingSteerInput(event: any, ctx: { isIdle: () => boolean }): bool
   return !ctx.isIdle();
 }
 
-const RESUME_STATE_KEY = "__piSubagentResumeState";
 const SUBAGENT_FALLBACK_MODEL_ENV = "PI_SUBAGENT_FALLBACK_MODEL";
 const RESUME_INTERACTIVE_DELAY_MS = 50;
 
@@ -571,21 +572,6 @@ type SyntheticResumeState = {
   phase: "tool" | "final";
   trigger: "resumePrompt" | "nextRequest";
 };
-
-function clearSyntheticResumeState(): void {
-  const state = getSyntheticResumeState();
-  state.plans = [];
-  state.phase = "tool";
-  state.trigger = "resumePrompt";
-}
-
-function getSyntheticResumeState(): SyntheticResumeState {
-  const g = globalThis as any;
-  if (!g[RESUME_STATE_KEY]) {
-    g[RESUME_STATE_KEY] = { plans: [], phase: "tool", trigger: "resumePrompt" } satisfies SyntheticResumeState;
-  }
-  return g[RESUME_STATE_KEY] as SyntheticResumeState;
-}
 
 // Model definition for the synthetic subagent-resume provider. Shared between
 // the faux core (which produces the canned assistant turn) and the provider
@@ -663,23 +649,101 @@ export default function (pi: ExtensionAPI) {
   let lastRestorableModel: any | undefined;
   let latestSessionCtx: any | undefined;
   let pendingInteractiveResumePrompt: string | null = null;
+  let lifecycleGeneration = 0;
+  let sessionActive = false;
+  const scheduledTasks = new Set<ReturnType<typeof setTimeout>>();
+  const resumeState: SyntheticResumeState = {
+    plans: [],
+    phase: "tool",
+    trigger: "resumePrompt",
+  };
 
-  async function streamWithRealModelFallback(context: any, options: any, fallback: any) {
-    if (!fallback) return null;
-    const auth = resumeModelRegistry
-      ? await resumeModelRegistry.getApiKeyAndHeaders(fallback)
-      : { ok: true, apiKey: undefined, headers: undefined };
-    if (!auth.ok) {
-      throw new Error(auth.error);
+  function clearSyntheticResumeState(): void {
+    resumeState.plans = [];
+    resumeState.phase = "tool";
+    resumeState.trigger = "resumePrompt";
+  }
+
+  function scheduleSessionTask(callback: () => void, delayMs: number): void {
+    const expectedGeneration = lifecycleGeneration;
+    const timer = setTimeout(() => {
+      scheduledTasks.delete(timer);
+      if (!sessionActive || expectedGeneration !== lifecycleGeneration) return;
+      callback();
+    }, delayMs);
+    scheduledTasks.add(timer);
+  }
+
+  function mergeProviderHeaders(
+    base: Record<string, string | null> | undefined,
+    override: Record<string, string | null> | undefined,
+  ): Record<string, string | null> | undefined {
+    const merged = new Map<string, [string, string | null]>();
+    for (const headers of [base, override]) {
+      for (const [name, value] of Object.entries(headers ?? {})) {
+        const key = name.toLowerCase();
+        if (value === null) merged.delete(key);
+        else merged.set(key, [name, value]);
+      }
     }
-    return streamModelSimple(fallback, context, {
-      ...options,
-      apiKey: auth.apiKey,
-      headers: auth.headers,
+    return merged.size > 0 ? Object.fromEntries(merged.values()) : undefined;
+  }
+
+  function streamWithRealModelFallback(
+    context: any,
+    options: any,
+    fallback: any,
+    expectedGeneration = lifecycleGeneration,
+  ) {
+    if (!fallback || !resumeModelRegistry) return null;
+
+    // Use pi 0.81's effective Provider instead of dispatching on model.api.
+    // This preserves custom provider streams, provider composition, dynamic
+    // auth base URLs, provider-scoped env, and future/custom API identifiers.
+    return lazyStream(fallback, async () => {
+      if (!sessionActive || expectedGeneration !== lifecycleGeneration) {
+        throw new Error("Subagent resume fallback was cancelled by session replacement.");
+      }
+      const provider = resumeModelRegistry.getProvider?.(fallback.provider);
+      if (!provider || provider.id === RESUME_PROVIDER) {
+        throw new Error(`Subagent resume fallback provider is unavailable: ${fallback.provider}.`);
+      }
+      const [providerResolution, modelResolution] = await Promise.all([
+        resumeModelRegistry.getProviderAuth?.(fallback.provider),
+        resumeModelRegistry.getApiKeyAndHeaders?.(fallback),
+      ]);
+      if (!sessionActive || expectedGeneration !== lifecycleGeneration) {
+        throw new Error("Subagent resume fallback was cancelled by session replacement.");
+      }
+      if (!providerResolution || !modelResolution?.ok) {
+        throw new Error(
+          modelResolution?.error ?? `Provider is not configured: ${fallback.provider}`,
+        );
+      }
+      const providerAuth = providerResolution.auth ?? {};
+      const requestModel = providerAuth.baseUrl
+        ? { ...fallback, baseUrl: providerAuth.baseUrl }
+        : fallback;
+      const requestOptions = {
+        ...options,
+        // Model-aware resolution includes configured/model headers. Never
+        // forward the synthetic provider's no-op credential.
+        apiKey: modelResolution.apiKey,
+        headers: mergeProviderHeaders(modelResolution.headers, options?.headers),
+        env: {
+          ...(providerResolution.env ?? {}),
+          ...(modelResolution.env ?? {}),
+          ...(options?.env ?? {}),
+        },
+      };
+      return provider.streamSimple(requestModel, context, requestOptions);
     });
   }
 
-  async function restoreVisibleModelForResume(): Promise<any | undefined> {
+  async function restoreVisibleModelForResume(
+    expectedGeneration = lifecycleGeneration,
+  ): Promise<any | undefined> {
+    if (!sessionActive || expectedGeneration !== lifecycleGeneration) return undefined;
     const restore = modelToRestoreAfterResume ?? lastRestorableModel;
     if (!restore) return undefined;
     lastRestorableModel = restore;
@@ -687,7 +751,9 @@ export default function (pi: ExtensionAPI) {
       try {
         await pi.setModel(restore);
       } catch (err) {
-        console.error("[pi-subagent] Failed to restore real model during resume:", err);
+        if (sessionActive && expectedGeneration === lifecycleGeneration) {
+          console.error("[pi-subagent] Failed to restore real model during resume:", err);
+        }
       }
     }
     return restore;
@@ -712,12 +778,26 @@ export default function (pi: ExtensionAPI) {
     models: [RESUME_MODEL_DEF],
   });
 
-  pi.registerProvider(RESUME_PROVIDER, {
-    baseUrl: "http://127.0.0.1/pi-subagent-resume",
-    api: "openai-responses",
-    apiKey: "pi-subagent-resume-noop-key",
-    streamSimple: async (model, context, options) => {
-      const state = getSyntheticResumeState();
+  const resumeProvider = createProvider({
+    id: RESUME_PROVIDER,
+    name: "Pi Subagent Resume",
+    auth: {
+      apiKey: {
+        name: "Internal synthetic resume provider",
+        async resolve() {
+          return {
+            auth: { apiKey: "pi-subagent-resume-noop-key" },
+            source: "internal synthetic provider",
+          };
+        },
+      },
+    },
+    models: resumeCore.models,
+    api: {
+      stream: resumeCore.stream,
+      streamSimple: (model, context, options) => {
+      const state = resumeState;
+      const expectedGeneration = lifecycleGeneration;
       const discoveredPlans = state.plans.length > 0
         ? state.plans
         : pendingResumePlans.length > 0
@@ -759,7 +839,7 @@ export default function (pi: ExtensionAPI) {
           .result()
           .catch(() => {})
           .finally(() => {
-            void restoreVisibleModelForResume();
+            void restoreVisibleModelForResume(expectedGeneration);
           });
         return stream;
       }
@@ -768,14 +848,28 @@ export default function (pi: ExtensionAPI) {
       // injection turn (e.g. a request raced ahead of the model restore).
       // Forward the request to the real fallback model instead.
       if (phase === "final") {
-        const restore = await restoreVisibleModelForResume();
-        const delegated = await streamWithRealModelFallback(context, options, restore);
-        if (delegated) return delegated;
+        const delegated = streamWithRealModelFallback(
+          context,
+          options,
+          modelToRestoreAfterResume ?? lastRestorableModel,
+          expectedGeneration,
+        );
+        if (delegated) {
+          void restoreVisibleModelForResume(expectedGeneration);
+          return delegated;
+        }
       }
 
-      const restore = await restoreVisibleModelForResume();
-      const fallback = await streamWithRealModelFallback(context, options, restore ?? lastRestorableModel);
-      if (fallback) return fallback;
+      const fallback = streamWithRealModelFallback(
+        context,
+        options,
+        modelToRestoreAfterResume ?? lastRestorableModel,
+        expectedGeneration,
+      );
+      if (fallback) {
+        void restoreVisibleModelForResume(expectedGeneration);
+        return fallback;
+      }
 
       // No real model to fall back to: surface a clear error turn.
       if (!(plans.length > 0 && phase === "tool")) {
@@ -788,9 +882,10 @@ export default function (pi: ExtensionAPI) {
         () => fauxAssistantMessage([], { stopReason: "error", errorMessage: errorText }),
       ]);
       return resumeCore.streamSimple(model, context, options);
+      },
     },
-    models: [{ ...RESUME_MODEL_DEF, api: "openai-responses" }],
   });
+  pi.registerProvider(resumeProvider);
 
   const depthConfig = resolveDelegationDepthConfig(pi);
   const { currentDepth, maxDepth, canDelegate, ancestorAgentStack, preventCycles } =
@@ -1178,6 +1273,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   async function restoreModelAfterResumeFailure(ctx?: { ui?: { notify?: (message: string, type?: "info" | "warning" | "error") => void } }) {
+    if (!sessionActive) return;
     const restore = modelToRestoreAfterResume;
     modelToRestoreAfterResume = undefined;
     pendingResumePlans = [];
@@ -1221,7 +1317,14 @@ export default function (pi: ExtensionAPI) {
 
   // Auto-discover agents on session start
   pi.on("session_start", async (event, ctx) => {
+    lifecycleGeneration += 1;
+    sessionActive = true;
     latestSessionCtx = ctx;
+    resumeModelRegistry = ctx.modelRegistry;
+    clearSyntheticResumeState();
+    pendingResumePlans = [];
+    pendingInteractiveResumePrompt = null;
+    modelToRestoreAfterResume = undefined;
     updateCombinedUsageStatus(ctx);
     try {
       // Always repair sessions left on the synthetic resume model, even in
@@ -1317,6 +1420,24 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
+  // Pi 0.81 replaces and rebinds the entire extension runtime on /resume,
+  // /new, /fork, and /reload. Invalidate every detached callback so it cannot
+  // use stale pi/context objects after the old runtime has been torn down.
+  pi.on("session_shutdown", () => {
+    sessionActive = false;
+    lifecycleGeneration += 1;
+    for (const timer of scheduledTasks) clearTimeout(timer);
+    scheduledTasks.clear();
+    clearSyntheticResumeState();
+    pendingResumePlans = [];
+    pendingInteractiveResumePrompt = null;
+    modelToRestoreAfterResume = undefined;
+    latestSessionCtx = undefined;
+    resumeModelRegistry = undefined;
+    activeSubagentUsageSummaries.clear();
+    activeSubagents.clear();
+  });
+
   /**
    * Detect unfinished subagent calls at the current branch leaf and offer to
    * resume them. Shared between session_start (startup/resume) and
@@ -1373,7 +1494,6 @@ export default function (pi: ExtensionAPI) {
     }
 
     pendingResumePlans = [...plans];
-    const resumeState = getSyntheticResumeState();
     resumeState.plans = [...plans];
     resumeState.phase = "tool";
     // Headless subprocess/RPC subagents cannot answer a visible resume
@@ -1407,7 +1527,7 @@ export default function (pi: ExtensionAPI) {
       // which is the last extension hook before the initial chat render.
       pendingInteractiveResumePrompt = `Resuming ${totalTaskCount} subagents...`;
     } else {
-      setTimeout(() => {
+      scheduleSessionTask(() => {
         try {
           pi.sendUserMessage(`Resuming ${totalTaskCount} subagents...`);
         } catch (err) {
@@ -1452,7 +1572,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("message_end", (_event, ctx) => {
     latestSessionCtx = ctx;
     updateCombinedUsageStatus(ctx);
-    setTimeout(() => updateCombinedUsageStatus(ctx), 0);
+    scheduleSessionTask(() => updateCombinedUsageStatus(ctx), 0);
   });
 
   pi.on("tool_execution_end", (event, ctx) => {
@@ -1460,7 +1580,7 @@ export default function (pi: ExtensionAPI) {
     if (isSubagentToolName(event.toolName)) {
       activeSubagentUsageSummaries.delete(event.toolCallId);
       updateCombinedUsageStatus(ctx);
-      setTimeout(() => updateCombinedUsageStatus(ctx), 0);
+      scheduleSessionTask(() => updateCombinedUsageStatus(ctx), 0);
     }
   });
 
@@ -1468,7 +1588,7 @@ export default function (pi: ExtensionAPI) {
     const prompt = pendingInteractiveResumePrompt;
     if (!prompt) return;
     pendingInteractiveResumePrompt = null;
-    setTimeout(() => {
+    scheduleSessionTask(() => {
       try {
         pi.sendUserMessage(prompt);
       } catch (err) {

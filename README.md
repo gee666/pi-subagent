@@ -138,6 +138,8 @@ While a `subagents` tool call is running, mid-stream steering input can be broad
 
 ## Subagent Session Resume
 
+> Requires Pi **0.81.0 or newer**. Crash recovery uses Pi's public full Provider SDK and session-replacement lifecycle.
+
 Subagent subprocesses save sessions in `sessions-subagents`. When a main Pi session is resumed and its latest branch contains an unfinished `subagents` tool call (aborted, errored, or closed by Pi's synthetic unfinished-tool error), the extension can resume that delegation from the saved subagent sessions.
 
 The same detection also runs after navigating the session tree in the TUI (Esc navigation): if you jump back to a point whose branch ends in an unfinished `subagents` call, the extension offers to resume those subagents from their saved sessions.
@@ -146,6 +148,8 @@ The same detection also runs after navigating the session tree in the TUI (Esc n
 - Non-UI modes (`pi -p`, JSON/RPC) resume automatically.
 - Already-finished subagents are reused as completed; unfinished ones continue from their own saved sessions.
 - Nested subagents use the same mechanism recursively.
+- Provider fallback goes through the selected model's effective Pi provider, so custom providers, custom APIs, auth-derived endpoints, headers, and provider-scoped environment are preserved.
+- Pending resume state and delayed callbacks are discarded on `/resume`, `/new`, `/fork`, and `/reload`, preventing stale work from an old runtime from leaking into the replacement session.
 
 | Env Var | Default | Description |
 | --- | --- | --- |
