@@ -18,7 +18,7 @@ import {
   lazyStream,
 } from "@mariozechner/pi-ai";
 import { Type } from "@sinclair/typebox";
-import { type AgentConfig, discoverAgents } from "./agents.js";
+import { type AgentConfig, discoverAgents, isAgentEnabledAtLayer } from "./agents.js";
 import {
   allocateSubagentNames,
   clearResumeActive,
@@ -99,6 +99,38 @@ const SUBAGENT_MAX_DEPTH_ENV = "PI_SUBAGENT_MAX_DEPTH";
 const SUBAGENT_STACK_ENV = "PI_SUBAGENT_STACK";
 const SUBAGENT_PREVENT_CYCLES_ENV = "PI_SUBAGENT_PREVENT_CYCLES";
 const SUBAGENT_CONFIRM_PROJECT_AGENTS_ENV = "PI_SUBAGENT_CONFIRM_PROJECT_AGENTS";
+
+const BASE_SUBAGENTS_TOOL_DESCRIPTION = [
+  "Delegate work to specialized subagents running as isolated pi processes.",
+  "",
+  "Pass a `tasks` array. Every task in the same call runs IN PARALLEL.",
+  "  - 1 task  -> single delegation",
+  "  - N tasks -> all N run concurrently in one call",
+  "",
+  "For sequential work (task B depends on task A's output), make separate",
+  "tool calls one after another. Do NOT put dependent tasks in the same array.",
+  "",
+  'Single:   { tasks: [{ agent: "writer", task: "Rewrite README.md" }] }',
+  'Parallel: { tasks: [{ agent: "writer", task: "..." }, { agent: "tester", task: "..." }] }',
+].join("\n");
+
+const GPT_56_SUBAGENT_GUIDANCE =
+  "Be careful with subagents: use them when the user explicitly asks or when they are truly necessary, because they are expensive. Good cases: running several exploration tasks in parallel, solving several tasks in parallel, or delegating several large tasks to separate subagents. Bad cases (don't do this): creating many nested subagents with similar tasks, using sequential subagents for simple short tasks, running a subagent just to read a file or execute a bash command, or delegating work that does not need a team or parallel execution (unless the user asked you to).";
+
+export function isGpt56Model(model: unknown): boolean {
+  if (typeof model === "string") return model.toLowerCase().includes("gpt-5.6");
+  if (!model || typeof model !== "object") return false;
+  const candidate = model as { id?: unknown; name?: unknown };
+  return [candidate.id, candidate.name].some(
+    (value) => typeof value === "string" && value.toLowerCase().includes("gpt-5.6"),
+  );
+}
+
+export function getSubagentsToolDescription(model?: unknown): string {
+  return isGpt56Model(model)
+    ? `${BASE_SUBAGENTS_TOOL_DESCRIPTION}\n\n${GPT_56_SUBAGENT_GUIDANCE}`
+    : BASE_SUBAGENTS_TOOL_DESCRIPTION;
+}
 
 type ProjectAgentConfirmationSetting = "ask" | "never" | "session";
 type ProjectAgentApproval = "once" | "session" | "no";
@@ -387,6 +419,15 @@ function makeDetailsFactory(
   };
 }
 
+function filterAgentsForCurrentLayer(
+  agents: AgentConfig[],
+  currentDepth: number,
+  maxDepth: number,
+): AgentConfig[] {
+  const targetDepth = currentDepth + 1;
+  return agents.filter((agent) => isAgentEnabledAtLayer(agent, targetDepth, maxDepth));
+}
+
 function formatAgentNames(agents: AgentConfig[]): string {
   return agents.map((a) => `${a.name} (${a.source})`).join(", ") || "none";
 }
@@ -640,6 +681,25 @@ function getRestorableModel(ctx: any): any | undefined {
   return findLastNonResumeModel(ctx) ?? getEnvFallbackModel(ctx);
 }
 
+/**
+ * Pick the parent model inherited by a subagent launch.
+ *
+ * A normal tool call was emitted by the current model, so that model is the
+ * authoritative choice. Looking backward in the session is only appropriate
+ * while our own synthetic resume model is active (or no current model exists).
+ */
+export function selectParentModelForSubagent(
+  currentModel: any | undefined,
+  modelBeforeSynthetic: any | undefined,
+  historicalRealModel: any | undefined,
+  lastRestorableModel: any | undefined,
+): any | undefined {
+  if (currentModel?.provider && currentModel.provider !== RESUME_PROVIDER) {
+    return currentModel;
+  }
+  return modelBeforeSynthetic ?? historicalRealModel ?? lastRestorableModel;
+}
+
 // ---------------------------------------------------------------------------
 // Extension entry point
 // ---------------------------------------------------------------------------
@@ -662,6 +722,21 @@ export default function (pi: ExtensionAPI) {
     resumeState.plans = [];
     resumeState.phase = "tool";
     resumeState.trigger = "resumePrompt";
+  }
+
+  function getParentModelForSubagent(ctx: any): any | undefined {
+    const currentModel = ctx?.model;
+    // Avoid historical lookup during normal calls: the current assistant
+    // response is the one that emitted the subagents tool call.
+    if (currentModel?.provider && currentModel.provider !== RESUME_PROVIDER) {
+      return currentModel;
+    }
+    return selectParentModelForSubagent(
+      currentModel,
+      modelToRestoreAfterResume,
+      findLastNonResumeModel(ctx) ?? getEnvFallbackModel(ctx),
+      lastRestorableModel,
+    );
   }
 
   function scheduleSessionTask(callback: () => void, delayMs: number): void {
@@ -1342,7 +1417,7 @@ export default function (pi: ExtensionAPI) {
       if (!canDelegate) return;
 
       const discovery = discoverAgents(ctx.cwd, "both");
-      discoveredAgents = discovery.agents;
+      discoveredAgents = filterAgentsForCurrentLayer(discovery.agents, currentDepth, maxDepth);
       currentSessionId = ctx.sessionManager.getSessionId?.() ?? "ephemeral";
       currentSubagentSessionRoot = getDefaultSubagentSessionRoot(ctx);
       if (resumableSubagentsDisabled()) {
@@ -1691,22 +1766,13 @@ keeping their full previous context:
 
   // Register the subagents tool
   if (canDelegate) {
-    pi.registerTool({
+    let registeredForGpt56 = false;
+    const registerSubagentsTool = (model?: unknown) => {
+      registeredForGpt56 = isGpt56Model(model);
+      pi.registerTool({
       name: SUBAGENT_TOOL_NAME,
       label: "Subagents",
-      description: [
-        "Delegate work to specialized subagents running as isolated pi processes.",
-        "",
-        "Pass a `tasks` array. Every task in the same call runs IN PARALLEL.",
-        "  - 1 task  -> single delegation",
-        "  - N tasks -> all N run concurrently in one call",
-        "",
-        "For sequential work (task B depends on task A's output), make separate",
-        "tool calls one after another. Do NOT put dependent tasks in the same array.",
-        "",
-        'Single:   { tasks: [{ agent: "writer", task: "Rewrite README.md" }] }',
-        'Parallel: { tasks: [{ agent: "writer", task: "..." }, { agent: "tester", task: "..." }] }',
-      ].join("\n"),
+      description: getSubagentsToolDescription(model),
       parameters: SubagentParams,
 
       async execute(toolCallId, params, signal, onUpdate, ctx) {
@@ -1714,7 +1780,7 @@ keeping their full previous context:
           recordToolCallStart(toolCallId);
           updateLatestBroadcastTargets(undefined);
           const discovery = discoverAgents(ctx.cwd, "both");
-          const { agents } = discovery;
+          const agents = filterAgentsForCurrentLayer(discovery.agents, currentDepth, maxDepth);
 
           const makeDetails = makeDetailsFactory(
             discovery.projectAgentsDir,
@@ -1852,7 +1918,8 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
                     return {
                       agent: task.agent,
                       task: task.task,
-                      model: agentConfig?.model,
+                      model:
+                        formatModelFlag(getParentModelForSubagent(ctx)) ?? agentConfig?.model,
                       tools: agentConfig?.tools,
                       sessionDir:
                         resumePlan?.details?.results[index]?.sessionDir ??
@@ -1882,11 +1949,9 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
               resumePlan?.details?.results[0],
               getSessionDirForTask(resumePlan?.previousToolCallId ?? toolCallId, 0),
               !!resumePlan,
-              // Prefer the pre-resume model (during resume) or the current
-              // active model (normal runs). This prevents children from
-              // defaulting to whatever settings.json says at spawn time, which
-              // can change while the parent session is long-running.
-              formatModelFlag(modelToRestoreAfterResume ?? ctx.model ?? lastRestorableModel),
+              // Normal calls inherit the model that emitted this tool call;
+              // synthetic resume calls recover the preceding real model.
+              formatModelFlag(getParentModelForSubagent(ctx)),
               topLevelBaseId,
               names[0],
             );
@@ -1902,7 +1967,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
             resumePlan?.details?.results,
             (index) => getSessionDirForTask(resumePlan?.previousToolCallId ?? toolCallId, index),
             !!resumePlan,
-            formatModelFlag(modelToRestoreAfterResume ?? ctx.model ?? lastRestorableModel),
+            formatModelFlag(getParentModelForSubagent(ctx)),
             topLevelBaseId,
             { names },
           );
@@ -1921,6 +1986,19 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
       renderCall: (args, theme, context) => renderCall(args, theme, context),
       renderResult: (result, { expanded }, theme) =>
         renderResult(result, expanded, theme),
+      });
+    };
+
+    registerSubagentsTool(latestSessionCtx?.model);
+    pi.on("model_select", (event) => {
+      if (registeredForGpt56 !== isGpt56Model(event.model)) {
+        registerSubagentsTool(event.model);
+      }
+    });
+    pi.on("before_agent_start", (_event, ctx) => {
+      if (registeredForGpt56 !== isGpt56Model(ctx.model)) {
+        registerSubagentsTool(ctx.model);
+      }
     });
 
     if (!resumableSubagentsDisabled()) pi.registerTool({
@@ -2102,7 +2180,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
               undefined,
               (index) => targets[index].sessionDir,
               true,
-              formatModelFlag(modelToRestoreAfterResume ?? ctx.model ?? lastRestorableModel),
+              formatModelFlag(getParentModelForSubagent(ctx)),
               topLevelBaseId,
               { names: targets.map((target) => target.name), rawPrompts: true },
             );

@@ -542,6 +542,12 @@ export function processJsonLine(line: string, result: SingleResult): boolean {
 // Build pi CLI arguments
 // ---------------------------------------------------------------------------
 
+export function resolveSubagentModel(agentModel?: string, currentParentModel?: string): string | undefined {
+  // The active parent model is authoritative. Agent frontmatter is retained as
+  // a compatibility fallback only for callers that cannot supply live context.
+  return currentParentModel ?? agentModel ?? process.env[SUBAGENT_FALLBACK_MODEL_ENV] ?? _inheritedCliArgs.fallbackModel;
+}
+
 function buildPiArgs(
   agent: AgentConfig,
   systemPromptPath: string | null,
@@ -561,8 +567,9 @@ function buildPiArgs(
   if (sessionDir) args.push("--session-dir", sessionDir);
   if (resumeSession) args.push("--continue");
 
-  // Agent config takes priority; fall back to parent CLI value
-  const model = agent.model ?? fallbackModelOverride ?? process.env[SUBAGENT_FALLBACK_MODEL_ENV] ?? _inheritedCliArgs.fallbackModel;
+  // Always use the model active in the parent at launch time. This matters
+  // when /model changed after the parent process originally started.
+  const model = resolveSubagentModel(agent.model, fallbackModelOverride);
   if (model) args.push("--model", model);
 
   const thinking = agent.thinking ?? _inheritedCliArgs.fallbackThinking;

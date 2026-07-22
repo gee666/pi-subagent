@@ -24,6 +24,10 @@ export interface AgentConfig {
 	tools?: string[];
 	model?: string;
 	thinking?: string;
+	/** Whether this agent may be launched at delegation depth 1 (default: true). */
+	firstLayer?: boolean;
+	/** Whether this agent may be launched at the maximum delegation depth (default: true). */
+	lastLayer?: boolean;
 	systemPrompt: string;
 	source: AgentSource;
 	filePath: string;
@@ -63,8 +67,25 @@ function findNearestProjectAgentsDir(cwd: string): string | null {
 	}
 }
 
+function parseLayerSetting(
+	value: unknown,
+	field: "first-layer" | "last-layer",
+	filePath: string,
+): boolean {
+	if (value === undefined) return true;
+	if (typeof value === "string") {
+		const normalized = value.trim().toLowerCase();
+		if (normalized === "enabled") return true;
+		if (normalized === "disabled") return false;
+	}
+	console.warn(
+		`[pi-subagent] Ignoring invalid ${field} field in "${filePath}". Expected enabled or disabled.`,
+	);
+	return true;
+}
+
 /** Parse a single agent markdown file into an AgentConfig. Returns null on skip. */
-function parseAgentFile(filePath: string, source: AgentSource): AgentConfig | null {
+export function parseAgentFile(filePath: string, source: AgentSource): AgentConfig | null {
 	let content: string;
 	try {
 		content = fs.readFileSync(filePath, "utf-8");
@@ -113,6 +134,8 @@ function parseAgentFile(filePath: string, source: AgentSource): AgentConfig | nu
 		tools,
 		model: typeof frontmatter.model === "string" ? frontmatter.model : undefined,
 		thinking: typeof frontmatter.thinking === "string" ? frontmatter.thinking : undefined,
+		firstLayer: parseLayerSetting(frontmatter["first-layer"], "first-layer", filePath),
+		lastLayer: parseLayerSetting(frontmatter["last-layer"], "last-layer", filePath),
 		systemPrompt: body,
 		source,
 		filePath,
@@ -160,6 +183,17 @@ function dedupeAgents(
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+/** Whether an agent is available to be launched at the requested child depth. */
+export function isAgentEnabledAtLayer(
+	agent: AgentConfig,
+	targetDepth: number,
+	maxDepth: number,
+): boolean {
+	if (targetDepth === 1 && agent.firstLayer === false) return false;
+	if (targetDepth === maxDepth && agent.lastLayer === false) return false;
+	return true;
+}
 
 /**
  * Discover all available agents according to the requested scope.

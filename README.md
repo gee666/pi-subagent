@@ -79,8 +79,9 @@ Built-in agents are only used as a fallback when **all three** locations are emp
 ---
 name: writer
 description: Expert technical writer
-model: anthropic/claude-3-5-sonnet
 thinking: low
+first-layer: enabled
+last-layer: disabled
 tools: read,write
 ---
 
@@ -93,9 +94,11 @@ You are an expert technical writer focused on clarity and conciseness.
 | ------------- | -------- | -------------------- | -------------------------------------------------------- |
 | `name`        | Yes      | —                    | Agent identifier used in tool calls                      |
 | `description` | Yes      | —                    | What the agent does (shown to the main agent)            |
-| `model`       | No       | Pi default           | Override model, e.g. `anthropic/claude-3-5-sonnet`       |
+| `model`       | No       | Current parent model | Legacy fallback only when live parent model context is unavailable |
 | `thinking`    | No       | Pi default           | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`       |
 | `tools`       | No       | `read,bash,edit,write` | Comma-separated built-in tools                         |
+| `first-layer` | No       | `enabled`            | Set to `disabled` to hide/block this agent at depth 1    |
+| `last-layer`  | No       | `enabled`            | Set to `disabled` to hide/block this agent at max depth  |
 
 Available tools: `read`, `bash`, `edit`, `write`.
 
@@ -103,7 +106,7 @@ The Markdown body becomes the agent's system prompt (appended to Pi's default, n
 
 ## Delegation Guards
 
-Depth and cycle guards prevent runaway recursive delegation.
+Depth and cycle guards prevent runaway recursive delegation. Layer availability is evaluated for the child being launched: depth 1 is the first layer, and `PI_SUBAGENT_MAX_DEPTH` is the last layer. The bundled `team-lead` agent sets `last-layer: disabled` so it cannot consume the final delegation layer.
 
 | Config                         | Default | Description                                      |
 | ------------------------------ | ------- | ------------------------------------------------ |
@@ -215,8 +218,7 @@ subagent *instance* by its unique name.
 ## CLI Argument Proxying
 
 Flags passed to the parent `pi` process are forwarded to subagent child
-processes, so they inherit the same provider, API key, model, and other runtime settings. Flags the
-extension manages itself are blocked from being forwarded.
+processes, so they inherit the same provider, API key, and other runtime settings. At every new launch, the extension explicitly passes the parent's currently active model; changing `/model` mid-conversation therefore affects all subsequently started subagents. Flags the extension manages itself are blocked from being forwarded.
 
 **Always forwarded verbatim:**
 
@@ -237,7 +239,7 @@ extension manages itself are blocked from being forwarded.
 
 | Flag | Overridden by |
 | --- | --- |
-| `--model` | `model:` in agent frontmatter |
+| `--model` | Replaced at launch by the parent's currently active model (`model:` is only a no-context compatibility fallback) |
 | `--thinking` | `thinking:` in agent frontmatter |
 | `--tools` / `--no-tools` | `tools:` in agent frontmatter |
 
