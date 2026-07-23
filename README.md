@@ -56,13 +56,35 @@ Multiple tasks run in parallel:
 
 Each task supports `agent` (the agent *type* to spawn) and `task`.
 
+## Tool Prompt Overrides
+
+The complete LLM-facing description of each extension tool can be replaced in
+`pi-subagents.json`. Supported locations, from lowest to highest priority:
+
+1. `~/.pi/pi-subagents.json`
+2. `$PI_CODING_AGENT_DIR/pi-subagents.json` (normally `~/.pi/agent/pi-subagents.json`)
+3. The nearest trusted project `.pi/pi-subagents.json`, walking up from the current directory
+
+Project values override global values per tool. Missing prompts keep their
+built-in defaults. Use a JSON object for `tool-prompts`:
+
+```json
+{
+  "tool-prompts": {
+    "subagents": "Your complete replacement prompt for the subagents tool.",
+    "resume_subagents": "Your complete replacement prompt for the resume tool."
+  }
+}
+```
+
 ## Bundled Agents
 
-Three fallback agents ship with the extension (used when no user/project agents are configured):
+Four built-in agents ship with the extension and remain available alongside custom agents by default:
 
 - `code-writer` — implementation and refactoring
 - `code-reviwer` — code review and risk finding
 - `code-architect` — technical design and approach selection
+- `team-lead` — decomposition and delegated multi-agent implementation
 
 ## Defining Agents
 
@@ -72,8 +94,10 @@ Create Markdown files with YAML frontmatter:
 - **Env agents:** `$PI_CODING_AGENT_DIR/agents/*.md` *(when `PI_CODING_AGENT_DIR` is set)*
 - **Project agents:** `.pi/agents/*.md` *(may prompt for confirmation — see `PI_SUBAGENT_CONFIRM_PROJECT_AGENTS`)*
 
-Agent discovery priority (highest wins on name collision): project > env > user.
-Built-in agents are only used as a fallback when **all three** locations are empty.
+Agent discovery priority (highest wins on name collision): project > env/user > built-in.
+Built-in agents remain available alongside custom agents unless
+`PI_SUBAGENT_HIDE_BUILTIN_AGENTS=true`. A custom definition with the same name
+as a built-in agent overrides that built-in definition.
 
 ```markdown
 ---
@@ -213,7 +237,8 @@ subagent *instance* by its unique name.
 
 | Env Var                 | Description                                                  |
 | ----------------------- | ------------------------------------------------------------ |
-| `PI_CODING_AGENT_DIR`   | Base path for an additional agents directory (`$PI_CODING_AGENT_DIR/agents/*.md`). Agents here override user agents but are overridden by project agents. Built-in agents are only used when user, env, and project locations all yield zero agents. |
+| `PI_CODING_AGENT_DIR`   | Override Pi's agent config directory. Agents are read from `$PI_CODING_AGENT_DIR/agents/*.md`, and tool prompts from `$PI_CODING_AGENT_DIR/pi-subagents.json`. |
+| `PI_SUBAGENT_HIDE_BUILTIN_AGENTS` | Set to `true`/`on`/`yes`/`1` to hide all bundled agents. By default they are available alongside custom agents. |
 
 ## CLI Argument Proxying
 

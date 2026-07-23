@@ -7,7 +7,7 @@
  * Lookup locations:
  *   - User agents:    ~/.pi/agent/agents/*.md  (or $PI_CODING_AGENT_DIR/agents/ when env var is set)
  *   - Project agents: .pi/agents/*.md  (walks up from cwd)
- *   - Bundled agents: ./agents/*.md    (fallback only when no user/project agents exist)
+ *   - Bundled agents: ./agents/*.md    (included unless PI_SUBAGENT_HIDE_BUILTIN_AGENTS is true)
  */
 
 import { getAgentDir, parseFrontmatter } from "@mariozechner/pi-coding-agent";
@@ -17,6 +17,8 @@ import { fileURLToPath } from "node:url";
 
 export type AgentScope = "user" | "project" | "both";
 export type AgentSource = "user" | "project" | "builtin";
+
+export const SUBAGENT_HIDE_BUILTIN_AGENTS_ENV = "PI_SUBAGENT_HIDE_BUILTIN_AGENTS";
 
 export interface AgentConfig {
 	name: string;
@@ -167,17 +169,20 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
 }
 
 /**
- * Merge agents with last-write-wins deduplication by name.
- * Priority (lowest → highest): user < project.
+ * Merge agent layers with last-write-wins deduplication by name.
+ * Layers must be passed from lowest to highest priority.
  */
-function dedupeAgents(
-	userAgents: AgentConfig[],
-	projectAgents: AgentConfig[],
-): AgentConfig[] {
+function dedupeAgents(...layers: AgentConfig[][]): AgentConfig[] {
 	const agentMap = new Map<string, AgentConfig>();
-	for (const agent of userAgents) agentMap.set(agent.name, agent);
-	for (const agent of projectAgents) agentMap.set(agent.name, agent);
+	for (const agents of layers) {
+		for (const agent of agents) agentMap.set(agent.name, agent);
+	}
 	return Array.from(agentMap.values());
+}
+
+function hideBuiltinAgents(): boolean {
+	const value = process.env[SUBAGENT_HIDE_BUILTIN_AGENTS_ENV]?.trim().toLowerCase();
+	return value === "1" || value === "true" || value === "yes" || value === "on";
 }
 
 // ---------------------------------------------------------------------------
@@ -198,25 +203,19 @@ export function isAgentEnabledAtLayer(
 /**
  * Discover all available agents according to the requested scope.
  *
- * When scope is "both", project agents override user agents with the same name.
- * If no user or project agents exist at all, bundled fallback agents are returned.
+ * Built-in agents are included at the lowest priority unless
+ * PI_SUBAGENT_HIDE_BUILTIN_AGENTS is true. Custom agents with the same name
+ * override their built-in counterpart.
  */
 export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryResult {
 	const userDir = path.join(getAgentDir(), "agents");
 	const projectAgentsDir = findNearestProjectAgentsDir(cwd);
 
+	const builtinAgents = hideBuiltinAgents() ? [] : loadAgentsFromDir(BUNDLED_AGENTS_DIR, "builtin");
 	const userAgents = loadAgentsFromDir(userDir, "user");
 	const projectAgents = projectAgentsDir ? loadAgentsFromDir(projectAgentsDir, "project") : [];
 
-	const hasConfiguredAgents = userAgents.length > 0 || projectAgents.length > 0;
-	if (!hasConfiguredAgents) {
-		return {
-			agents: loadAgentsFromDir(BUNDLED_AGENTS_DIR, "builtin"),
-			projectAgentsDir,
-		};
-	}
-
-	if (scope === "user") return { agents: userAgents, projectAgentsDir };
-	if (scope === "project") return { agents: projectAgents, projectAgentsDir };
-	return { agents: dedupeAgents(userAgents, projectAgents), projectAgentsDir };
+	if (scope === "user") return { agents: dedupeAgents(builtinAgents, userAgents), projectAgentsDir };
+	if (scope === "project") return { agents: dedupeAgents(builtinAgents, projectAgents), projectAgentsDir };
+	return { agents: dedupeAgents(builtinAgents, userAgents, projectAgents), projectAgentsDir };
 }

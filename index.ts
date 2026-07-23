@@ -19,6 +19,7 @@ import {
 } from "@mariozechner/pi-ai";
 import { Type } from "@sinclair/typebox";
 import { type AgentConfig, discoverAgents, isAgentEnabledAtLayer } from "./agents.js";
+import { loadPiSubagentsConfig } from "./config.js";
 import {
   allocateSubagentNames,
   clearResumeActive,
@@ -119,6 +120,16 @@ const SUBAGENT_USAGE_GUIDANCE =
 
 export function getSubagentsToolDescription(): string {
   return `${BASE_SUBAGENTS_TOOL_DESCRIPTION}\n\n${SUBAGENT_USAGE_GUIDANCE}`;
+}
+
+function sameToolPrompts(
+  left: Record<string, string>,
+  right: Record<string, string>,
+): boolean {
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  return leftKeys.length === rightKeys.length &&
+    leftKeys.every((key) => left[key] === right[key]);
 }
 
 type ProjectAgentConfirmationSetting = "ask" | "never" | "session";
@@ -694,6 +705,8 @@ export function selectParentModelForSubagent(
 // ---------------------------------------------------------------------------
 
 export default function (pi: ExtensionAPI) {
+  let configuredToolPrompts = loadPiSubagentsConfig().toolPrompts;
+  let refreshRegisteredToolPrompts: ((cwd: string, includeProject: boolean) => void) | undefined;
   let resumeModelRegistry: any | undefined;
   let lastRestorableModel: any | undefined;
   let latestSessionCtx: any | undefined;
@@ -1384,6 +1397,9 @@ export default function (pi: ExtensionAPI) {
     lifecycleGeneration += 1;
     sessionActive = true;
     latestSessionCtx = ctx;
+    const includeProjectConfig =
+      typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted() === true;
+    refreshRegisteredToolPrompts?.(ctx.cwd, includeProjectConfig);
     resumeModelRegistry = ctx.modelRegistry;
     clearSyntheticResumeState();
     pendingResumePlans = [];
@@ -1696,16 +1712,7 @@ export default function (pi: ExtensionAPI) {
       const agentList = discoveredAgents
         .map((a) => `- **${a.name}**: ${a.description}`)
         .join("\n");
-      return {
-        systemPrompt:
-          event.systemPrompt +
-          `\n\n## Available Subagents
-
-The following subagents are available via the \`subagents\` tool:
-
-${agentList}
-
-### How to call the subagents tool
+      const subagentsGuidance = configuredToolPrompts[SUBAGENT_TOOL_NAME] ?? `### How to call the subagents tool
 
 Each subagent runs in an **isolated process**.
 
@@ -1727,9 +1734,10 @@ calls one after another. Do NOT put dependent tasks in the same array.
 \`\`\`
 
 - Max depth: current depth ${currentDepth}, max depth ${maxDepth}
-- Max subagents per tool call: ${maxParallelTasks}
-${resumableSubagentsDisabled() ? "" : `
-### Resumable subagents
+- Max subagents per tool call: ${maxParallelTasks}`;
+      const resumeGuidance = resumableSubagentsDisabled()
+        ? ""
+        : configuredToolPrompts[RESUME_SUBAGENTS_TOOL_NAME] ?? `### Resumable subagents
 
 Every subagent run is assigned a unique, durable name (e.g. \`code-writer-01\`,
 \`code-reviewer-02\`) which is returned together with its results. Use the
@@ -1745,8 +1753,13 @@ keeping their full previous context:
 - All resumes in one call run in parallel.
 - You may include subagent names in the task text you give YOUR OWN subagents,
   so they can resume those subagents themselves.
-- Names survive restarts; you can resume them in a later session of this conversation.
-`}`,
+- Names survive restarts; you can resume them in a later session of this conversation.`;
+      return {
+        systemPrompt: `${event.systemPrompt}\n\n## Available Subagents
+
+The following subagents are available via the \`subagents\` tool:
+
+${agentList}\n\n${subagentsGuidance}${resumeGuidance ? `\n\n${resumeGuidance}` : ""}`,
       };
     } catch (err) {
       console.error("[pi-subagent] Error in before_agent_start:", err);
@@ -1759,7 +1772,7 @@ keeping their full previous context:
       pi.registerTool({
       name: SUBAGENT_TOOL_NAME,
       label: "Subagents",
-      description: getSubagentsToolDescription(),
+      description: configuredToolPrompts[SUBAGENT_TOOL_NAME] ?? getSubagentsToolDescription(),
       parameters: SubagentParams,
 
       async execute(toolCallId, params, signal, onUpdate, ctx) {
@@ -1976,12 +1989,12 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
       });
     };
 
-    registerSubagentsTool();
-
-    if (!resumableSubagentsDisabled()) pi.registerTool({
+    const registerResumeSubagentsTool = () => {
+      if (resumableSubagentsDisabled()) return;
+      pi.registerTool({
       name: RESUME_SUBAGENTS_TOOL_NAME,
       label: "Resume subagents",
-      description: [
+      description: configuredToolPrompts[RESUME_SUBAGENTS_TOOL_NAME] ?? [
         "Resume previously run subagents by name with a new task, keeping their full context.",
         "",
         "Every subagent run returns a unique name (e.g. code-writer-01). Pass those names",
@@ -2184,7 +2197,24 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
       renderCall: (args, theme, context) => renderResumeCall(args, theme, context),
       renderResult: (result, { expanded }, theme) =>
         renderResult(result, expanded, theme),
-    });
+      });
+    };
+
+    const registerToolsWithConfig = (
+      cwd?: string,
+      includeProject = false,
+      force = false,
+    ) => {
+      const nextToolPrompts = loadPiSubagentsConfig(cwd, includeProject).toolPrompts;
+      if (!force && sameToolPrompts(configuredToolPrompts, nextToolPrompts)) return;
+      configuredToolPrompts = nextToolPrompts;
+      registerSubagentsTool();
+      registerResumeSubagentsTool();
+    };
+    refreshRegisteredToolPrompts = (cwd, includeProject) => {
+      registerToolsWithConfig(cwd, includeProject);
+    };
+    registerToolsWithConfig(undefined, false, true);
   }
 
   function getSessionDirForTask(toolCallId: string, index: number): string {
