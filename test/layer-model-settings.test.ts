@@ -6,7 +6,6 @@ import * as path from "node:path";
 import { isAgentEnabledAtLayer, parseAgentFile, type AgentConfig } from "../agents.js";
 import {
   getSubagentsToolDescription,
-  isGpt56Model,
   selectParentModelForSubagent,
 } from "../index.js";
 import { resolveSubagentModel } from "../runner.js";
@@ -111,18 +110,10 @@ describe("current parent model inheritance", () => {
   });
 });
 
-describe("GPT-5.6 subagent guidance", () => {
-  test("detects GPT-5.6 in model id or display name", () => {
-    assert.equal(isGpt56Model({ id: "gpt-5.6-sol" }), true);
-    assert.equal(isGpt56Model({ id: "alias", name: "GPT-5.6 Terra" }), true);
-    assert.equal(isGpt56Model({ id: "gpt-5.5" }), false);
-  });
-
-  test("adds cost/selectivity guidance only for GPT-5.6", () => {
-    const gpt56 = getSubagentsToolDescription({ id: "gpt-5.6-sol" });
-    const other = getSubagentsToolDescription({ id: "claude-sonnet-4-6" });
-    assert.match(gpt56, /because they are expensive/i);
-    assert.match(gpt56, /exploration tasks in parallel/i);
-    assert.doesNotMatch(other, /because they are expensive/i);
+describe("subagent usage guidance", () => {
+  test("includes cost and selectivity guidance for every model", () => {
+    const description = getSubagentsToolDescription();
+    assert.match(description, /because they are expensive/i);
+    assert.match(description, /exploration tasks in parallel/i);
   });
 });

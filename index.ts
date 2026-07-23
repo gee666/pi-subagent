@@ -114,22 +114,11 @@ const BASE_SUBAGENTS_TOOL_DESCRIPTION = [
   'Parallel: { tasks: [{ agent: "writer", task: "..." }, { agent: "tester", task: "..." }] }',
 ].join("\n");
 
-const GPT_56_SUBAGENT_GUIDANCE =
+const SUBAGENT_USAGE_GUIDANCE =
   "Be careful with subagents: use them when the user explicitly asks or when they are truly necessary, because they are expensive. Good cases: running several exploration tasks in parallel, solving several tasks in parallel, or delegating several large tasks to separate subagents. Bad cases (don't do this): creating many nested subagents with similar tasks, using sequential subagents for simple short tasks, running a subagent just to read a file or execute a bash command, or delegating work that does not need a team or parallel execution (unless the user asked you to).";
 
-export function isGpt56Model(model: unknown): boolean {
-  if (typeof model === "string") return model.toLowerCase().includes("gpt-5.6");
-  if (!model || typeof model !== "object") return false;
-  const candidate = model as { id?: unknown; name?: unknown };
-  return [candidate.id, candidate.name].some(
-    (value) => typeof value === "string" && value.toLowerCase().includes("gpt-5.6"),
-  );
-}
-
-export function getSubagentsToolDescription(model?: unknown): string {
-  return isGpt56Model(model)
-    ? `${BASE_SUBAGENTS_TOOL_DESCRIPTION}\n\n${GPT_56_SUBAGENT_GUIDANCE}`
-    : BASE_SUBAGENTS_TOOL_DESCRIPTION;
+export function getSubagentsToolDescription(): string {
+  return `${BASE_SUBAGENTS_TOOL_DESCRIPTION}\n\n${SUBAGENT_USAGE_GUIDANCE}`;
 }
 
 type ProjectAgentConfirmationSetting = "ask" | "never" | "session";
@@ -1766,13 +1755,11 @@ keeping their full previous context:
 
   // Register the subagents tool
   if (canDelegate) {
-    let registeredForGpt56 = false;
-    const registerSubagentsTool = (model?: unknown) => {
-      registeredForGpt56 = isGpt56Model(model);
+    const registerSubagentsTool = () => {
       pi.registerTool({
       name: SUBAGENT_TOOL_NAME,
       label: "Subagents",
-      description: getSubagentsToolDescription(model),
+      description: getSubagentsToolDescription(),
       parameters: SubagentParams,
 
       async execute(toolCallId, params, signal, onUpdate, ctx) {
@@ -1989,17 +1976,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
       });
     };
 
-    registerSubagentsTool(latestSessionCtx?.model);
-    pi.on("model_select", (event) => {
-      if (registeredForGpt56 !== isGpt56Model(event.model)) {
-        registerSubagentsTool(event.model);
-      }
-    });
-    pi.on("before_agent_start", (_event, ctx) => {
-      if (registeredForGpt56 !== isGpt56Model(ctx.model)) {
-        registerSubagentsTool(ctx.model);
-      }
-    });
+    registerSubagentsTool();
 
     if (!resumableSubagentsDisabled()) pi.registerTool({
       name: RESUME_SUBAGENTS_TOOL_NAME,
