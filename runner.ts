@@ -41,6 +41,11 @@ const SIGKILL_TIMEOUT_MS = 5000;
 const HANG_GUARD_DELAY_MS = 5000;
 const DEFAULT_STARTUP_TIMEOUT_MS = 120_000; // only for startup (before first assistant turn)
 const SUBAGENT_STARTUP_TIMEOUT_ENV = "PI_SUBAGENT_STARTUP_TIMEOUT";
+// Once startup succeeds, a child can otherwise remain alive forever if Pi loses
+// the next model/RPC turn after a tool result. Bound semantic inactivity (not
+// repeated progress heartbeats) so every delegation eventually settles.
+const DEFAULT_IDLE_TIMEOUT_MS = 20 * 60_000;
+const SUBAGENT_IDLE_TIMEOUT_ENV = "PI_SUBAGENT_IDLE_TIMEOUT";
 // A startup timeout is almost always a transient cold-start stall (slow cli /
 // extension load, momentarily busy box) rather than a deterministic failure, so
 // re-spawn a clean child a few times before surfacing the error. This does NOT
@@ -657,6 +662,8 @@ export interface RunAgentOptions {
   piCommandOverride?: { command: string; argsPrefix?: string[] };
   /** Test/debug override for startup timeout. */
   startupTimeoutMsOverride?: number;
+  /** Test/debug override for post-startup semantic inactivity timeout. */
+  idleTimeoutMsOverride?: number;
   /** Called once the child RPC process is ready to receive steering messages. */
   onHandle?: RunningSubagentStartedCallback;
 }
@@ -686,6 +693,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
     fallbackModel,
     piCommandOverride,
     startupTimeoutMsOverride,
+    idleTimeoutMsOverride,
   } = opts;
 
   const agent = agents.find((a) => a.name === agentName);
@@ -791,6 +799,9 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       const proc = spawn(spawnCmd, spawnArgs, {
         cwd,
         shell: false,
+        // A separate POSIX process group lets timeout/cancel terminate nested
+        // agents and tools, rather than only their immediate Pi parent.
+        detached: process.platform !== "win32",
         stdio: ["pipe", "pipe", "pipe"],
         env: {
           ...process.env,
@@ -809,8 +820,11 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       let resolved = false;
       let hangTimer: ReturnType<typeof setTimeout> | undefined;
       let startupTimer: ReturnType<typeof setTimeout> | undefined;
+      let idleTimer: ReturnType<typeof setTimeout> | undefined;
       let receivedFirstEvent = false;
       let forcedExitCode: number | undefined;
+      let lastNestedProgressSignature: string | undefined;
+      let abortHandler: (() => void) | undefined;
 
       const sendRpc = (command: Record<string, unknown>) => {
         proc.stdin?.write(`${JSON.stringify(command)}\n`);
@@ -832,9 +846,8 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       sendRpc({ type: "prompt", message: prompt });
 
       // Startup timeout: kill the process if it never produces its first
-      // JSON event. Once the first event arrives, this timer is permanently
-      // disabled — from that point, tool calls can run for as long as they
-      // need, and only the terminal-stopReason hang guard applies.
+      // model-turn event. Once startup succeeds, the semantic-inactivity
+      // watchdog below takes over.
       const startupTimeoutMs = (() => {
         if (startupTimeoutMsOverride !== undefined) return startupTimeoutMsOverride;
         const raw = process.env[SUBAGENT_STARTUP_TIMEOUT_ENV];
@@ -848,16 +861,78 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
         resolved = true;
         if (hangTimer) { clearTimeout(hangTimer); hangTimer = undefined; }
         if (startupTimer) { clearTimeout(startupTimer); startupTimer = undefined; }
+        if (idleTimer) { clearTimeout(idleTimer); idleTimer = undefined; }
+        if (signal && abortHandler) signal.removeEventListener("abort", abortHandler);
         if (buffer.trim()) flushLine(buffer);
         resolve(code);
       };
 
-      /**
-       * Cancel any pending hang guard timer.
-       * Called on every new activity to prove the child is still working.
-       */
+      const stopChild = (force: boolean) => {
+        const terminationSignal = force ? "SIGKILL" : "SIGTERM";
+        if (process.platform === "win32" && proc.pid) {
+          // proc.kill() only terminates the immediate Node process on Windows;
+          // /T is required to avoid orphaning nested agents and tool children.
+          try {
+            const systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT ?? "C:\\Windows";
+            const killer = spawn(
+              path.join(systemRoot, "System32", "taskkill.exe"),
+              ["/PID", String(proc.pid), "/T", ...(force ? ["/F"] : [])],
+              { shell: false, stdio: "ignore", windowsHide: true },
+            );
+            killer.unref();
+          } catch {
+            try { proc.kill(terminationSignal); } catch { /* already dead */ }
+          }
+          return;
+        }
+        try {
+          if (proc.pid) process.kill(-proc.pid, terminationSignal);
+          else proc.kill(terminationSignal);
+        } catch {
+          try { proc.kill(terminationSignal); } catch { /* already dead */ }
+        }
+      };
+
+      const forceStopAndSettle = (settleCode = forcedExitCode ?? 1) => {
+        stopChild(false);
+        setTimeout(() => {
+          if (resolved) return;
+          stopChild(true);
+          // Never depend exclusively on a close event from a wedged child.
+          proc.stdin?.destroy();
+          proc.stdout?.destroy();
+          proc.stderr?.destroy();
+          proc.unref();
+          doResolve(settleCode);
+        }, SIGKILL_TIMEOUT_MS);
+      };
+
+      /** Cancel the terminal-stop hang guard when new work appears. */
       const cancelHangGuard = () => {
         if (hangTimer) { clearTimeout(hangTimer); hangTimer = undefined; }
+      };
+
+      const idleTimeoutMs = (() => {
+        if (idleTimeoutMsOverride !== undefined) return Math.max(0, idleTimeoutMsOverride);
+        const raw = process.env[SUBAGENT_IDLE_TIMEOUT_ENV];
+        if (raw === undefined) return DEFAULT_IDLE_TIMEOUT_MS;
+        const parsed = parseNonNegativeInt(raw);
+        return parsed !== null ? parsed : DEFAULT_IDLE_TIMEOUT_MS;
+      })();
+
+      const noteSemanticActivity = () => {
+        if (!receivedFirstEvent || idleTimeoutMs === 0 || resolved) return;
+        if (idleTimer) clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => {
+          if (resolved) return;
+          const message = `Subagent inactivity timeout: no new RPC activity for ${idleTimeoutMs}ms.`;
+          forcedExitCode = 1;
+          result.stopReason = "error";
+          result.errorMessage = message;
+          appendBoundedStderr(result, `\n[pi-subagent] Killed: ${message}`);
+          emitUpdate();
+          forceStopAndSettle();
+        }, idleTimeoutMs);
       };
 
       /**
@@ -874,13 +949,8 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
         cancelHangGuard();
         hangTimer = setTimeout(() => {
           if (resolved) return;
-          // Process produced all output but won't exit — force-kill it
-          try { proc.kill("SIGTERM"); } catch { /* already dead */ }
-          setTimeout(() => {
-            if (!resolved) {
-              try { proc.kill("SIGKILL"); } catch { /* already dead */ }
-            }
-          }, SIGKILL_TIMEOUT_MS);
+          // Process produced all output but won't exit — force-kill its tree.
+          forceStopAndSettle(forcedExitCode ?? 0);
         }, HANG_GUARD_DELAY_MS);
       };
 
@@ -889,7 +959,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
         try { event = JSON.parse(line); } catch { event = null; }
         if (event?.type === "agent_end") {
           if (result.exitCode === -1) result.exitCode = forcedExitCode ?? 0;
-          try { proc.kill("SIGTERM"); } catch { /* already dead */ }
+          stopChild(false);
           doResolve(forcedExitCode ?? 0);
           return;
         }
@@ -912,6 +982,17 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
             receivedFirstEvent = true;
             if (startupTimer) { clearTimeout(startupTimer); startupTimer = undefined; }
           }
+          // Parallel progress is emitted every second even when nothing changed.
+          // Only a changed nested snapshot counts as activity, otherwise a dead
+          // grandchild could keep every ancestor alive forever.
+          let semanticActivity = true;
+          if (event?.type === "subagent_progress") {
+            let signature: string;
+            try { signature = JSON.stringify(event.details); } catch { signature = "unserializable"; }
+            semanticActivity = signature !== lastNestedProgressSignature;
+            lastNestedProgressSignature = signature;
+          }
+          if (semanticActivity) noteSemanticActivity();
           emitUpdate();
           // Any accepted message means the child is alive and producing
           // output — cancel any pending hang guard so we don't kill it
@@ -922,13 +1003,20 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
           if (isTerminalStopReason(result.stopReason)) {
             scheduleHangGuard();
           }
+        } else if (
+          receivedFirstEvent &&
+          (event?.type === "message_update" || event?.type === "tool_execution_update")
+        ) {
+          // Streaming deltas are intentionally not retained in result.messages,
+          // but they prove the model/tool is still making real progress.
+          noteSemanticActivity();
         }
       };
 
       // Start the startup timer — if the child process never reaches the
       // LLM-call phase (hung during init, broken binary, slow MCP adapter, etc.),
-      // kill it.  The timer is cancelled permanently on the first turn_start or
-      // completed assistant turn, whichever comes first.
+      // kill it. The idle watchdog replaces it after the first turn_start or
+      // completed assistant turn.
       if (startupTimeoutMs > 0) {
         startupTimer = setTimeout(() => {
           if (resolved || receivedFirstEvent) return;
@@ -938,12 +1026,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
           result.stopReason = "error";
           result.errorMessage = message;
           appendBoundedStderr(result, `\n[pi-subagent] Killed: ${message}`);
-          try { proc.kill("SIGTERM"); } catch { /* already dead */ }
-          setTimeout(() => {
-            if (!resolved) {
-              try { proc.kill("SIGKILL"); } catch { /* already dead */ }
-            }
-          }, SIGKILL_TIMEOUT_MS);
+          forceStopAndSettle();
         }, startupTimeoutMs);
       }
 
@@ -1004,15 +1087,13 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
 
       // Abort handling
       if (signal) {
-        const kill = () => {
+        abortHandler = () => {
           wasAborted = true;
-          proc.kill("SIGTERM");
-          setTimeout(() => {
-            if (!proc.killed) proc.kill("SIGKILL");
-          }, SIGKILL_TIMEOUT_MS);
+          forcedExitCode = 130;
+          forceStopAndSettle();
         };
-        if (signal.aborted) kill();
-        else signal.addEventListener("abort", kill, { once: true });
+        if (signal.aborted) abortHandler();
+        else signal.addEventListener("abort", abortHandler, { once: true });
       }
       });
 

@@ -150,6 +150,22 @@ pi --no-subagent-prevent-cycles   # allow cycles (not recommended)
 | `PI_SUBAGENT_MAX_PARALLEL_TASKS` | `30`    | Max tasks per single call                |
 | `PI_SUBAGENT_MAX_CONCURRENCY`    | `8`     | Max subagents running simultaneously     |
 
+## Subagent Liveness Timeouts
+
+A delegated process cannot block its parents forever. The runner applies a
+startup timeout before the first model turn and a semantic-inactivity timeout
+after startup. Tool/turn events and changed nested-agent state reset the idle
+timer; repeated unchanged progress heartbeats do not. On timeout or
+cancellation, the runner terminates the child process tree and bounds cleanup;
+even if a wedged OS process never reports `close`, the tool returns an error
+result so every waiting parent can settle.
+
+| Env Var | Default | Description |
+| --- | --- | --- |
+| `PI_SUBAGENT_STARTUP_TIMEOUT` | `120000` | Milliseconds allowed to reach the first model turn; `0` disables |
+| `PI_SUBAGENT_STARTUP_RETRIES` | `2` | Fresh retries after a startup timeout |
+| `PI_SUBAGENT_IDLE_TIMEOUT` | `1200000` | Milliseconds without new semantic RPC activity after startup; `0` disables |
+
 ## Timestamps & Status Footer
 
 Subagent tool calls and live activity lines render a dim `hh:mm:ss` timestamp
