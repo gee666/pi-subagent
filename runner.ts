@@ -1010,6 +1010,11 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
 
         if (event?.type === "agent_settled") {
           agentSettled = true;
+          // No semantic watchdog may fire while we are only waiting for the
+          // deliberately terminated RPC process tree to close. On slower
+          // launchers (notably Windows taskkill), that cleanup can outlast a
+          // short idle timeout and overwrite a successful settled result.
+          if (idleTimer) { clearTimeout(idleTimer); idleTimer = undefined; }
           if (result.stopReason === "length" && !result.errorMessage) {
             result.errorMessage = "Subagent output was incomplete because the model reached its output limit.";
           }
@@ -1123,7 +1128,12 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
 
       const classifyUnexpectedExit = (code: number | null, exitSignal: NodeJS.Signals | null): number => {
         if (forcedExitCode !== undefined) return forcedExitCode;
-        if (agentSettled) return isResultError({ ...result, exitCode: 0 }) ? 1 : (code ?? 0);
+        // Once Pi emitted agent_settled, the semantic run is complete and this
+        // runner deliberately terminates the still-listening RPC process. Some
+        // launchers translate that expected SIGTERM into exit code 143 rather
+        // than reporting a signal. Do not turn our own cleanup status into a
+        // failed subagent; only the settled model result determines success.
+        if (agentSettled) return isResultError({ ...result, exitCode: 0 }) ? 1 : 0;
 
         const message = exitSignal
           ? `Subagent process exited from signal ${exitSignal} before agent_settled.`

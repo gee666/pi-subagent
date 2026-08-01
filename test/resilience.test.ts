@@ -204,6 +204,45 @@ describe("runAgent: catch block covers spawn errors", async () => {
     assert.ok(result.messages.some((message: any) => message?.content?.[0]?.text === "recovered"));
   });
 
+  test("a launcher exit code caused by cleanup does not fail a settled agent", async () => {
+    const { runAgentSubprocess: runAgent } = await import("../runner.js");
+    const script = [
+      `const usage={input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{total:0}}`,
+      `console.log(JSON.stringify({type:"turn_start"}))`,
+      `console.log(JSON.stringify({type:"message_end",message:{role:"assistant",content:[{type:"text",text:"done"}],stopReason:"stop",usage}}))`,
+      `console.log(JSON.stringify({type:"agent_end",willRetry:false}))`,
+      `console.log(JSON.stringify({type:"agent_settled"}))`,
+      // Shell/npm launchers commonly encode the runner's expected SIGTERM as
+      // 128 + 15. The settled model result, not that cleanup code, is decisive.
+      `setImmediate(()=>process.exit(143))`,
+    ].join(";");
+    const fakeAgent = {
+      name: "fake-agent",
+      description: "test",
+      systemPrompt: "",
+      source: "user" as const,
+      filePath: "/fake/path.md",
+    };
+
+    const result = await runAgent({
+      piCommandOverride: { command: process.execPath, argsPrefix: ["-e", script, "--"] },
+      startupTimeoutMsOverride: 1_000,
+      cwd: "/tmp",
+      agents: [fakeAgent],
+      agentName: "fake-agent",
+      task: "settle before launcher cleanup",
+      parentDepth: 0,
+      parentAgentStack: [],
+      maxDepth: 3,
+      preventCycles: false,
+      makeDetails: (results) => buildSubagentDetails("single", "spawn", null, results),
+    });
+
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.equal(result.stopReason, "stop");
+    assert.equal(result.errorMessage, undefined);
+  });
+
   test("agent_settled waits for bounded process-tree termination", async () => {
     const { runAgentSubprocess: runAgent } = await import("../runner.js");
     const script = [
