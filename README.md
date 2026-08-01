@@ -130,7 +130,7 @@ The Markdown body becomes the agent's system prompt (appended to Pi's default, n
 
 ## Delegation Guards
 
-Depth and cycle guards prevent runaway recursive delegation. Layer availability is evaluated for the child being launched: depth 1 is the first layer, and `PI_SUBAGENT_MAX_DEPTH` is the last layer. The bundled `team-lead` agent sets `last-layer: disabled` so it cannot consume the final delegation layer.
+Depth and cycle guards prevent runaway recursive delegation. Layer availability is evaluated for the child being launched: depth 1 is the first layer, and `PI_SUBAGENT_MAX_DEPTH` is the last layer. The bundled `team-lead` agent sets `last-layer: disabled` so it cannot consume the final delegation layer. Cycle checks are applied per task: in a mixed parallel call, cyclic tasks fail while legal siblings still run.
 
 | Config                         | Default | Description                                      |
 | ------------------------------ | ------- | ------------------------------------------------ |
@@ -159,6 +159,12 @@ timer; repeated unchanged progress heartbeats do not. On timeout or
 cancellation, the runner terminates the child process tree and bounds cleanup;
 even if a wedged OS process never reports `close`, the tool returns an error
 result so every waiting parent can settle.
+
+RPC completion is based on Pi's `agent_settled` event—not `agent_end`.
+`agent_end` is only a low-level run boundary and may be followed by Pi's normal
+provider retry, overflow compaction, or queued continuation. Rejected prompt
+commands, signal exits, and processes that exit before `agent_settled` are
+reported immediately as failures.
 
 | Env Var | Default | Description |
 | --- | --- | --- |
@@ -190,6 +196,7 @@ The same detection also runs after navigating the session tree in the TUI (Esc n
 - TUI mode asks: **Resume subagents?**
 - Non-UI modes (`pi -p`, JSON/RPC) resume automatically.
 - Already-finished subagents are reused as completed; unfinished ones continue from their own saved sessions.
+- Durable child refs retain final output, own usage, model, and tool counts, so completed siblings survive a JSON/session restart without becoming `(no output)` or losing accounting.
 - Nested subagents use the same mechanism recursively.
 - Provider fallback goes through the selected model's effective Pi provider, so custom providers, custom APIs, auth-derived endpoints, headers, and provider-scoped environment are preserved.
 - Pending resume state and delayed callbacks are discarded on `/resume`, `/new`, `/fork`, and `/reload`, preventing stale work from an old runtime from leaking into the replacement session.
@@ -220,6 +227,7 @@ Naming is deliberately unambiguous: `agent` (in `subagents`) selects an agent
 subagent *instance* by its unique name.
 
 - All resumes in one call run **in parallel**.
+- The preferred shape is `{"resumes":[...]}`. For compatibility, the common single-item shorthand `{"subagent":"name","task":"..."}` is normalized automatically before validation.
 - Names are unique within one delegation tree (everything spawned from one
   top-level session) and are persisted in a registry file under the subagent
   session root, so they survive restarts: you can resume a subagent in a later
@@ -336,7 +344,7 @@ interface SingleResult {
   agent: string;                        // agent name
   agentSource: "user" | "project" | "builtin" | "unknown";
   task: string;                         // task string passed to this agent
-  exitCode: number;                     // 0 = success, >0 = error, -1 = still running
+  exitCode: number;                     // 0 = process success, >0 = error, -1 = still running
   messages: Message[];                  // full conversation history of the subagent
   stderr: string;
   usage: UsageStats;                    // this agent's OWN token usage only

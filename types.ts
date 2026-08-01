@@ -58,7 +58,8 @@ export type LiveLogEntry =
 export const MAX_LIVE_LOG_ENTRIES = 6;
 
 /** Result of a single subagent invocation. Live results include rich fields;
- * durable parent-session refs make those fields non-enumerable/omitted. */
+ * durable parent-session refs retain the compact completion/outcome fields needed
+ * for crash-resume while omitting full transcripts and live-only state. */
 export interface SingleResult {
 	agent: string;
 	agentSource: "user" | "project" | "builtin" | "unknown";
@@ -77,6 +78,10 @@ export interface SingleResult {
 	errorMessage?: string;
 	/** Cached final assistant text so durable details can omit full transcripts. */
 	finalOutput?: string;
+	/** Own + descendant usage retained when full nested transcripts are omitted. */
+	subtreeUsageSummary?: SubagentUsageSummary;
+	/** Live resume baseline for pre-crash descendants whose transcripts were compacted. */
+	priorDescendantUsageSummary?: SubagentUsageSummary;
 	/** Number of stderr characters omitted from the durable parent-session details. */
 	stderrTruncatedChars?: number;
 	/** Session directory used by this subagent process, when persisted. */
@@ -224,6 +229,8 @@ function buildUsageTreeNode(result: SingleResult): UsageTreeNode {
 
   const aggregatedUsage = emptyUsage();
   addUsage(aggregatedUsage, ownUsage);
+  const priorDescendantUsage = usageSummaryToUsageStats(result.priorDescendantUsageSummary);
+  if (priorDescendantUsage) addUsage(aggregatedUsage, priorDescendantUsage);
   for (const child of children) addUsage(aggregatedUsage, child.aggregatedUsage);
 
   const aggregatedToolCalls: ToolCallCounts = { ...ownToolCalls };
@@ -250,27 +257,31 @@ export function compactSingleResultForDurableDetails(result: SingleResult): Sing
     agentSource: result.agentSource,
     task: result.task,
     exitCode: result.exitCode,
+    usage: result.usage ?? emptyUsage(),
+    toolCalls: result.toolCalls ?? {},
+    completedTurns: result.completedTurns ?? 0,
+    finalOutput: result.finalOutput ?? getFinalOutput(result.messages ?? []),
+    subtreeUsageSummary: result.subtreeUsageSummary ?? buildUsageSummary([result]),
     ...(result.name !== undefined ? { name: result.name } : {}),
     ...(result.startedAt !== undefined ? { startedAt: result.startedAt } : {}),
     ...(result.stopReason !== undefined ? { stopReason: result.stopReason } : {}),
     ...(result.errorMessage !== undefined ? { errorMessage: result.errorMessage } : {}),
+    ...(result.model !== undefined ? { model: result.model } : {}),
     ...(result.sessionDir !== undefined ? { sessionDir: result.sessionDir } : {}),
     ...(result.sessionId !== undefined ? { sessionId: result.sessionId } : {}),
   };
-  // Compatibility for in-memory/unit-test consumers only. These properties are
-  // deliberately non-enumerable so parent session JSON persists a pure ref.
+  // Full transcripts and live process state stay non-enumerable so parent
+  // sessions remain compact. Completion output and own usage above must survive
+  // a JSON round-trip; otherwise crash-resume reuses a successful sibling as
+  // "(no output)" with zero accounting.
   Object.defineProperties(ref, {
     messages: { value: [], enumerable: false },
     stderr: { value: "", enumerable: false },
-    usage: { value: result.usage ?? emptyUsage(), enumerable: false },
-    toolCalls: { value: {}, enumerable: false },
-    model: { value: result.model, enumerable: false },
-    finalOutput: { value: result.finalOutput ?? getFinalOutput(result.messages ?? []), enumerable: false },
     stderrTruncatedChars: { value: result.stderrTruncatedChars ?? Math.max(0, (result.stderr?.length ?? 0)), enumerable: false },
-    completedTurns: { value: result.completedTurns, enumerable: false },
-    turnInProgress: { value: result.turnInProgress, enumerable: false },
+    turnInProgress: { value: false, enumerable: false },
     liveLog: { value: [], enumerable: false },
     liveNestedSubagents: { value: undefined, enumerable: false },
+    priorDescendantUsageSummary: { value: undefined, enumerable: false },
   });
   return ref as SingleResult;
 }
@@ -312,7 +323,17 @@ export function usageSummaryFromUsage(usage: UsageStats | undefined): SubagentUs
 export function buildUsageSummary(results: SingleResult[]): SubagentUsageSummary {
   const total = emptyUsageSummary();
   for (const result of results) {
+    // Completed siblings restored from durable details no longer have their
+    // nested transcripts. Reuse the persisted subtree total instead of
+    // silently dropping descendant accounting during a crash-resume rebuild.
+    if (result.subtreeUsageSummary) {
+      addUsageSummary(total, result.subtreeUsageSummary);
+      continue;
+    }
     addUsageSummary(total, usageSummaryFromUsage(result.usage));
+    if (result.priorDescendantUsageSummary) {
+      addUsageSummary(total, result.priorDescendantUsageSummary);
+    }
     for (const nested of getNestedSubagentResults(result.messages ?? [])) {
       addUsageSummary(total, nested.details.usageSummary ?? buildUsageSummary(nested.details.results));
     }
@@ -402,9 +423,46 @@ export function buildSubagentDetails(
   return details as SubagentDetails;
 }
 
-/** Whether a result represents an error. */
+/** Terminal stop reasons that never represent a complete successful task. */
+const INCOMPLETE_STOP_REASONS = new Set([
+  "error",
+  "aborted",
+  "length",
+  "incomplete",
+  "max_tokens",
+]);
+
+/** Whether a result represents an error or incomplete run. */
 export function isResultError(r: SingleResult): boolean {
-	return r.exitCode > 0 || r.stopReason === "error" || r.stopReason === "aborted";
+  // -1 is the live "still running" sentinel, not a failure.
+  return r.exitCode > 0 || INCOMPLETE_STOP_REASONS.has(r.stopReason ?? "");
+}
+
+/** Whether a result is fully settled and successful. */
+export function isResultSuccess(r: SingleResult): boolean {
+  return r.exitCode === 0 && !isResultError(r);
+}
+
+/** Whether durable details contain any failed/incomplete direct child. */
+export function subagentDetailsHaveErrors(value: unknown): boolean {
+  return isSubagentDetails(value) && value.results.some((result) => isResultError(result));
+}
+
+/** Normalize common legacy/model-generated resume argument shorthands. */
+export function prepareResumeArguments(args: unknown): unknown {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return args;
+  const record = args as Record<string, unknown>;
+  if (
+    record.resumes === undefined &&
+    typeof record.subagent === "string" &&
+    typeof record.task === "string"
+  ) {
+    return { resumes: [{ subagent: record.subagent, task: record.task }] };
+  }
+  if (record.resumes && typeof record.resumes === "object" && !Array.isArray(record.resumes)) {
+    return { ...record, resumes: [record.resumes] };
+  }
+  return args;
 }
 
 /** Check whether a value looks like SubagentDetails. */
@@ -476,13 +534,14 @@ function collectSubagentErrorLinesFromDetails(
 		}
 		const nested = getNestedSubagentResults(result.messages ?? []);
 		for (const child of nested) {
-			if (child.isError) {
-				collectSubagentErrorLinesFromDetails(
-					child.details,
-					lines,
-					`${prefix}${result.agent} -> `,
-				);
-			}
+			// Older pi-subagent versions returned an unsupported `isError` field
+			// from execute(), so Pi persisted the outer tool result as successful.
+			// Inspect durable child outcomes regardless of that unreliable flag.
+			collectSubagentErrorLinesFromDetails(
+				child.details,
+				lines,
+				`${prefix}${result.agent} -> `,
+			);
 		}
 	}
 }
@@ -491,7 +550,8 @@ function collectSubagentErrorLinesFromDetails(
 export function getNestedSubagentErrorSummary(messages: Message[]): string | null {
 	const lines: string[] = [];
 	for (const nested of getNestedSubagentResults(messages)) {
-		if (!nested.isError) continue;
+		// Do not trust the outer tool-result error bit: releases before Pi 0.83
+		// could persist failed subagents with isError=false.
 		collectSubagentErrorLinesFromDetails(nested.details, lines);
 	}
 	if (lines.length === 0) return null;

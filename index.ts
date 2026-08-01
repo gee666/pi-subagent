@@ -76,6 +76,8 @@ import {
   getNestedSubagentResults,
   isResultError,
   isSubagentDetails,
+  prepareResumeArguments,
+  subagentDetailsHaveErrors,
   isSubagentToolName,
   RESUME_SUBAGENTS_TOOL_NAME,
   SUBAGENT_TOOL_NAME,
@@ -442,7 +444,14 @@ function liveDetailsSignature(details: SubagentDetails): string {
 function collectLiveUsageSummary(details: SubagentDetails): SubagentUsageSummary {
   const summary = emptyUsageSummary();
   for (const result of details.results) {
+    if (result.subtreeUsageSummary) {
+      addUsageSummary(summary, result.subtreeUsageSummary);
+      continue;
+    }
     addUsageSummary(summary, usageSummaryFromUsage(result.usage));
+    if (result.priorDescendantUsageSummary) {
+      addUsageSummary(summary, result.priorDescendantUsageSummary);
+    }
 
     const completedNested = getNestedSubagentResults(result.messages ?? []);
     const completedNestedIds = new Set<string>();
@@ -517,15 +526,6 @@ function collectCombinedUsageStatusLine(
   const subagentUsage = usageSummaryToUsageStats(subagents) ?? emptyUsage();
   addUsage(parentUsage, subagentUsage);
   return formatCombinedUsageStatusLine(parentUsage, subagents.subagentCount);
-}
-
-function getCycleViolations(
-  requestedNames: Set<string>,
-  ancestorAgentStack: string[],
-): string[] {
-  if (requestedNames.size === 0 || ancestorAgentStack.length === 0) return [];
-  const stackSet = new Set(ancestorAgentStack);
-  return Array.from(requestedNames).filter((name) => stackSet.has(name));
 }
 
 /** Get project-local agents referenced by the current request. */
@@ -983,6 +983,8 @@ export default function (pi: ExtensionAPI) {
   const activeSubagents = new Map<number, { agent: string; task: string; taskIndex: number; handle: RunningSubagentHandle; name?: string }>();
   /** Names with a resume in flight in this process (same-process race guard). */
   const activeResumeNames = new Set<string>();
+  /** Tool calls whose execute result requested an actual Pi error result. */
+  const forcedErrorToolCallIds = new Set<string>();
   const activeSubagentUsageSummaries = new Map<string, SubagentUsageSummary>();
   const latestBroadcastTargets = {
     all: [] as BroadcastTarget[],
@@ -1515,6 +1517,7 @@ export default function (pi: ExtensionAPI) {
     latestSessionCtx = undefined;
     resumeModelRegistry = undefined;
     activeSubagentUsageSummaries.clear();
+    forcedErrorToolCallIds.clear();
     activeSubagents.clear();
   });
 
@@ -1655,6 +1658,16 @@ export default function (pi: ExtensionAPI) {
     scheduleSessionTask(() => updateCombinedUsageStatus(ctx), 0);
   });
 
+  // A custom tool must throw to make Pi set isError, but throwing would discard
+  // the durable subagent details needed for crash-resume. Convert our internal
+  // outcome marker through Pi's supported tool_result middleware instead.
+  pi.on("tool_result", (event: any) => {
+    if (!isSubagentToolName(event?.toolName)) return;
+    const detailsFailed = subagentDetailsHaveErrors(event.details);
+    const forced = forcedErrorToolCallIds.delete(event.toolCallId);
+    if (forced || detailsFailed) return { isError: true };
+  });
+
   pi.on("tool_execution_end", (event, ctx) => {
     latestSessionCtx = ctx;
     if (isSubagentToolName(event.toolName)) {
@@ -1776,6 +1789,7 @@ ${agentList}\n\n${subagentsGuidance}${resumeGuidance ? `\n\n${resumeGuidance}` :
       parameters: SubagentParams,
 
       async execute(toolCallId, params, signal, onUpdate, ctx) {
+        const toolResult = await (async () => {
         try {
           recordToolCallStart(toolCallId);
           updateLatestBroadcastTargets(undefined);
@@ -1797,6 +1811,7 @@ ${agentList}\n\n${subagentsGuidance}${resumeGuidance ? `\n\n${resumeGuidance}` :
                 },
               ],
               details: makeDetails("single")([]),
+              isError: true,
             };
           }
 
@@ -1813,35 +1828,20 @@ ${agentList}\n\n${subagentsGuidance}${resumeGuidance ? `\n\n${resumeGuidance}` :
             onUpdate?.(partial);
           };
 
-          // Security: guard project-local agents before running
-          const requested = new Set<string>();
-          for (const t of tasks) requested.add(t.agent);
-
+          // Apply whole-call security preflight only to tasks that can actually
+          // run. Cyclic tasks become aligned structured failures in the runner;
+          // they must not block legal siblings or consume durable names.
+          const cyclicTaskIndexes = new Set<number>();
           if (preventCycles) {
-            const cycleViolations = getCycleViolations(
-              requested,
-              ancestorAgentStack,
-            );
-            if (cycleViolations.length > 0) {
-              const stackText =
-                ancestorAgentStack.length > 0
-                  ? ancestorAgentStack.join(" -> ")
-                  : "(root)";
-              return {
-                content: [
-                  {
-                    type: "text",
-                    text: `Blocked: delegation cycle detected. Requested agent(s) already in the delegation stack: ${cycleViolations.join(", ")}.
-Current stack: ${stackText}
-
-This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A).`,
-                  },
-                ],
-                details: makeDetails(executionMode)([]),
-                isError: true,
-              };
-            }
+            const stack = new Set(ancestorAgentStack);
+            tasks.forEach((task, index) => {
+              if (stack.has(task.agent)) cyclicTaskIndexes.add(index);
+            });
           }
+          const requested = new Set<string>();
+          tasks.forEach((task, index) => {
+            if (!cyclicTaskIndexes.has(index)) requested.add(task.agent);
+          });
 
           const requestedProjectAgents = getRequestedProjectAgents(
             agents,
@@ -1907,7 +1907,7 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
           if (currentNamesFile) {
             const pendingAllocation = tasks
               .map((task, index) => ({ task, index }))
-              .filter(({ index }) => !names[index]);
+              .filter(({ index }) => !cyclicTaskIndexes.has(index) && !names[index]);
             if (pendingAllocation.length > 0) {
               try {
                 const allocated = await allocateSubagentNames(
@@ -1980,7 +1980,9 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
             isError: true,
           };
         }
-
+        })();
+        if ((toolResult as any)?.isError === true) forcedErrorToolCallIds.add(toolCallId);
+        return toolResult;
       },
 
       renderCall: (args, theme, context) => renderCall(args, theme, context),
@@ -2003,8 +2005,10 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
         'Example: { resumes: [{ subagent: "code-writer-01", task: "Also update the tests." }] }',
       ].join("\n"),
       parameters: ResumeSubagentsParams,
+      prepareArguments: prepareResumeArguments,
 
       async execute(toolCallId, params, signal, onUpdate, ctx) {
+        const toolResult = await (async () => {
         const markedNames: string[] = [];
         try {
           recordToolCallStart(toolCallId);
@@ -2192,6 +2196,9 @@ This guard prevents self-recursion and cyclic handoffs (for example A -> B -> A)
             }
           }
         }
+        })();
+        if ((toolResult as any)?.isError === true) forcedErrorToolCallIds.add(toolCallId);
+        return toolResult;
       },
 
       renderCall: (args, theme, context) => renderResumeCall(args, theme, context),

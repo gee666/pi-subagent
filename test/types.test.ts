@@ -13,7 +13,10 @@ import {
   getFinalOutput,
   getDisplayItems,
   isResultError,
+  isResultSuccess,
   isSubagentDetails,
+  prepareResumeArguments,
+  subagentDetailsHaveErrors,
   buildSubagentDetails,
   getNestedSubagentResults,
   getNestedSubagentErrorSummary,
@@ -327,9 +330,38 @@ describe("isResultError", () => {
     assert.equal(isResultError(makeResult({ exitCode: 0, stopReason: "aborted" })), true);
   });
 
-  test("returns false for other stop reasons", () => {
+  test("treats output limits as incomplete failures", () => {
+    assert.equal(isResultError(makeResult({ exitCode: 0, stopReason: "length" })), true);
+    assert.equal(isResultError(makeResult({ exitCode: 0, stopReason: "incomplete" })), true);
+    assert.equal(isResultError(makeResult({ exitCode: 0, stopReason: "max_tokens" })), true);
+  });
+
+  test("returns false for successful stop reasons", () => {
     assert.equal(isResultError(makeResult({ exitCode: 0, stopReason: "end_turn" })), false);
-    assert.equal(isResultError(makeResult({ exitCode: 0, stopReason: "max_tokens" })), false);
+    assert.equal(isResultError(makeResult({ exitCode: 0, stopReason: "stop" })), false);
+  });
+
+  test("distinguishes live unfinished results from settled success", () => {
+    const running = makeResult({ exitCode: -1 });
+    assert.equal(isResultError(running), false);
+    assert.equal(isResultSuccess(running), false);
+    assert.equal(isResultSuccess(makeResult({ exitCode: 0, stopReason: "stop" })), true);
+  });
+});
+
+describe("resume argument compatibility", () => {
+  test("normalizes top-level single-item shorthand", () => {
+    assert.deepEqual(
+      prepareResumeArguments({ subagent: "writer-01", task: "continue" }),
+      { resumes: [{ subagent: "writer-01", task: "continue" }] },
+    );
+  });
+
+  test("normalizes an object-valued resumes field", () => {
+    assert.deepEqual(
+      prepareResumeArguments({ resumes: { subagent: "writer-01", task: "continue" } }),
+      { resumes: [{ subagent: "writer-01", task: "continue" }] },
+    );
   });
 });
 
@@ -363,6 +395,12 @@ describe("isSubagentDetails", () => {
 
   test("returns false if results is not array", () => {
     assert.equal(isSubagentDetails({ mode: "single", delegationMode: "spawn", results: null }), false);
+  });
+
+  test("detects failed direct children in details", () => {
+    const failed = buildSubagentDetails("single", "spawn", null, [makeResult({ stopReason: "length" })]);
+    assert.equal(subagentDetailsHaveErrors(failed), true);
+    assert.equal(subagentDetailsHaveErrors(buildSubagentDetails("single", "spawn", null, [makeResult()])), false);
   });
 });
 
@@ -419,6 +457,40 @@ describe("buildSubagentDetails", () => {
     assert.equal(stored.messages.length, 0, "ordinary text/tool transcript is stored only in child session");
     assert.ok(stored.stderr.length < 5000, "stderr is tail-capped in parent details");
     assert.ok((stored.stderrTruncatedChars ?? 0) > 0);
+  });
+
+  test("durable completion data survives a JSON round-trip", () => {
+    const usage = { input: 11, output: 7, cacheRead: 3, cacheWrite: 2, cost: 0.25, contextTokens: 99, turns: 2 };
+    const d = buildSubagentDetails("single", "spawn", null, [makeResult({
+      messages: [makeTextMessage("persist me")],
+      usage,
+      toolCalls: { read: 2 },
+      model: "gpt-test",
+      completedTurns: 2,
+    })]);
+    const parsed = JSON.parse(JSON.stringify(d));
+    assert.equal(parsed.results[0].finalOutput, "persist me");
+    assert.deepEqual(parsed.results[0].usage, usage);
+    assert.deepEqual(parsed.results[0].toolCalls, { read: 2 });
+    assert.equal(parsed.results[0].model, "gpt-test");
+    assert.equal(parsed.results[0].completedTurns, 2);
+    assert.equal(parsed.results[0].messages, undefined);
+  });
+
+  test("nested usage survives durable JSON round-trip and details rebuild", () => {
+    const childUsage = { input: 5, output: 4, cacheRead: 3, cacheWrite: 2, cost: 0.1, contextTokens: 10, turns: 1 };
+    const parentUsage = { input: 11, output: 7, cacheRead: 0, cacheWrite: 0, cost: 0.2, contextTokens: 20, turns: 1 };
+    const nestedDetails = buildSubagentDetails("single", "spawn", null, [makeResult({ usage: childUsage })]);
+    const parent = makeResult({
+      usage: parentUsage,
+      messages: [makeToolResultMessage("subagents", nestedDetails)],
+    });
+    const durable = JSON.parse(JSON.stringify(buildSubagentDetails("single", "spawn", null, [parent])));
+    const rebuilt = buildSubagentDetails("single", "spawn", null, durable.results);
+    assert.equal(rebuilt.usageSummary?.subagentCount, 2);
+    assert.equal(rebuilt.usageSummary?.inputTokens, 16);
+    assert.equal(rebuilt.usageSummary?.outputTokens, 11);
+    assert.ok(Math.abs((rebuilt.usageSummary?.costUsd ?? 0) - 0.3) < 1e-9);
   });
 
   test("durable details omit nested subagent transcript/tree and keep only summaries", () => {
@@ -503,12 +575,11 @@ describe("getNestedSubagentErrorSummary", () => {
     assert.ok(summary!.includes("it broke"));
   });
 
-  test("returns null when outer isError=false even if inner result failed", () => {
-    // getNestedSubagentErrorSummary only processes results where isError=true on the tool result msg
+  test("detects failed children even when an older outer result says isError=false", () => {
     const failedResult = makeResult({ exitCode: 1, agent: "failing-agent", errorMessage: "it broke" });
     const innerDetails = buildSubagentDetails("single", "spawn", null, [failedResult]);
-    const msg = makeToolResultMessage("subagent", innerDetails, false); // isError=false
+    const msg = makeToolResultMessage("subagent", innerDetails, false);
     const summary = getNestedSubagentErrorSummary([msg]);
-    assert.equal(summary, null);
+    assert.match(summary ?? "", /failing-agent.*it broke/);
   });
 });

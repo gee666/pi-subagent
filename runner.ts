@@ -8,6 +8,7 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { Message } from "@mariozechner/pi-ai";
 import type { AgentConfig } from "./agents.js";
@@ -15,11 +16,14 @@ import {
   type LiveLogEntry,
   type SingleResult,
   type SubagentDetails,
+  type SubagentUsageSummary,
   MAX_LIVE_LOG_ENTRIES,
   emptyUsage,
   extractToolCalls,
   getFinalOutput,
   getNestedSubagentErrorSummary,
+  isResultError,
+  isResultSuccess,
   isSubagentDetails,
   isSubagentToolName,
 } from "./types.js";
@@ -38,7 +42,7 @@ import {
 } from "./shared.js";
 
 const SIGKILL_TIMEOUT_MS = 5000;
-const HANG_GUARD_DELAY_MS = 5000;
+const RETRY_WAIT_GRACE_MS = 60_000;
 const DEFAULT_STARTUP_TIMEOUT_MS = 120_000; // only for startup (before first assistant turn)
 const SUBAGENT_STARTUP_TIMEOUT_ENV = "PI_SUBAGENT_STARTUP_TIMEOUT";
 // Once startup succeeds, a child can otherwise remain alive forever if Pi loses
@@ -57,16 +61,24 @@ const SUBAGENT_PI_COMMAND_ENV = "PI_SUBAGENT_PI_COMMAND";
 const SUBAGENT_PI_ARGS_PREFIX_ENV = "PI_SUBAGENT_PI_ARGS_PREFIX";
 const MAX_CAPTURED_STDERR_CHARS = 64_000;
 
-/**
- * Stop reasons that indicate the agent has truly finished its work.
- * "tool_use" is NOT terminal — the agent is still working (calling a tool).
- */
-// pi emits "stop" (and occasionally "end_turn") as the terminal reason; include both.
-// "toolUse"/"tool_use" are NOT terminal — the agent is still mid-turn calling a tool.
-const TERMINAL_STOP_REASONS = new Set(["end_turn", "stop", "max_tokens", "error", "stop_sequence"]);
-
-function isTerminalStopReason(reason: string | undefined): boolean {
-  return reason !== undefined && TERMINAL_STOP_REASONS.has(reason);
+function priorDescendantUsage(result: SingleResult | undefined): SubagentUsageSummary | undefined {
+  if (!result) return undefined;
+  if (result.priorDescendantUsageSummary) return { ...result.priorDescendantUsageSummary };
+  const subtree = result.subtreeUsageSummary;
+  if (!subtree) return undefined;
+  const own = result.usage ?? emptyUsage();
+  const descendants = {
+    subagentCount: Math.max(0, subtree.subagentCount - 1),
+    inputTokens: Math.max(0, subtree.inputTokens - own.input),
+    outputTokens: Math.max(0, subtree.outputTokens - own.output),
+    cacheReadTokens: Math.max(0, subtree.cacheReadTokens - own.cacheRead),
+    cacheWriteTokens: Math.max(0, subtree.cacheWriteTokens - own.cacheWrite),
+    costUsd: Math.max(0, subtree.costUsd - own.cost),
+    turns: Math.max(0, subtree.turns - own.turns),
+  };
+  return descendants.subagentCount > 0 || descendants.inputTokens > 0 || descendants.outputTokens > 0 || descendants.costUsd > 0
+    ? descendants
+    : undefined;
 }
 
 function appendBoundedStderr(result: SingleResult, text: string): void {
@@ -478,8 +490,12 @@ export function processJsonLine(line: string, result: SingleResult): boolean {
         result.usage.contextTokens = usage.totalTokens || 0;
       }
       if (msg.model && msg.model !== "synthetic-tool-call") result.model = msg.model;
-      if (msg.stopReason) result.stopReason = msg.stopReason;
-      if (msg.errorMessage) result.errorMessage = msg.errorMessage;
+      if (msg.stopReason) {
+        result.stopReason = msg.stopReason;
+        // A later successful retry supersedes the prior transport error. Keep
+        // only the error attached to the latest terminal assistant message.
+        result.errorMessage = msg.errorMessage || undefined;
+      }
     }
     return true;
   }
@@ -664,6 +680,8 @@ export interface RunAgentOptions {
   startupTimeoutMsOverride?: number;
   /** Test/debug override for post-startup semantic inactivity timeout. */
   idleTimeoutMsOverride?: number;
+  /** Test/debug override for graceful-stop to SIGKILL escalation. */
+  terminationTimeoutMsOverride?: number;
   /** Called once the child RPC process is ready to receive steering messages. */
   onHandle?: RunningSubagentStartedCallback;
 }
@@ -694,6 +712,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
     piCommandOverride,
     startupTimeoutMsOverride,
     idleTimeoutMsOverride,
+    terminationTimeoutMsOverride,
   } = opts;
 
   const agent = agents.find((a) => a.name === agentName);
@@ -738,6 +757,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
     liveToolExecutions: initialResult?.liveToolExecutions,
     liveLog: initialResult?.liveLog ? [...initialResult.liveLog] : [],
     liveNestedSubagents: initialResult?.liveNestedSubagents ? { ...initialResult.liveNestedSubagents } : undefined,
+    priorDescendantUsageSummary: priorDescendantUsage(initialResult),
     sessionDir,
   };
 
@@ -754,6 +774,19 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
   };
 
   emitUpdate();
+
+  // Enforce cycle prevention per task rather than rejecting an entire parallel
+  // call. Legal siblings can still run while the cyclic task returns a normal
+  // structured failure.
+  if (preventCycles && parentAgentStack.includes(agentName)) {
+    const stackText = parentAgentStack.length > 0 ? parentAgentStack.join(" -> ") : "(root)";
+    result.exitCode = 1;
+    result.stopReason = "error";
+    result.errorMessage = `Delegation cycle detected: agent "${agentName}" is already in the delegation stack (${stackText}).`;
+    result.stderr = result.errorMessage;
+    emitUpdate();
+    return result;
+  }
 
   // Write system prompt to temp file if needed
   let promptTmpDir: string | null = null;
@@ -817,17 +850,29 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       });
 
       let buffer = "";
+      const stdoutDecoder = new StringDecoder("utf8");
       let resolved = false;
-      let hangTimer: ReturnType<typeof setTimeout> | undefined;
       let startupTimer: ReturnType<typeof setTimeout> | undefined;
       let idleTimer: ReturnType<typeof setTimeout> | undefined;
+      let killTimer: ReturnType<typeof setTimeout> | undefined;
       let receivedFirstEvent = false;
+      let agentSettled = false;
       let forcedExitCode: number | undefined;
       let lastNestedProgressSignature: string | undefined;
       let abortHandler: (() => void) | undefined;
+      const promptRequestId = `pi-subagent-${process.pid}-${Date.now()}-${attempt}`;
+      let steeringRequest = 0;
 
-      const sendRpc = (command: Record<string, unknown>) => {
-        proc.stdin?.write(`${JSON.stringify(command)}\n`);
+      const sendRpc = (command: Record<string, unknown>): boolean => {
+        try {
+          if (!proc.stdin?.writable) return false;
+          proc.stdin.write(`${JSON.stringify(command)}\n`);
+          return true;
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          appendBoundedStderr(result, `[pi-subagent] RPC stdin write failed: ${message}\n`);
+          return false;
+        }
       };
 
       opts.onHandle?.({
@@ -839,11 +884,14 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
           // them to its own (grand)children. `session.prompt()` emits the
           // `input` event first and still queues the message as a steering
           // message while the child is streaming.
-          sendRpc({ type: "prompt", message, streamingBehavior: "steer" });
+          sendRpc({
+            id: `${promptRequestId}-steer-${++steeringRequest}`,
+            type: "prompt",
+            message,
+            streamingBehavior: "steer",
+          });
         },
       });
-
-      sendRpc({ type: "prompt", message: prompt });
 
       // Startup timeout: kill the process if it never produces its first
       // model-turn event. Once startup succeeds, the semantic-inactivity
@@ -859,11 +907,10 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       const doResolve = (code: number) => {
         if (resolved) return;
         resolved = true;
-        if (hangTimer) { clearTimeout(hangTimer); hangTimer = undefined; }
         if (startupTimer) { clearTimeout(startupTimer); startupTimer = undefined; }
         if (idleTimer) { clearTimeout(idleTimer); idleTimer = undefined; }
+        if (killTimer) { clearTimeout(killTimer); killTimer = undefined; }
         if (signal && abortHandler) signal.removeEventListener("abort", abortHandler);
-        if (buffer.trim()) flushLine(buffer);
         resolve(code);
       };
 
@@ -895,7 +942,8 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
 
       const forceStopAndSettle = (settleCode = forcedExitCode ?? 1) => {
         stopChild(false);
-        setTimeout(() => {
+        if (killTimer) clearTimeout(killTimer);
+        killTimer = setTimeout(() => {
           if (resolved) return;
           stopChild(true);
           // Never depend exclusively on a close event from a wedged child.
@@ -904,12 +952,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
           proc.stderr?.destroy();
           proc.unref();
           doResolve(settleCode);
-        }, SIGKILL_TIMEOUT_MS);
-      };
-
-      /** Cancel the terminal-stop hang guard when new work appears. */
-      const cancelHangGuard = () => {
-        if (hangTimer) { clearTimeout(hangTimer); hangTimer = undefined; }
+        }, terminationTimeoutMsOverride ?? SIGKILL_TIMEOUT_MS);
       };
 
       const idleTimeoutMs = (() => {
@@ -920,64 +963,71 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
         return parsed !== null ? parsed : DEFAULT_IDLE_TIMEOUT_MS;
       })();
 
-      const noteSemanticActivity = () => {
+      const noteSemanticActivity = (minimumQuietPeriodMs = 0) => {
         if (!receivedFirstEvent || idleTimeoutMs === 0 || resolved) return;
         if (idleTimer) clearTimeout(idleTimer);
+        const quietPeriodMs = Math.max(idleTimeoutMs, minimumQuietPeriodMs);
         idleTimer = setTimeout(() => {
           if (resolved) return;
-          const message = `Subagent inactivity timeout: no new RPC activity for ${idleTimeoutMs}ms.`;
+          const message = `Subagent inactivity timeout: no new RPC activity for ${quietPeriodMs}ms.`;
           forcedExitCode = 1;
           result.stopReason = "error";
           result.errorMessage = message;
           appendBoundedStderr(result, `\n[pi-subagent] Killed: ${message}`);
           emitUpdate();
           forceStopAndSettle();
-        }, idleTimeoutMs);
-      };
-
-      /**
-       * Schedule a hang guard: if the child process produced a terminal
-       * stopReason (agent finished) but doesn't exit on its own (due to
-       * open handles like MCP connections, dangling timers, etc.),
-       * force-kill it so the parent doesn't hang forever.
-       *
-       * The guard is reset on every new activity and only armed for
-       * truly terminal stop reasons (not "tool_use").
-       */
-      const scheduleHangGuard = () => {
-        if (resolved) return;
-        cancelHangGuard();
-        hangTimer = setTimeout(() => {
-          if (resolved) return;
-          // Process produced all output but won't exit — force-kill its tree.
-          forceStopAndSettle(forcedExitCode ?? 0);
-        }, HANG_GUARD_DELAY_MS);
+        }, quietPeriodMs);
       };
 
       const flushLine = (line: string) => {
         let event: any;
         try { event = JSON.parse(line); } catch { event = null; }
-        if (event?.type === "agent_end") {
-          if (result.exitCode === -1) result.exitCode = forcedExitCode ?? 0;
-          stopChild(false);
-          doResolve(forcedExitCode ?? 0);
+
+        if (
+          event?.type === "response" &&
+          event.id === promptRequestId &&
+          event.command === "prompt"
+        ) {
+          if (event.success !== true) {
+            const message = `Subagent prompt rejected: ${typeof event.error === "string" ? event.error : "unknown RPC error"}`;
+            forcedExitCode = 1;
+            result.stopReason = "error";
+            result.errorMessage = message;
+            appendBoundedStderr(result, `[pi-subagent] ${message}\n`);
+            forceStopAndSettle(1);
+          }
           return;
         }
+
+        // agent_end is only a low-level run boundary. Pi may now auto-retry,
+        // compact-and-retry, or process a queued continuation. Killing here was
+        // the direct cause of the WebSocket failures in the inspected session.
+        if (event?.type === "agent_end") {
+          noteSemanticActivity(
+            event.willRetry === true ? RETRY_WAIT_GRACE_MS : 0,
+          );
+          return;
+        }
+
+        if (event?.type === "agent_settled") {
+          agentSettled = true;
+          if (result.stopReason === "length" && !result.errorMessage) {
+            result.errorMessage = "Subagent output was incomplete because the model reached its output limit.";
+          }
+          const settledCode = forcedExitCode ?? (isResultError({ ...result, exitCode: 0 }) ? 1 : 0);
+          // RPC mode remains alive waiting for more commands. Terminate its
+          // process tree, but do not report completion until close (or bounded
+          // SIGKILL escalation) confirms it stopped.
+          forceStopAndSettle(settledCode);
+          return;
+        }
+
         const accepted = processJsonLine(line, result);
         if (accepted) {
           // Cancel the startup timer as soon as the subprocess proves it has
           // reached the LLM-call phase. Two conditions qualify:
-          //   1. A turn has started (turn_start sets turnInProgress=true) —
-          //      the subprocess has initialised, loaded all extensions (including
-          //      MCP adapters), and sent its first request to the LLM.  The LLM
-          //      may now take any amount of time to respond (especially with
-          //      extended thinking enabled) and must NOT be killed by the startup
-          //      timer.
-          //   2. A complete assistant turn has arrived (turns > 0) — the LLM
-          //      already responded; startup trivially succeeded.
-          // User message echoes alone (before turn_start) don't qualify:
-          // the process could still stall before dispatching the LLM call,
-          // e.g. in a hanging before_agent_start extension hook.
+          //   1. A turn has started (turn_start sets turnInProgress=true).
+          //   2. A complete assistant turn has arrived (turns > 0).
           if (!receivedFirstEvent && (result.usage.turns > 0 || result.turnInProgress)) {
             receivedFirstEvent = true;
             if (startupTimer) { clearTimeout(startupTimer); startupTimer = undefined; }
@@ -994,22 +1044,24 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
           }
           if (semanticActivity) noteSemanticActivity();
           emitUpdate();
-          // Any accepted message means the child is alive and producing
-          // output — cancel any pending hang guard so we don't kill it
-          // while it's still working (e.g. during tool execution).
-          cancelHangGuard();
-          // Only arm the hang guard when the agent has truly finished.
-          // "tool_use" means the agent is still working — NOT terminal.
-          if (isTerminalStopReason(result.stopReason)) {
-            scheduleHangGuard();
+        } else if (receivedFirstEvent) {
+          if (event?.type === "message_update" || event?.type === "tool_execution_update") {
+            // Streaming deltas are intentionally not retained in result.messages,
+            // but they prove the model/tool is still making real progress.
+            noteSemanticActivity();
+          } else if (event?.type === "auto_retry_start") {
+            const delayMs = Number.isFinite(event.delayMs) ? Math.max(0, Number(event.delayMs)) : 0;
+            noteSemanticActivity(delayMs + RETRY_WAIT_GRACE_MS);
+          } else if (
+            event?.type === "auto_retry_end" ||
+            event?.type === "compaction_start" ||
+            event?.type === "compaction_end" ||
+            event?.type === "summarization_retry_scheduled" ||
+            event?.type === "summarization_retry_attempt_start" ||
+            event?.type === "summarization_retry_finished"
+          ) {
+            noteSemanticActivity();
           }
-        } else if (
-          receivedFirstEvent &&
-          (event?.type === "message_update" || event?.type === "tool_execution_update")
-        ) {
-          // Streaming deltas are intentionally not retained in result.messages,
-          // but they prove the model/tool is still making real progress.
-          noteSemanticActivity();
         }
       };
 
@@ -1021,7 +1073,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
         startupTimer = setTimeout(() => {
           if (resolved || receivedFirstEvent) return;
           startupTimedOut = true;
-          const message = `Subagent startup timeout: no JSON output after ${startupTimeoutMs}ms.`;
+          const message = `Subagent startup timeout: no model turn after ${startupTimeoutMs}ms.`;
           forcedExitCode = 1;
           result.stopReason = "error";
           result.errorMessage = message;
@@ -1031,10 +1083,16 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       }
 
       proc.stdout.on("data", (chunk: Buffer) => {
-        buffer += chunk.toString();
+        buffer += stdoutDecoder.write(chunk);
         const lines = buffer.split("\n");
         buffer = lines.pop() || "";
-        for (const line of lines) flushLine(line);
+        for (let line of lines) {
+          if (line.endsWith("\r")) line = line.slice(0, -1);
+          flushLine(line);
+        }
+      });
+      proc.stdout.on("end", () => {
+        buffer += stdoutDecoder.end();
       });
 
       let stderrBuffer = "";
@@ -1064,18 +1122,47 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
         stderrBuffer = "";
       };
 
-      proc.on("close", (code) => {
+      const classifyUnexpectedExit = (code: number | null, exitSignal: NodeJS.Signals | null): number => {
+        if (forcedExitCode !== undefined) return forcedExitCode;
+        if (agentSettled) return isResultError({ ...result, exitCode: 0 }) ? 1 : (code ?? 0);
+
+        const message = exitSignal
+          ? `Subagent process exited from signal ${exitSignal} before agent_settled.`
+          : `Subagent process exited with code ${code ?? "null"} before agent_settled.`;
+        result.stopReason = "error";
+        result.errorMessage = message;
+        appendBoundedStderr(result, `[pi-subagent] ${message}\n`);
+        return code !== null && code !== 0 ? code : 1;
+      };
+
+      const flushRemainingStdout = () => {
+        if (!buffer.trim()) return;
+        const line = buffer.endsWith("\r") ? buffer.slice(0, -1) : buffer;
+        buffer = "";
+        flushLine(line);
+      };
+
+      proc.on("close", (code, exitSignal) => {
+        flushRemainingStdout();
         flushRemainingStderr();
-        doResolve(forcedExitCode ?? code ?? 0);
+        if (!resolved) doResolve(classifyUnexpectedExit(code, exitSignal));
       });
 
-      proc.on("exit", (code) => {
-        // If the process exits, resolve as soon as possible.
-        // Give a tiny grace period for any remaining buffered stdout data.
-        setTimeout(() => {
-          flushRemainingStderr();
-          doResolve(forcedExitCode ?? code ?? 0);
-        }, 100);
+      proc.on("exit", (code, exitSignal) => {
+        if (resolved) return;
+        // `close` waits for stdio. A descendant can inherit stdout and keep it
+        // open after the immediate Pi process exits, so bound that drain while
+        // still allowing normal buffered JSONL to arrive before settlement.
+        forceStopAndSettle(classifyUnexpectedExit(code, exitSignal));
+      });
+
+      proc.stdin?.on("error", (err) => {
+        if (resolved) return;
+        forcedExitCode = 1;
+        result.stopReason = "error";
+        result.errorMessage = `Subagent RPC stdin failed: ${err.message}`;
+        appendBoundedStderr(result, `[pi-subagent] ${result.errorMessage}\n`);
+        forceStopAndSettle(1);
       });
 
       proc.on("error", (err) => {
@@ -1094,6 +1181,13 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
         };
         if (signal.aborted) abortHandler();
         else signal.addEventListener("abort", abortHandler, { once: true });
+      }
+
+      if (!wasAborted && !resolved && !sendRpc({ id: promptRequestId, type: "prompt", message: prompt })) {
+        forcedExitCode = 1;
+        result.stopReason = "error";
+        result.errorMessage = "Failed to write the initial prompt to the subagent RPC process.";
+        forceStopAndSettle(1);
       }
       });
 
@@ -1117,6 +1211,13 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
 
     result.exitCode = exitCode;
     result.toolCalls = extractToolCalls(result.messages); // populate from parsed messages
+    if (result.exitCode === 0 && isResultError(result)) {
+      result.exitCode = 1;
+    }
+    if (result.stopReason === "length" && !result.errorMessage) {
+      result.errorMessage = "Subagent output was incomplete because the model reached its output limit.";
+      if (!result.stderr.trim()) result.stderr = result.errorMessage;
+    }
     if (wasAborted) {
       result.exitCode = 130;
       result.stopReason = "aborted";
@@ -1196,6 +1297,7 @@ export async function executeParallelSubprocess(
 ): Promise<{
   content: Array<{ type: "text"; text: string }>;
   details: SubagentDetails;
+  isError?: boolean;
 }> {
   const maxParallelTasksRaw = process.env[SUBAGENT_MAX_PARALLEL_TASKS_ENV];
   const maxParallelTasksParsed = parseNonNegativeInt(maxParallelTasksRaw);
@@ -1224,6 +1326,7 @@ export async function executeParallelSubprocess(
         },
       ],
       details: makeDetails([]),
+      isError: true,
     };
   }
 
@@ -1270,7 +1373,7 @@ export async function executeParallelSubprocess(
   try {
     results = await mapConcurrent(tasks, maxConcurrency, async (t, index) => {
       const previousResult = resumeResults?.[index];
-      if (previousResult?.exitCode === 0) {
+      if (previousResult && isResultSuccess(previousResult)) {
         allResults[index] = previousResult;
         emitProgress();
         return previousResult;
@@ -1321,11 +1424,15 @@ export async function executeParallelSubprocess(
     if (heartbeat) clearInterval(heartbeat);
   }
 
-  const successCount = results.filter((r) => r.exitCode === 0).length;
+  const successCount = results.filter(isResultSuccess).length;
   const summaries = results.map((r) => {
-    const output = getFinalOutput(r.messages, r.finalOutput);
+    const succeeded = isResultSuccess(r);
+    const output = succeeded
+      ? getFinalOutput(r.messages, r.finalOutput)
+      : r.errorMessage || r.stderr || getFinalOutput(r.messages, r.finalOutput);
     const nameTag = r.name ? ` • name: ${r.name}` : "";
-    return `[${r.agent}${nameTag}] ${r.exitCode === 0 ? "completed" : "failed"}: ${output || "(no output)"}`;
+    const status = succeeded ? "completed" : r.exitCode === -1 ? "unfinished" : "failed";
+    return `[${r.agent}${nameTag}] ${status}: ${output || "(no output)"}`;
   });
 
   return {
@@ -1336,5 +1443,6 @@ export async function executeParallelSubprocess(
       },
     ],
     details: makeDetails(results),
+    ...(successCount === results.length ? {} : { isError: true }),
   };
 }

@@ -70,7 +70,6 @@ declare module "@mariozechner/pi-agent-core" {
   export interface AgentToolResult<TDetails = unknown> {
     content: Array<{ type: string; text?: string }>;
     details?: TDetails;
-    isError?: boolean;
   }
 }
 

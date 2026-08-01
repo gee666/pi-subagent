@@ -40,7 +40,8 @@ function finish() {
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { total: 0 } },
   };
   process.stdout.write(JSON.stringify({ type: "message_end", message: msg }) + "\\n");
-  process.stdout.write(JSON.stringify({ type: "agent_end" }) + "\\n");
+  process.stdout.write(JSON.stringify({ type: "agent_end", willRetry: false }) + "\\n");
+  process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
 }
 process.stdin.on("data", (d) => {
   buf += d.toString();

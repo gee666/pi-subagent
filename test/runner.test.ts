@@ -538,7 +538,7 @@ describe("runAgent resilience", () => {
 
     assert.equal(result.exitCode, 1);
     assert.equal(result.stopReason, "error");
-    assert.match(result.errorMessage ?? "", /resume made no progress/i);
+    assert.match(result.errorMessage ?? "", /before agent_settled/i);
   });
 
   test("startup timeout kills a hung process and returns a result", async () => {
