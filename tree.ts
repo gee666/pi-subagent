@@ -13,6 +13,7 @@ import {
 	type LiveLogEntry,
 	type NestedSubagentResult,
 	type SingleResult,
+	MAX_LIVE_LOG_ENTRIES,
 	type SubagentDetails,
 	type UsageStats,
 	aggregateUsage,
@@ -65,17 +66,32 @@ interface PendingSubagentCall {
 // Formatting helpers
 // ---------------------------------------------------------------------------
 
+function asRecord(value: unknown): Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value)
+		? value as Record<string, unknown>
+		: {};
+}
+
+function finiteNumber(value: unknown): number {
+	return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function stringValue(value: unknown, fallback = ""): string {
+	return typeof value === "string" ? value : fallback;
+}
+
 export function formatClockTime(epochMs: number): string {
-	const d = new Date(epochMs);
+	const d = new Date(Number.isFinite(epochMs) ? epochMs : 0);
 	const pad = (n: number) => String(n).padStart(2, "0");
 	return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
 export function formatTokens(count: number): string {
-	if (count < 1000) return count.toString();
-	if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
-	if (count < 1000000) return `${Math.round(count / 1000)}k`;
-	return `${(count / 1000000).toFixed(1)}M`;
+	const safeCount = finiteNumber(count);
+	if (safeCount < 1000) return safeCount.toString();
+	if (safeCount < 10000) return `${(safeCount / 1000).toFixed(1)}k`;
+	if (safeCount < 1000000) return `${Math.round(safeCount / 1000)}k`;
+	return `${(safeCount / 1000000).toFixed(1)}M`;
 }
 
 export function formatCombinedUsageStatusLine(
@@ -95,36 +111,41 @@ export function formatCombinedUsageStatusLine(
 	return `WITH SUBS: (${subagentCount}) Σ $${cost.toFixed(4)} • ↑${formatTokens(input)} ↓${formatTokens(output)}${cache} T${formatTokens(total)} • ${turns} turn${turns === 1 ? "" : "s"}`;
 }
 
-export function formatUsage(usage: Partial<UsageStats>, model?: string): string {
+export function formatUsage(usage: Partial<UsageStats> | unknown, model?: unknown): string {
+	const safeUsage = asRecord(usage);
+	const input = finiteNumber(safeUsage.input);
+	const output = finiteNumber(safeUsage.output);
+	const cacheRead = finiteNumber(safeUsage.cacheRead);
+	const cacheWrite = finiteNumber(safeUsage.cacheWrite);
+	const cost = finiteNumber(safeUsage.cost);
+	const contextTokens = finiteNumber(safeUsage.contextTokens);
+	const turns = finiteNumber(safeUsage.turns);
 	const parts: string[] = [];
-	const totalTokens =
-		(usage.input || 0) +
-		(usage.output || 0) +
-		(usage.cacheRead || 0) +
-		(usage.cacheWrite || 0);
-	if (usage.turns) parts.push(`${usage.turns} turn${usage.turns > 1 ? "s" : ""}`);
+	const totalTokens = input + output + cacheRead + cacheWrite;
+	if (turns) parts.push(`${turns} turn${turns > 1 ? "s" : ""}`);
 	if (totalTokens > 0) parts.push(`tok:${formatTokens(totalTokens)}`);
-	if (usage.input) parts.push(`in:${formatTokens(usage.input)}`);
-	if (usage.output) parts.push(`out:${formatTokens(usage.output)}`);
-	if (usage.cacheRead) parts.push(`cacheR:${formatTokens(usage.cacheRead)}`);
-	if (usage.cacheWrite) parts.push(`cacheW:${formatTokens(usage.cacheWrite)}`);
-	if (usage.cost) parts.push(`$${usage.cost.toFixed(4)}`);
-	if (usage.contextTokens && usage.contextTokens > 0) parts.push(`ctx:${formatTokens(usage.contextTokens)}`);
-	if (model) parts.push(model);
+	if (input) parts.push(`in:${formatTokens(input)}`);
+	if (output) parts.push(`out:${formatTokens(output)}`);
+	if (cacheRead) parts.push(`cacheR:${formatTokens(cacheRead)}`);
+	if (cacheWrite) parts.push(`cacheW:${formatTokens(cacheWrite)}`);
+	if (cost) parts.push(`$${cost.toFixed(4)}`);
+	if (contextTokens > 0) parts.push(`ctx:${formatTokens(contextTokens)}`);
+	if (typeof model === "string" && model) parts.push(model);
 	return parts.join(" • ");
 }
 
-export function truncate(text: string, maxLen: number): string {
-	return text.length > maxLen ? `${text.slice(0, maxLen)}...` : text;
+export function truncate(text: unknown, maxLen: number): string {
+	const safeText = stringValue(text);
+	return safeText.length > maxLen ? `${safeText.slice(0, maxLen)}...` : safeText;
 }
 
-function splitOutputLines(text: string): string[] {
-	const lines = text.replace(/\r\n?/g, "\n").split("\n");
+function splitOutputLines(text: unknown): string[] {
+	const lines = stringValue(text).replace(/\r\n?/g, "\n").split("\n");
 	if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
 	return lines;
 }
 
-function lastNonEmptyLines(text: string, limit: number): string[] {
+function lastNonEmptyLines(text: unknown, limit: number): string[] {
 	return splitOutputLines(text)
 		.map((line) => line.trimEnd())
 		.filter((line) => line.trim().length > 0)
@@ -173,11 +194,12 @@ export function hasNestedChildren(nodes: TreeNode[]): boolean {
 	return nodes.some((node) => node.children.length > 0 || hasNestedChildren(node.children));
 }
 
-function extractPendingSubagentCalls(messages: SingleResult["messages"]): PendingSubagentCall[] {
+function extractPendingSubagentCalls(messages: SingleResult["messages"] | unknown): PendingSubagentCall[] {
+	const history = Array.isArray(messages) ? messages : [];
 	const calls: PendingSubagentCall[] = [];
-	for (let messageIndex = 0; messageIndex < messages.length; messageIndex++) {
-		const message = messages[messageIndex] as any;
-		if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+	for (let messageIndex = 0; messageIndex < history.length; messageIndex++) {
+		const message = history[messageIndex] as any;
+		if (message?.role !== "assistant" || !Array.isArray(message.content)) continue;
 		for (let partIndex = 0; partIndex < message.content.length; partIndex++) {
 			const part = message.content[partIndex] as any;
 			if (part?.type !== "toolCall" || !isSubagentToolName(part?.name)) continue;
@@ -235,11 +257,16 @@ function subagentCallSignature(call: PendingSubagentCall): string {
 
 function nestedResultIsHealthy(nested: NestedSubagentResult | undefined): boolean {
 	if (!nested || nested.isError) return false;
-	return nested.details.results.every((result) => !isResultError(result));
+	return nested.details.results.every(
+		(result) => result !== null && typeof result === "object" && !Array.isArray(result) && !isResultError(result),
+	);
 }
 
 function buildLiveDetailsSignature(details: SubagentDetails): string {
-	return JSON.stringify(details.results.map((result) => ({ agent: result.agent, task: result.task ?? "" })));
+	return JSON.stringify(details.results.map((result) => {
+		const value = asRecord(result);
+		return { agent: stringValue(value.agent), task: stringValue(value.task) };
+	}));
 }
 
 function findLiveNestedDetailsForCall(
@@ -276,7 +303,9 @@ function findLiveNestedDetailsForCall(
 	const agentSignature = JSON.stringify(call.tasks.map((task) => task.agent));
 	for (const [key, details] of Object.entries(live)) {
 		if (usedLiveKeys.has(key) || !isSubagentDetails(details)) continue;
-		const liveAgentSignature = JSON.stringify(details.results.map((nestedResult) => nestedResult.agent));
+		const liveAgentSignature = JSON.stringify(
+			details.results.map((nestedResult) => stringValue(asRecord(nestedResult).agent)),
+		);
 		if (liveAgentSignature !== agentSignature) continue;
 		usedLiveKeys.add(key);
 		return details;
@@ -339,38 +368,53 @@ function buildNestedChildren(result: SingleResult): TreeNode[] {
 	return nodes;
 }
 
-function formatToolArgPreview(toolName: string, args: Record<string, unknown>): string {
-	const shorten = (p: string) => {
+function formatToolArgPreview(toolName: unknown, rawArgs: unknown): string {
+	const args = asRecord(rawArgs);
+	const shorten = (value: unknown) => {
+		const p = stringValue(value);
 		const home = os.homedir();
 		return p.startsWith(home) ? `~${p.slice(home.length)}` : p;
 	};
-	const truncateTo = (s: string, n: number) =>
-		s.length > n ? s.slice(0, n) + "\u2026" : s;
+	const truncateTo = (value: unknown, n: number) => {
+		const text = stringValue(value);
+		return text.length > n ? text.slice(0, n) + "\u2026" : text;
+	};
 
 	switch (toolName) {
-		case "bash": {
-			const cmd = (args.command as string) || "";
-			return truncateTo(cmd.replace(/\s+/g, " "), 52);
-		}
+		case "bash":
+			return truncateTo(stringValue(args.command).replace(/\s+/g, " "), 52);
 		case "read":
 		case "write":
 		case "edit":
-			return shorten(truncateTo((args.path ?? args.file_path ?? "") as string, 52));
-		case "grep":
-			return truncateTo(`/${args.pattern}/`, 30) +
-				   (args.path ? ` in ${shorten(args.path as string)}` : "");
-		case "find":
-			return truncateTo((args.pattern ?? "*") as string, 30) +
-				   (args.path ? ` in ${shorten(args.path as string)}` : "");
+			return shorten(truncateTo(args.path ?? args.file_path, 52));
+		case "grep": {
+			const pattern = stringValue(args.pattern);
+			const target = stringValue(args.path);
+			return truncateTo(`/${pattern}/`, 30) + (target ? ` in ${shorten(target)}` : "");
+		}
+		case "find": {
+			const pattern = stringValue(args.pattern, "*");
+			const target = stringValue(args.path);
+			return truncateTo(pattern, 30) + (target ? ` in ${shorten(target)}` : "");
+		}
 		case "subagent":
 		case "subagents": {
-			const tasks = (args.tasks as any[]) ?? [];
-			return tasks.map((t: any) => t.agent).join(", ");
+			const tasks = Array.isArray(args.tasks) ? args.tasks : [];
+			return tasks
+				.map((task) => stringValue(asRecord(task).agent))
+				.filter(Boolean)
+				.join(", ");
 		}
 		case "resume_subagents": {
-			const raw = (args as any).resumes;
-			const resumes = Array.isArray(raw) ? raw : raw ? [raw] : [];
-			return resumes.map((r: any) => r?.subagent ?? r?.name).filter(Boolean).join(", ");
+			const raw = args.resumes;
+			const resumes = Array.isArray(raw) ? raw : raw && typeof raw === "object" ? [raw] : [];
+			return resumes
+				.map((resume) => {
+					const item = asRecord(resume);
+					return stringValue(item.subagent) || stringValue(item.name);
+				})
+				.filter(Boolean)
+				.join(", ");
 		}
 		default:
 			return "";
@@ -381,12 +425,14 @@ export function formatLiveLogEntry(
 	entry: LiveLogEntry,
 	theme: { fg: ThemeFg },
 ): string {
-	const stamp = entry.at !== undefined ? theme.fg("dim", formatClockTime(entry.at)) + " " : "";
-	return stamp + formatLiveLogEntryBody(entry, theme);
+	const value = asRecord(entry);
+	const at = typeof value.at === "number" && Number.isFinite(value.at) ? value.at : undefined;
+	const stamp = at !== undefined ? theme.fg("dim", formatClockTime(at)) + " " : "";
+	return stamp + formatLiveLogEntryBody(value, theme);
 }
 
 function formatLiveLogEntryBody(
-	entry: LiveLogEntry,
+	entry: Record<string, unknown>,
 	theme: { fg: ThemeFg },
 ): string {
 	switch (entry.kind) {
@@ -394,24 +440,28 @@ function formatLiveLogEntryBody(
 			return theme.fg("muted", "\u27f3") + " " + theme.fg("dim", "thinking\u2026");
 
 		case "turn_end": {
-			const tokens = entry.inputTokens || entry.outputTokens
+			const inputTokens = finiteNumber(entry.inputTokens);
+			const outputTokens = finiteNumber(entry.outputTokens);
+			const tokens = inputTokens || outputTokens
 				? " " + theme.fg("dim",
-					`\u2191${formatTokens(entry.inputTokens)} \u2193${formatTokens(entry.outputTokens)}`)
+					`\u2191${formatTokens(inputTokens)} \u2193${formatTokens(outputTokens)}`)
 				: "";
+			const turn = finiteNumber(entry.turn);
 			return (
 				theme.fg("success", "\u2713") +
 				" " +
-				theme.fg("muted", `turn ${entry.turn}`) +
+				theme.fg("muted", `turn ${turn}`) +
 				tokens
 			);
 		}
 
 		case "tool_start": {
-			const argPreview = formatToolArgPreview(entry.toolName, entry.args);
+			const toolName = stringValue(entry.toolName, "unknown tool");
+			const argPreview = formatToolArgPreview(toolName, entry.args);
 			return (
 				theme.fg("muted", "\u2192") +
 				" " +
-				theme.fg("accent", entry.toolName) +
+				theme.fg("accent", toolName) +
 				(argPreview ? "  " + theme.fg("dim", argPreview) : "")
 			);
 		}
@@ -420,8 +470,11 @@ function formatLiveLogEntryBody(
 			return (
 				theme.fg("success", "\u2713") +
 				" " +
-				theme.fg("accent", entry.toolName)
+				theme.fg("accent", stringValue(entry.toolName, "unknown tool"))
 			);
+
+		default:
+			return theme.fg("muted", "activity");
 	}
 }
 
@@ -482,33 +535,64 @@ function loadMessagesFromSession(sessionDir: string | undefined): SingleResult["
 }
 
 function hydrateResultFromSession(result: SingleResult): SingleResult {
-	if (result.messages?.length > 0) return result;
-	const messages = loadMessagesFromSession(result.sessionDir);
-	return messages.length > 0 ? { ...result, messages } : result;
+	if (Array.isArray(result.messages) && result.messages.length > 0) return result;
+	const messages = loadMessagesFromSession(
+		typeof result.sessionDir === "string" ? result.sessionDir : undefined,
+	);
+	if (messages.length > 0) return { ...result, messages };
+	return Array.isArray(result.messages) ? result : { ...result, messages: [] };
 }
 
-function buildResultNode(result: SingleResult): TreeNode {
-	result = hydrateResultFromSession(result);
+function buildResultNode(rawResult: SingleResult): TreeNode {
+	let result: SingleResult;
+	if (
+		rawResult !== null &&
+		typeof rawResult === "object" &&
+		!Array.isArray(rawResult) &&
+		typeof rawResult.agent === "string" &&
+		typeof rawResult.exitCode === "number"
+	) {
+		result = hydrateResultFromSession(rawResult);
+	} else {
+		result = {
+			agent: "unknown agent",
+			agentSource: "unknown",
+			task: "",
+			exitCode: 1,
+			messages: [],
+			stderr: "Malformed subagent result.",
+			usage: {} as UsageStats,
+			toolCalls: {},
+			completedTurns: 0,
+			turnInProgress: false,
+			liveLog: [],
+		};
+	}
 	const status = statusFromResult(result);
-	const usage = formatUsage(result.usage ?? {}, result.model);
+	const usage = formatUsage(result.usage, result.model);
 	const metaParts: string[] = [];
-	if (result.name) metaParts.push(result.name);
-	metaParts.push(result.agentSource);
+	if (typeof result.name === "string" && result.name) metaParts.push(result.name);
+	if (typeof result.agentSource === "string" && result.agentSource) metaParts.push(result.agentSource);
 	if (usage) metaParts.push(usage);
 	if (status === "error") {
 		const errorText = result.errorMessage || result.stderr || result.stopReason;
-		if (errorText) metaParts.push(truncate(errorText.replace(/\s+/g, " "), 120));
+		if (typeof errorText === "string" && errorText) {
+			metaParts.push(truncate(errorText.replace(/\s+/g, " "), 120));
+		}
 	}
 
 	const children = buildNestedChildren(result);
 	const isRunning = status === "running";
+	const liveLog = Array.isArray(result.liveLog) ? result.liveLog : [];
 	return {
-		label: result.agent,
+		label: stringValue(result.agent, "unknown agent"),
 		status,
 		meta: metaParts.join(" • "),
-		task: result.task,
-		startedAt: result.startedAt,
-		liveActivity: isRunning && (result.liveLog?.length ?? 0) > 0 ? result.liveLog : undefined,
+		task: typeof result.task === "string" ? result.task : undefined,
+		startedAt: typeof result.startedAt === "number" && Number.isFinite(result.startedAt)
+			? result.startedAt
+			: undefined,
+		liveActivity: isRunning && liveLog.length > 0 ? liveLog.slice(-MAX_LIVE_LOG_ENTRIES) : undefined,
 		outputPreview: !isRunning && children.length === 0 ? buildLeafPreview(result) : undefined,
 		children,
 	};
@@ -567,8 +651,11 @@ export function renderTreeLines(
 export function topLevelSummary(details: SubagentDetails, counts: TreeCounts): string {
 	// aggregatedUsage includes own agents + all their nested descendants;
 	// fall back to summing only direct results for old serialised data lacking the field.
+	const safeResults = details.results.filter(
+		(result): result is SingleResult => result !== null && typeof result === "object" && !Array.isArray(result),
+	);
 	const totalUsage = formatUsage(
-		usageSummaryToUsageStats(details.usageSummary) ?? details.aggregatedUsage ?? aggregateUsage(details.results),
+		usageSummaryToUsageStats(details.usageSummary) ?? details.aggregatedUsage ?? aggregateUsage(safeResults),
 	);
 	const parts = [
 		`${counts.running} running`,

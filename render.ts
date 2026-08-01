@@ -7,12 +7,19 @@
  */
 
 import { Container, Spacer, Text } from "@mariozechner/pi-tui";
-import type { SubagentDetails } from "./types.js";
+import {
+	MAX_LIVE_LOG_ENTRIES,
+	isResultError,
+	isSubagentDetails,
+	type SingleResult,
+	type SubagentDetails,
+} from "./types.js";
 import {
 	type ThemeFg,
 	buildTopLevelNodes,
 	countNodes,
 	formatClockTime,
+	formatLiveLogEntry,
 	hasNestedChildren,
 	renderTreeLines,
 	setBroadcastNumberingActive,
@@ -122,37 +129,119 @@ export function renderResumeCall(
 // renderResult — shown after the tool completes / streams updates
 // ---------------------------------------------------------------------------
 
-export function renderResult(
-	result: { content: Array<{ type: string; text?: string }>; details?: unknown },
-	_expanded: boolean,
-	theme: { fg: ThemeFg; bold: (s: string) => string },
-): Container | Text {
-	const details = result.details as SubagentDetails | undefined;
-	if (!details || details.results.length === 0) {
-		const first = result.content[0];
-		return new Text(first?.type === "text" && first.text ? first.text : "(no output)", 0, 0);
+function getResultText(
+	result: { content?: Array<{ type: string; text?: string }> },
+): string {
+	const first = Array.isArray(result.content) ? result.content[0] : undefined;
+	return first?.type === "text" && typeof first.text === "string" && first.text
+		? first.text
+		: "(no output)";
+}
+
+function compactText(text: string, maxLength = 240): string {
+	const firstLine = text.replace(/\r\n?/g, "\n").split("\n").find((line) => line.trim()) ?? "(no output)";
+	return truncate(firstLine, maxLength);
+}
+
+function isRenderableResult(value: unknown): value is SingleResult {
+	return value !== null &&
+		typeof value === "object" &&
+		!Array.isArray(value) &&
+		typeof (value as Partial<SingleResult>).agent === "string" &&
+		typeof (value as Partial<SingleResult>).exitCode === "number";
+}
+
+function getCollapsedResultText(details: SubagentDetails, fallbackText: string): string {
+	const results = details.results.filter(isRenderableResult);
+	if (results.length === 0) return compactText(fallbackText);
+
+	const running = results.filter((item) => item.exitCode === -1).length;
+	const finished = results.length - running;
+	const succeeded = results.filter((item) => item.exitCode === 0 && !isResultError(item)).length;
+	const failed = finished - succeeded;
+
+	if (details.mode === "parallel") {
+		return running > 0
+			? `Parallel: ${finished}/${results.length} done, ${running} running...`
+			: `Parallel: ${succeeded}/${results.length} succeeded${failed > 0 ? `, ${failed} failed` : ""}`;
 	}
 
-	const nodes = buildTopLevelNodes(details);
-	const counts = countNodes(nodes);
-	const showOutputPreview = !hasNestedChildren(nodes);
-	const icon = counts.running > 0
-		? theme.fg("warning", "⏳")
-		: counts.error > 0
-			? theme.fg("error", "❌")
-			: theme.fg("success", "✅");
+	const item = results[0];
+	if (item.exitCode === -1) return `Agent ${item.agent}: running...`;
+	if (isResultError(item)) {
+		const reason = [item.errorMessage, item.stderr, item.stopReason]
+			.find((value): value is string => typeof value === "string" && value.length > 0);
+		return `Agent ${item.agent}: failed${reason ? ` — ${compactText(reason, 180)}` : ""}`;
+	}
+	return `Agent ${item.agent}: completed`;
+}
 
-	const container = new Container();
-	container.addChild(
-		new Text(
-			`${icon} ${theme.fg("toolTitle", theme.bold("subagent tree "))}${theme.fg("dim", topLevelSummary(details, counts))}`,
+export function renderResult(
+	result: { content: Array<{ type: string; text?: string }>; details?: unknown },
+	expanded: boolean,
+	theme: { fg: ThemeFg; bold: (s: string) => string },
+): Container | Text {
+	const fallbackText = getResultText(result);
+
+	// Keep the normal row compact. Ctrl+O switches to the live tree below.
+	if (!expanded) {
+		const text = isSubagentDetails(result.details)
+			? getCollapsedResultText(result.details, fallbackText)
+			: compactText(fallbackText);
+		return new Text(text, 0, 0);
+	}
+
+	if (!isSubagentDetails(result.details) || result.details.results.length === 0) {
+		return new Text(fallbackText, 0, 0);
+	}
+	const details: SubagentDetails = result.details;
+
+	try {
+		const nodes = buildTopLevelNodes(details);
+		const counts = countNodes(nodes);
+		const showOutputPreview = !hasNestedChildren(nodes);
+		const icon = counts.running > 0
+			? theme.fg("warning", "⏳")
+			: counts.error > 0
+				? theme.fg("error", "❌")
+				: theme.fg("success", "✅");
+
+		const container = new Container();
+		container.addChild(
+			new Text(
+				`${icon} ${theme.fg("toolTitle", theme.bold("subagent tree "))}${theme.fg("dim", topLevelSummary(details, counts))}`,
+				0,
+				0,
+			),
+		);
+
+		container.addChild(new Spacer(1));
+		container.addChild(new Text(renderTreeLines(nodes, theme, showOutputPreview).join("\n"), 0, 0));
+		return container;
+	} catch {
+		// Pi falls back to raw result.content when a custom renderer throws, which
+		// made Ctrl+O appear broken until the offending rolling log entry expired.
+		// Keep an expanded tree visible even for malformed third-party/RPC data.
+		const lines: string[] = [];
+		for (const item of details.results) {
+			const agent = typeof item?.agent === "string" ? item.agent : "unknown agent";
+			const icon = item?.exitCode === -1
+				? theme.fg("warning", "⏳")
+				: item?.exitCode === 0
+					? theme.fg("success", "✅")
+					: theme.fg("error", "❌");
+			lines.push(`${icon} ${theme.fg("accent", agent)}`);
+			const liveLog = Array.isArray(item?.liveLog)
+				? item.liveLog.slice(-MAX_LIVE_LOG_ENTRIES)
+				: [];
+			for (const entry of liveLog) {
+				lines.push(`  ${formatLiveLogEntry(entry, theme)}`);
+			}
+		}
+		return new Text(
+			`${theme.fg("toolTitle", theme.bold("subagent tree"))}\n${lines.join("\n") || fallbackText}`,
 			0,
 			0,
-		),
-	);
-
-	container.addChild(new Spacer(1));
-	container.addChild(new Text(renderTreeLines(nodes, theme, showOutputPreview).join("\n"), 0, 0));
-
-	return container;
+		);
+	}
 }

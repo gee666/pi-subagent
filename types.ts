@@ -204,7 +204,7 @@ function asMessageArray(messages: unknown): Message[] {
 export function extractToolCalls(messages: unknown): ToolCallCounts {
   const counts: ToolCallCounts = {};
   for (const msg of asMessageArray(messages)) {
-    if (msg.role !== "assistant") continue;
+    if ((msg as any)?.role !== "assistant") continue;
     for (const part of (Array.isArray((msg as any).content) ? (msg as any).content : [])) {
       if ((part as any)?.type !== "toolCall") continue;
       const name: string = typeof (part as any).name === "string" ? (part as any).name : "unknown";
@@ -479,10 +479,10 @@ export function getFinalOutput(messages: unknown, fallback?: string): string {
 	const history = asMessageArray(messages);
 	for (let i = history.length - 1; i >= 0; i--) {
 		const msg = history[i];
-		if (msg.role === "assistant" && Array.isArray((msg as any).content)) {
+		if ((msg as any)?.role === "assistant" && Array.isArray((msg as any).content)) {
 			for (let j = (msg as any).content.length - 1; j >= 0; j--) {
 				const part = (msg as any).content[j];
-				if (part?.type === "text") return part.text;
+				if (part?.type === "text" && typeof part.text === "string") return part.text;
 			}
 		}
 	}
@@ -493,12 +493,16 @@ export function getFinalOutput(messages: unknown, fallback?: string): string {
 export function getDisplayItems(messages: unknown): DisplayItem[] {
 	const items: DisplayItem[] = [];
 	for (const msg of asMessageArray(messages)) {
-		if (msg.role === "assistant" && Array.isArray((msg as any).content)) {
+		if ((msg as any)?.role === "assistant" && Array.isArray((msg as any).content)) {
 			for (const part of (msg as any).content) {
-				if (part?.type === "text") {
+				if (part?.type === "text" && typeof part.text === "string") {
 					items.push({ type: "text", text: part.text });
-				} else if (part?.type === "toolCall") {
-					items.push({ type: "toolCall", name: part.name, args: part.arguments });
+				} else if (part?.type === "toolCall" && typeof part.name === "string") {
+					items.push({
+						type: "toolCall",
+						name: part.name,
+						args: part.arguments && typeof part.arguments === "object" ? part.arguments : {},
+					});
 				}
 			}
 		}

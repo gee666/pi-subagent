@@ -175,7 +175,10 @@ reported immediately as failures.
 ## Timestamps & Status Footer
 
 Subagent tool calls and live activity lines render a dim `hh:mm:ss` timestamp
-(call start, per-subagent run start, and each live log entry).
+(call start, per-subagent run start, and each live log entry). The collapsed tool
+row keeps the normal compact progress text. Press `Ctrl+O` to expand it into the
+subagent tree immediately; every running node shows its latest six activity
+lines (thinking, tool starts/completions, and completed turns).
 
 In the interactive TUI the extension publishes the combined `total` usage line
 (parent + all subagents, recursively) via Pi's normal `ctx.ui.setStatus()`

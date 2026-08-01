@@ -331,6 +331,60 @@ describe("renderTreeLines live activity", () => {
 		// Completed leaf still shows its final output preview.
 		assert.ok(lines.includes("Done."), `expected output preview in:\n${lines}`);
 	});
+
+	it("keeps the expanded tree visible when live tool arguments are malformed", () => {
+		const result = runningLeaf("code-writer", {
+			messages: [null as any],
+			usage: { cost: "invalid" } as any,
+			liveLog: [
+				{ kind: "turn_start" },
+				{ kind: "tool_start", toolName: "bash", args: { command: { invalid: true } } },
+				{ kind: "tool_start", toolName: "read", args: { path: 42 } },
+				{ kind: "tool_start", toolName: "subagents", args: { tasks: { agent: "not-an-array" } } },
+				{ kind: "tool_end", toolName: "bash" },
+				{ kind: "turn_end", turn: 3, inputTokens: 100, outputTokens: 20 },
+				{ kind: "tool_start", toolName: "edit", args: null as any },
+			] as any,
+		});
+		const details = {
+			mode: "single",
+			delegationMode: "spawn",
+			projectAgentsDir: null,
+			results: [result],
+		} as SubagentDetails;
+
+		let lines = "";
+		assert.doesNotThrow(() => {
+			lines = renderTreeLines(buildTopLevelNodes(details), theme, false).join("\n");
+		});
+
+		assert.ok(lines.includes("code-writer"), `expected tree node in:\n${lines}`);
+		assert.ok(lines.includes(`${ARROW} bash`), `expected malformed bash event in:\n${lines}`);
+		assert.ok(lines.includes(`${ARROW} read`), `expected malformed read event in:\n${lines}`);
+		assert.ok(lines.includes(`${ARROW} edit`), `expected null-args edit event in:\n${lines}`);
+		// buildResultNode enforces the rolling six-line contract even if external
+		// details contain a larger liveLog than the runner normally allows.
+		assert.ok(!lines.includes(THINKING), `expected oldest activity to be trimmed:\n${lines}`);
+	});
+
+	it("renders a safe error node for a malformed result entry", () => {
+		const details = {
+			mode: "single",
+			delegationMode: "spawn",
+			projectAgentsDir: null,
+			results: [null, {}],
+		} as any as SubagentDetails;
+
+		let lines = "";
+		assert.doesNotThrow(() => {
+			lines = renderTreeLines(buildTopLevelNodes(details), theme, false).join("\n");
+		});
+		assert.equal(
+			lines.split("\n").filter((line) => line.includes("❌ unknown agent")).length,
+			2,
+			`expected malformed entries to render as errors:\n${lines}`,
+		);
+	});
 });
 
 describe("countNodes", () => {
