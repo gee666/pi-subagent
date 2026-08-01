@@ -18,7 +18,12 @@ import {
   lazyStream,
 } from "@mariozechner/pi-ai";
 import { Type } from "@sinclair/typebox";
-import { type AgentConfig, discoverAgents, isAgentEnabledAtLayer } from "./agents.js";
+import {
+  type AgentConfig,
+  discoverAgents,
+  filterAdvertisedAgents,
+  isAgentEnabledAtLayer,
+} from "./agents.js";
 import { loadPiSubagentsConfig } from "./config.js";
 import {
   allocateSubagentNames,
@@ -428,6 +433,22 @@ function filterAgentsForCurrentLayer(
 ): AgentConfig[] {
   const targetDepth = currentDepth + 1;
   return agents.filter((agent) => isAgentEnabledAtLayer(agent, targetDepth, maxDepth));
+}
+
+function filterAgentsForPrompt(
+  agents: AgentConfig[],
+  currentDepth: number,
+  maxDepth: number,
+  delegationStack: string[],
+  preventCycles: boolean,
+): AgentConfig[] {
+  return filterAdvertisedAgents(
+    agents,
+    currentDepth + 1,
+    maxDepth,
+    delegationStack,
+    preventCycles,
+  );
 }
 
 function formatAgentNames(agents: AgentConfig[]): string {
@@ -1424,7 +1445,13 @@ export default function (pi: ExtensionAPI) {
       if (!canDelegate) return;
 
       const discovery = discoverAgents(ctx.cwd, "both");
-      discoveredAgents = filterAgentsForCurrentLayer(discovery.agents, currentDepth, maxDepth);
+      discoveredAgents = filterAgentsForPrompt(
+        discovery.agents,
+        currentDepth,
+        maxDepth,
+        ancestorAgentStack,
+        preventCycles,
+      );
       currentSessionId = ctx.sessionManager.getSessionId?.() ?? "ephemeral";
       currentSubagentSessionRoot = getDefaultSubagentSessionRoot(ctx);
       if (resumableSubagentsDisabled()) {
@@ -1720,11 +1747,12 @@ export default function (pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event) => {
     try {
       if (!canDelegate) return;
-      if (discoveredAgents.length === 0) return;
 
-      const agentList = discoveredAgents
-        .map((a) => `- **${a.name}**: ${a.description}`)
-        .join("\n");
+      const agentList = discoveredAgents.length > 0
+        ? discoveredAgents
+            .map((a) => `- **${a.name}**: ${a.description}`)
+            .join("\n")
+        : "_No agents are available for the next delegation layer. Do not call the subagents tool._";
       const subagentsGuidance = configuredToolPrompts[SUBAGENT_TOOL_NAME] ?? `### How to call the subagents tool
 
 Each subagent runs in an **isolated process**.
@@ -1746,8 +1774,18 @@ calls one after another. Do NOT put dependent tasks in the same array.
 { "tasks": [{ "agent": "agent-a", "task": "..." }, { "agent": "agent-b", "task": "..." }] }
 \`\`\`
 
-- Max depth: current depth ${currentDepth}, max depth ${maxDepth}
 - Max subagents per tool call: ${maxParallelTasks}`;
+      const delegationStackText = ancestorAgentStack.length > 0
+        ? ancestorAgentStack.join(" -> ")
+        : "(root)";
+      const delegationGuardGuidance = `### Delegation guards
+
+- Current depth: ${currentDepth}; max depth: ${maxDepth}
+- Cycle prevention: ${preventCycles ? "enabled" : "disabled"}
+- Current delegation stack: ${delegationStackText}
+${preventCycles
+  ? "- Agents already in this stack are intentionally omitted from the available list. Do not request omitted agent names."
+  : "- Cyclic delegation is allowed by configuration."}`;
       const resumeGuidance = resumableSubagentsDisabled()
         ? ""
         : configuredToolPrompts[RESUME_SUBAGENTS_TOOL_NAME] ?? `### Resumable subagents
@@ -1772,7 +1810,7 @@ keeping their full previous context:
 
 The following subagents are available via the \`subagents\` tool:
 
-${agentList}\n\n${subagentsGuidance}${resumeGuidance ? `\n\n${resumeGuidance}` : ""}`,
+${agentList}\n\n${subagentsGuidance}\n\n${delegationGuardGuidance}${resumeGuidance ? `\n\n${resumeGuidance}` : ""}`,
       };
     } catch (err) {
       console.error("[pi-subagent] Error in before_agent_start:", err);

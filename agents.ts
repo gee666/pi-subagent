@@ -201,6 +201,27 @@ export function isAgentEnabledAtLayer(
 }
 
 /**
+ * Return only agents that may be advertised for the next delegation.
+ *
+ * The runner still enforces cycle prevention as a final safety boundary, but
+ * forbidden agents must not be presented to the model as available choices.
+ */
+export function filterAdvertisedAgents(
+	agents: AgentConfig[],
+	targetDepth: number,
+	maxDepth: number,
+	delegationStack: string[],
+	preventCycles: boolean,
+): AgentConfig[] {
+	const blocked = preventCycles ? new Set(delegationStack) : null;
+	return agents.filter(
+		(agent) =>
+			isAgentEnabledAtLayer(agent, targetDepth, maxDepth) &&
+			!blocked?.has(agent.name),
+	);
+}
+
+/**
  * Discover all available agents according to the requested scope.
  *
  * Built-in agents are included at the lowest priority unless

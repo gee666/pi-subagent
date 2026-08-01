@@ -3,7 +3,12 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { isAgentEnabledAtLayer, parseAgentFile, type AgentConfig } from "../agents.js";
+import {
+  filterAdvertisedAgents,
+  isAgentEnabledAtLayer,
+  parseAgentFile,
+  type AgentConfig,
+} from "../agents.js";
 import {
   getSubagentsToolDescription,
   selectParentModelForSubagent,
@@ -66,6 +71,34 @@ describe("agent layer settings", () => {
   test("requires both settings when max depth is one", () => {
     assert.equal(isAgentEnabledAtLayer(agent({ firstLayer: false }), 1, 1), false);
     assert.equal(isAgentEnabledAtLayer(agent({ lastLayer: false }), 1, 1), false);
+  });
+
+  test("does not advertise agents already in the delegation stack", () => {
+    const agents = [
+      agent({ name: "code-architect" }),
+      agent({ name: "code-reviwer" }),
+      agent({ name: "code-writer" }),
+    ];
+
+    assert.deepEqual(
+      filterAdvertisedAgents(
+        agents,
+        2,
+        3,
+        ["code-architect", "code-reviwer"],
+        true,
+      ).map((candidate) => candidate.name),
+      ["code-writer"],
+    );
+  });
+
+  test("keeps stacked agents visible when cycle prevention is disabled", () => {
+    const agents = [agent({ name: "code-architect" }), agent({ name: "code-writer" })];
+    assert.deepEqual(
+      filterAdvertisedAgents(agents, 2, 3, ["code-architect"], false)
+        .map((candidate) => candidate.name),
+      ["code-architect", "code-writer"],
+    );
   });
 });
 

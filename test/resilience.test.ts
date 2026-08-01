@@ -385,6 +385,85 @@ describe("runAgent: catch block covers spawn errors", async () => {
     assert.equal(result!.stopReason, "error");
   });
 
+  test("a recovered nested delegation failure does not poison the calling agent", async () => {
+    const { runAgentSubprocess: runAgent } = await import("../runner.js");
+    const usage = { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { total: 0 } };
+    const nestedFailure = buildSubagentDetails("single", "spawn", null, [makeResult({
+      agent: "cyclic-agent",
+      exitCode: 1,
+      stopReason: "error",
+      errorMessage: "Delegation cycle detected",
+      stderr: "Delegation cycle detected",
+    })]);
+    const events = [
+      { type: "turn_start" },
+      {
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{
+            type: "toolCall",
+            name: "subagents",
+            arguments: { tasks: [{ agent: "cyclic-agent", task: "recurse" }] },
+            toolCallId: "nested-call",
+          }],
+          stopReason: "toolUse",
+          usage,
+        },
+      },
+      {
+        type: "tool_result_end",
+        message: {
+          role: "toolResult",
+          toolName: "subagents",
+          toolCallId: "nested-call",
+          isError: true,
+          content: [{ type: "text", text: "Delegation cycle detected" }],
+          details: nestedFailure,
+        },
+      },
+      { type: "turn_start" },
+      {
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Recovered and completed directly." }],
+          stopReason: "stop",
+          usage,
+        },
+      },
+      { type: "agent_end", willRetry: false },
+      { type: "agent_settled" },
+    ];
+    const script = `${events.map((event) => `console.log(${JSON.stringify(JSON.stringify(event))})`).join(";")};setInterval(()=>{},1000)`;
+    const fakeAgent = {
+      name: "parent-agent",
+      description: "test",
+      systemPrompt: "",
+      source: "user" as const,
+      filePath: "/fake/path.md",
+    };
+
+    const result = await runAgent({
+      piCommandOverride: { command: process.execPath, argsPrefix: ["-e", script, "--"] },
+      startupTimeoutMsOverride: 1_000,
+      cwd: "/tmp",
+      agents: [fakeAgent],
+      agentName: "parent-agent",
+      task: "recover from a bad delegation",
+      parentDepth: 0,
+      parentAgentStack: [],
+      maxDepth: 3,
+      preventCycles: true,
+      makeDetails: (results) => buildSubagentDetails("single", "spawn", null, results),
+    });
+
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.equal(result.stopReason, "stop");
+    assert.equal(result.errorMessage, undefined);
+    assert.ok(result.messages.some((message: any) => message?.role === "toolResult" && message.isError === true));
+  });
+
   test("cycle prevention fails only the cyclic task before spawning", async () => {
     const { runAgentSubprocess: runAgent } = await import("../runner.js");
     const fakeAgent = {

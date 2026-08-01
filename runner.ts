@@ -21,7 +21,6 @@ import {
   emptyUsage,
   extractToolCalls,
   getFinalOutput,
-  getNestedSubagentErrorSummary,
   isResultError,
   isResultSuccess,
   isSubagentDetails,
@@ -1239,16 +1238,11 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       if (!result.stderr.trim()) result.stderr = result.errorMessage;
     }
 
-    if (result.exitCode === 0) {
-      const nestedErrorSummary = getNestedSubagentErrorSummary(result.messages);
-      if (nestedErrorSummary) {
-        result.exitCode = 1;
-        result.stopReason = "error";
-        result.errorMessage = nestedErrorSummary;
-        if (!result.stderr.trim()) result.stderr = nestedErrorSummary;
-      }
-    }
-
+    // A failed nested delegation is a recoverable tool error, just like a
+    // failed bash/read call. Pi returns that error to the calling model, which
+    // may retry, choose another approach, or finish the task itself. Do not
+    // overwrite a later successful terminal answer with an earlier nested
+    // tool failure.
     return result;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

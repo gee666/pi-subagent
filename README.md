@@ -130,7 +130,9 @@ The Markdown body becomes the agent's system prompt (appended to Pi's default, n
 
 ## Delegation Guards
 
-Depth and cycle guards prevent runaway recursive delegation. Layer availability is evaluated for the child being launched: depth 1 is the first layer, and `PI_SUBAGENT_MAX_DEPTH` is the last layer. The bundled `team-lead` agent sets `last-layer: disabled` so it cannot consume the final delegation layer. Cycle checks are applied per task: in a mixed parallel call, cyclic tasks fail while legal siblings still run.
+Depth and cycle guards prevent runaway recursive delegation. Layer availability is evaluated for the child being launched: depth 1 is the first layer, and `PI_SUBAGENT_MAX_DEPTH` is the last layer. The bundled `team-lead` agent sets `last-layer: disabled` so it cannot consume the final delegation layer. When cycle prevention is enabled, agents already in the current delegation stack are omitted from the child model's available-agent list. The runner still checks every task as a safety boundary: in a mixed parallel call, cyclic tasks fail while legal siblings still run.
+
+A nested delegation failure is returned to its calling agent as a recoverable tool error. If that agent subsequently retries, completes the work itself, and produces a successful final answer, the earlier tool error does not incorrectly turn the completed agent—and all of its ancestors—into failures.
 
 | Config                         | Default | Description                                      |
 | ------------------------------ | ------- | ------------------------------------------------ |
