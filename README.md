@@ -152,6 +152,22 @@ pi --no-subagent-prevent-cycles   # allow cycles (not recommended)
 | `PI_SUBAGENT_MAX_PARALLEL_TASKS` | `30`    | Max tasks per single call                |
 | `PI_SUBAGENT_MAX_CONCURRENCY`    | `8`     | Max subagents running simultaneously     |
 
+## Child Process Environment
+
+Children inherit all provider, authentication, proxy, home, temp, and Pi
+environment variables. The runner also repairs the executable search path for
+elevated Windows PowerShell and pnpm installations: it normalizes duplicate
+`Path`/`PATH` keys and adds the Node directory, `PNPM_HOME`, npm's user bin,
+`%LOCALAPPDATA%\\pnpm`, and `%SystemRoot%\\System32`. This also applies to every
+nested child, so tools and sub-subagents use the same working environment.
+
+Pi itself is relaunched with the current runtime and entrypoint
+(`process.execPath process.argv[1]`). The extension does not inspect npm/pnpm
+shims or assume package names, `node_modules` locations, or Pi `dist` layouts.
+This also supports Bun and other Node-compatible runtimes with the same process
+semantics. Embedded hosts without a script entrypoint can use
+`PI_SUBAGENT_PI_COMMAND` and `PI_SUBAGENT_PI_ARGS_PREFIX` explicitly.
+
 ## Subagent Liveness Timeouts
 
 A delegated process cannot block its parents forever. The runner applies a
@@ -176,11 +192,12 @@ reported immediately as failures.
 
 ## Timestamps & Status Footer
 
-Subagent tool calls and live activity lines render a dim `hh:mm:ss` timestamp
-(call start, per-subagent run start, and each live log entry). The collapsed tool
-row keeps the normal compact progress text. Press `Ctrl+O` to expand it into the
-subagent tree immediately; every running node shows its latest six activity
-lines (thinking, tool starts/completions, and completed turns).
+Subagent tool calls and live activity lines render a dim `hh:mm:ss` timestamp.
+The collapsed view shows every direct child as `Name (agent-type)`, two prompt
+lines, its current status, and `last action`. That timestamp is the newest
+activity anywhere in the child's recursive subtree, so active grandchildren
+keep their ancestor visibly alive. Press `Ctrl+O` to expand the full recursive
+tree, including every agent's complete prompt and latest activity lines.
 
 In the interactive TUI the extension publishes the combined `total` usage line
 (parent + all subagents, recursively) via Pi's normal `ctx.ui.setStatus()`
@@ -188,7 +205,7 @@ status line. Pi renders all extension statuses on the same footer status line.
 
 ## Steering Running Subagents
 
-While a `subagents` tool call is running, mid-stream steering input can be broadcast to one or more child agents. The extension uses Pi's `InputEvent.streamingBehavior` metadata when available, so idle prompts and queued follow-ups continue to the parent normally; only true `steer` inputs open the broadcast routing prompt.
+While a `subagents` tool call is running, mid-stream steering input can be broadcast to one or more child agents. Targets are selected by human name; nested targets use paths such as `John > Maria > Elena`. The extension uses Pi's `InputEvent.streamingBehavior` metadata when available, so idle prompts and queued follow-ups continue to the parent normally; only true `steer` inputs open the broadcast routing prompt.
 
 ## Subagent Session Resume
 
@@ -215,16 +232,16 @@ Note: crash-resume covers `subagents` calls only. An interrupted `resume_subagen
 
 ## Resumable Subagents by Name (`resume_subagents`)
 
-Every subagent run is assigned a unique, durable name derived from its agent
-type plus a per-type counter — `code-writer-01`, `code-writer-02`,
-`code-reviewer-01`, ... The name is returned together with the subagent's
-results and shown in the TUI tree.
+Every subagent run is assigned a random, durable human first name from a bundled
+list of 500 popular American names — for example `John`, `Maria`, or `Elena`.
+Names are never reused anywhere in the same delegation tree. The name is
+returned together with the agent type and shown in every TUI view.
 
 The `resume_subagents` tool continues named subagents with a new task while
 preserving their full previous context:
 
 ```json
-{ "resumes": [{ "subagent": "code-writer-01", "task": "Now also update the tests." }] }
+{ "resumes": [{ "subagent": "John", "task": "Now also update the tests." }] }
 ```
 
 Naming is deliberately unambiguous: `agent` (in `subagents`) selects an agent

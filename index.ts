@@ -45,7 +45,6 @@ import {
   renderCall,
   renderResult,
   renderResumeCall,
-  setBroadcastNumberingActive,
 } from "./render.js";
 import { runAgentSubprocess, executeParallelSubprocess, type RunningSubagentHandle } from "./runner.js";
 import {
@@ -166,7 +165,7 @@ const SubagentParams = Type.Object({
 
 const ResumeItem = Type.Object({
   subagent: Type.String({
-    description: "Unique subagent name returned by a previous subagents run (e.g. code-writer-01)",
+    description: "Unique human name returned by a previous subagents run (e.g. John)",
   }),
   task: Type.String({
     description: "New task for the resumed subagent. It keeps its previous context.",
@@ -1001,7 +1000,7 @@ export default function (pi: ExtensionAPI) {
   let pendingResumePlans: ResumableSubagentCall[] = [];
   let modelToRestoreAfterResume: any | undefined;
   const approvedProjectAgentDirsForSession = new Set<string>();
-  const activeSubagents = new Map<number, { agent: string; task: string; taskIndex: number; handle: RunningSubagentHandle; name?: string }>();
+  const activeSubagents = new Map<number, { agent: string; task: string; handle: RunningSubagentHandle; name?: string }>();
   /** Names with a resume in flight in this process (same-process race guard). */
   const activeResumeNames = new Set<string>();
   /** Tool calls whose execute result requested an actual Pi error result. */
@@ -1083,9 +1082,10 @@ export default function (pi: ExtensionAPI) {
   const BROADCAST_STEER_PREFIX = "__PI_SUBAGENT_BROADCAST_STEER__";
 
   interface BroadcastTarget {
+    /** Human-name path, e.g. "John > Maria > Elena". */
     display: string;
     topLevelId: number;
-    restPath: number[];
+    restPath: string[];
   }
 
   interface ParsedBroadcastSelection {
@@ -1093,83 +1093,40 @@ export default function (pi: ExtensionAPI) {
     errors: string[];
   }
 
-  function parseBroadcastPath(raw: string): number[] | null {
-    const parts = raw.trim().split(".");
-    if (parts.length === 0) return null;
-    const path: number[] = [];
-    for (const part of parts) {
-      if (!/^\d+$/.test(part)) return null;
-      const value = Number(part);
-      if (!Number.isSafeInteger(value) || value < 1) return null;
-      path.push(value);
+  function parseBroadcastSelection(input: string, available: BroadcastTarget[]): ParsedBroadcastSelection {
+    if (input.trim().toUpperCase() === "ALL") return { targets: [...available], errors: [] };
+    const byName = new Map<string, BroadcastTarget>();
+    for (const target of available) {
+      byName.set(target.display.toLowerCase(), target);
+      // Names are globally unique across the delegation tree, so a nested leaf
+      // can be addressed as "Maria" without spelling "John > Maria".
+      const leafName = target.display.split(" > ").at(-1);
+      if (leafName) byName.set(leafName.toLowerCase(), target);
     }
-    return path;
-  }
-
-  function parseBroadcastSelection(input: string, available: number[]): ParsedBroadcastSelection {
-    const normalized = input.trim().toUpperCase();
-    if (normalized === "ALL") {
-      return {
-        targets: available.map((id) => ({ display: String(id), topLevelId: id, restPath: [] })),
-        errors: [],
-      };
-    }
-
+    const targets: BroadcastTarget[] = [];
     const errors: string[] = [];
-    const targetMap = new Map<string, BroadcastTarget>();
     for (const rawPart of input.split(",")) {
-      const part = rawPart.trim();
-      if (!part) continue;
-
-      if (part.includes("-")) {
-        const [startRaw, endRaw, extra] = part.split("-").map((p) => p.trim());
-        const startPath = parseBroadcastPath(startRaw);
-        const endPath = parseBroadcastPath(endRaw);
-        if (extra !== undefined || !startPath || !endPath || startPath.length !== 1 || endPath.length !== 1) {
-          errors.push(`Invalid range "${part}". Use top-level ranges like 1-3.`);
-          continue;
-        }
-        const start = startPath[0];
-        const end = endPath[0];
-        for (let id = Math.min(start, end); id <= Math.max(start, end); id++) {
-          if (!available.includes(id)) {
-            errors.push(`Subagent ${id} is not running.`);
-            continue;
-          }
-          targetMap.set(String(id), { display: String(id), topLevelId: id, restPath: [] });
-        }
-        continue;
-      }
-
-      const path = parseBroadcastPath(part);
-      if (!path) {
-        errors.push(`Invalid target "${part}". Use ALL, numbers, paths, or top-level ranges (e.g. 1, 2, 4.1, 1-3).`);
-        continue;
-      }
-      const [topLevelId, ...restPath] = path;
-      if (!available.includes(topLevelId)) {
-        errors.push(`Subagent ${topLevelId} is not running.`);
-        continue;
-      }
-      const display = path.join(".");
-      targetMap.set(display, { display, topLevelId, restPath });
+      const requested = rawPart.trim();
+      if (!requested) continue;
+      const target = byName.get(requested.toLowerCase());
+      if (target) targets.push(target);
+      else errors.push(`Subagent "${requested}" is not running. Use its human name.`);
     }
-
     return {
-      targets: Array.from(targetMap.values()).sort((a, b) => a.display.localeCompare(b.display, undefined, { numeric: true })),
+      targets: Array.from(new Map(targets.map((target) => [target.display, target])).values()),
       errors,
     };
   }
 
-  function encodeNestedBroadcast(message: string, path: number[]): string {
+  function encodeNestedBroadcast(message: string, path: string[]): string {
     return `${BROADCAST_STEER_PREFIX}${JSON.stringify({ path, message })}`;
   }
 
-  function decodeNestedBroadcast(text: string): { path: number[]; message: string } | null {
+  function decodeNestedBroadcast(text: string): { path: string[]; message: string } | null {
     if (!text.startsWith(BROADCAST_STEER_PREFIX)) return null;
     try {
       const parsed = JSON.parse(text.slice(BROADCAST_STEER_PREFIX.length));
-      if (!Array.isArray(parsed?.path) || !parsed.path.every((n: unknown) => Number.isSafeInteger(n) && (n as number) >= 1)) return null;
+      if (!Array.isArray(parsed?.path) || !parsed.path.every((name: unknown) => typeof name === "string" && name.length > 0)) return null;
       if (typeof parsed?.message !== "string") return null;
       return { path: parsed.path, message: parsed.message };
     } catch {
@@ -1177,66 +1134,37 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  function extractPendingSubagentTaskCounts(result: SingleResult): number[] {
-    const messages = Array.isArray((result as any).messages) ? (result as any).messages : [];
-    const completedToolCallIds = new Set(getNestedSubagentResults(messages).map((nested) => nested.toolCallId));
-    const counts: number[] = [];
-    for (const message of messages) {
-      if (message?.role !== "assistant" || !Array.isArray(message.content)) continue;
-      for (const part of message.content) {
-        if (part?.type !== "toolCall" || !isSubagentToolName(part?.name)) continue;
-        const toolCallId = typeof part.toolCallId === "string" ? part.toolCallId : typeof part.id === "string" ? part.id : undefined;
-        if (toolCallId && completedToolCallIds.has(toolCallId)) continue;
-        const rawResumes = part.arguments?.resumes;
-        const tasks = Array.isArray(part.arguments?.tasks)
-          ? part.arguments.tasks
-          : Array.isArray(rawResumes)
-            ? rawResumes
-            : rawResumes && typeof rawResumes === "object"
-              ? [rawResumes]
-              : [];
-        if (tasks.length > 0) counts.push(tasks.length);
-      }
-    }
-    return counts;
-  }
-
   function collectRunningBroadcastTargetsFromResult(
     result: SingleResult,
-    path: number[],
+    namePath: string[],
+    topLevelId: number,
     targets: { all: BroadcastTarget[]; youngest: BroadcastTarget[] },
   ): boolean {
-    const nestedRunningPaths: number[][] = [];
-
+    let hasRunningDescendant = false;
+    const completedIds = new Set<string>();
+    const nestedDetails: SubagentDetails[] = [];
     for (const nested of getNestedSubagentResults(result.messages)) {
       if (!isSubagentDetails(nested.details)) continue;
-      nested.details.results.forEach((child, index) => {
-        const childPath = [...path, index + 1];
-        if (collectRunningBroadcastTargetsFromResult(child, childPath, targets)) {
-          nestedRunningPaths.push(childPath);
-        }
-      });
+      if (nested.toolCallId) completedIds.add(nested.toolCallId);
+      nestedDetails.push(nested.details);
     }
-
-    if (result.exitCode === -1) {
-      for (const taskCount of extractPendingSubagentTaskCounts(result)) {
-        for (let i = 1; i <= taskCount; i++) {
-          const childPath = [...path, i];
-          const [topLevelId, ...restPath] = childPath;
-          targets.all.push({ display: childPath.join("."), topLevelId, restPath });
-          targets.youngest.push({ display: childPath.join("."), topLevelId, restPath });
-          nestedRunningPaths.push(childPath);
+    for (const [toolCallId, live] of Object.entries(result.liveNestedSubagents ?? {})) {
+      if (!completedIds.has(toolCallId) && isSubagentDetails(live)) nestedDetails.push(live);
+    }
+    for (const details of nestedDetails) {
+      for (const child of details.results) {
+        const childName = child.name || child.agent;
+        if (collectRunningBroadcastTargetsFromResult(child, [...namePath, childName], topLevelId, targets)) {
+          hasRunningDescendant = true;
         }
       }
     }
 
-    const isRunning = result.exitCode === -1;
-    if (!isRunning) return nestedRunningPaths.length > 0;
-
-    const [topLevelId, ...restPath] = path;
-    const self = { display: path.join("."), topLevelId, restPath };
+    if (result.exitCode !== -1) return hasRunningDescendant;
+    const restPath = namePath.slice(1);
+    const self = { display: namePath.join(" > "), topLevelId, restPath };
     targets.all.push(self);
-    if (nestedRunningPaths.length === 0) targets.youngest.push(self);
+    if (!hasRunningDescendant) targets.youngest.push(self);
     return true;
   }
 
@@ -1244,28 +1172,34 @@ export default function (pi: ExtensionAPI) {
     latestBroadcastTargets.all = [];
     latestBroadcastTargets.youngest = [];
     if (!details) {
-      for (const id of activeSubagents.keys()) {
-        const target = { display: String(id), topLevelId: id, restPath: [] };
+      for (const [id, active] of activeSubagents) {
+        const display = active.name || active.agent;
+        const target = { display, topLevelId: id, restPath: [] };
         latestBroadcastTargets.all.push(target);
         latestBroadcastTargets.youngest.push(target);
       }
       return;
     }
     details.results.forEach((result, index) => {
-      collectRunningBroadcastTargetsFromResult(result, [topLevelBaseId + index], latestBroadcastTargets);
+      collectRunningBroadcastTargetsFromResult(
+        result,
+        [result.name || result.agent],
+        topLevelBaseId + index,
+        latestBroadcastTargets,
+      );
     });
     const dedupe = (targets: BroadcastTarget[]) =>
       Array.from(new Map(targets.map((target) => [target.display, target])).values())
         .filter((target) => activeSubagents.has(target.topLevelId))
-        .sort((a, b) => a.display.localeCompare(b.display, undefined, { numeric: true }));
+        .sort((a, b) => a.display.localeCompare(b.display));
     latestBroadcastTargets.all = dedupe(latestBroadcastTargets.all);
     latestBroadcastTargets.youngest = dedupe(latestBroadcastTargets.youngest);
   }
 
   function getFallbackTopLevelTargets(): BroadcastTarget[] {
-    return Array.from(activeSubagents.keys())
-      .sort((a, b) => a - b)
-      .map((id) => ({ display: String(id), topLevelId: id, restPath: [] }));
+    return Array.from(activeSubagents.entries())
+      .sort(([a], [b]) => a - b)
+      .map(([id, active]) => ({ display: active.name || active.agent, topLevelId: id, restPath: [] }));
   }
 
   function sendBroadcastToTargets(message: string, targets: BroadcastTarget[], ctx: any): void {
@@ -1297,30 +1231,24 @@ export default function (pi: ExtensionAPI) {
     if (nested) {
       if (activeSubagents.size === 0) return "handled";
       const [rawTarget, ...restPath] = nested.path;
-      // Path components below the top level are 1-based task indexes within the
-      // subagent tool call running in THIS process. Internal active ids keep
-      // growing across sequential tool calls (and process restarts), so resolve
-      // by task index first; fall back to a direct id match for compatibility.
       let resolvedId: number | undefined;
       for (const [id, item] of activeSubagents) {
-        if (item.taskIndex === rawTarget - 1 && (resolvedId === undefined || id > resolvedId)) {
+        if ((item.name || item.agent).toLowerCase() === rawTarget.toLowerCase()) {
           resolvedId = id;
+          break;
         }
       }
-      if (resolvedId === undefined && activeSubagents.has(rawTarget)) resolvedId = rawTarget;
       if (resolvedId === undefined) return "handled";
-      sendBroadcastToTargets(nested.message, [{ display: nested.path.join("."), topLevelId: resolvedId, restPath }], ctx);
+      sendBroadcastToTargets(nested.message, [{ display: nested.path.join(" > "), topLevelId: resolvedId, restPath }], ctx);
       return "handled";
     }
 
     if (!ctx.hasUI || activeSubagents.size === 0) return "continue";
 
-    setBroadcastNumberingActive(true);
     try {
-      const available = Array.from(activeSubagents.keys()).sort((a, b) => a - b);
       const choice = await ctx.ui.select(
         "Broadcast this steering message to subagents?",
-        ["No", "All (+nested)", "Youngest", "Numbers (e.g. 1, 2, 4.1)"],
+        ["No", "All (+nested)", "Youngest", "Names (e.g. John, Maria)"],
       );
       if (choice === "All (+nested)" || choice === "Youngest") {
         const fallback = getFallbackTopLevelTargets();
@@ -1335,29 +1263,19 @@ export default function (pi: ExtensionAPI) {
         sendBroadcastToTargets(message, current, ctx);
         return "handled";
       }
-      if (choice !== "Numbers (e.g. 1, 2, 4.1)") return "continue";
+      if (choice !== "Names (e.g. John, Maria)") return "continue";
 
       const answer = await ctx.ui.input(
-        "Subagent numbers/ranges to broadcast to (e.g. 1, 2, 4.1)",
+        "Subagent names to broadcast to (comma-separated)",
         "",
       );
       if (!answer) return "continue";
-      const current = Array.from(new Set([
-        ...available,
-        ...latestBroadcastTargets.all.map((target) => target.topLevelId),
-      ])).sort((a, b) => a - b);
+      const current = latestBroadcastTargets.all.length > 0
+        ? latestBroadcastTargets.all
+        : getFallbackTopLevelTargets();
       const parsed = parseBroadcastSelection(answer, current);
-      const knownDisplays = new Set(latestBroadcastTargets.all.map((target) => target.display));
-      const validatedTargets = knownDisplays.size > 0
-        ? parsed.targets.filter((target) => knownDisplays.has(target.display))
-        : parsed.targets;
-      const unknownNested = knownDisplays.size > 0
-        ? parsed.targets.filter((target) => !knownDisplays.has(target.display)).map((target) => target.display)
-        : [];
-      const errors = [
-        ...parsed.errors,
-        ...unknownNested.map((display) => `Subagent ${display} is not running.`),
-      ];
+      const validatedTargets = parsed.targets;
+      const errors = parsed.errors;
       if (errors.length > 0) {
         ctx.ui.notify(errors.slice(0, 4).join("\n"), "warning");
       }
@@ -1368,7 +1286,7 @@ export default function (pi: ExtensionAPI) {
       sendBroadcastToTargets(message, validatedTargets, ctx);
       return "handled";
     } finally {
-      setBroadcastNumberingActive(false);
+      // No persistent steering UI state.
     }
   }
 
@@ -1790,13 +1708,13 @@ ${preventCycles
         ? ""
         : configuredToolPrompts[RESUME_SUBAGENTS_TOOL_NAME] ?? `### Resumable subagents
 
-Every subagent run is assigned a unique, durable name (e.g. \`code-writer-01\`,
-\`code-reviewer-02\`) which is returned together with its results. Use the
+Every subagent run is assigned a unique, durable human name (e.g. \`John\`,
+\`Maria\`) which is returned together with its results. Use the
 \`resume_subagents\` tool to continue named subagents with a new task while
 keeping their full previous context:
 
 \`\`\`json
-{ "resumes": [{ "subagent": "code-writer-01", "task": "Now also update the tests." }] }
+{ "resumes": [{ "subagent": "John", "task": "Now also update the tests." }] }
 \`\`\`
 
 - \`agent\` (in \`subagents\`) is an agent TYPE; \`subagent\` (in \`resume_subagents\`)
@@ -1937,7 +1855,7 @@ ${agentList}\n\n${subagentsGuidance}\n\n${delegationGuardGuidance}${resumeGuidan
             pendingResumePlans.splice(resumePlanIndex, 1);
           }
 
-          // Assign durable, tree-unique names (code-writer-01, ...). Resumed
+          // Assign random durable human names unique across the whole tree. Resumed
           // runs keep the names already recorded in the previous results.
           const names: Array<string | undefined> = tasks.map(
             (_task, index) => resumePlan?.details?.results[index]?.name,
@@ -1969,7 +1887,7 @@ ${agentList}\n\n${subagentsGuidance}\n\n${delegationGuardGuidance}${resumeGuidan
                   names[index] = allocated[allocIndex];
                 });
               } catch (err) {
-                console.warn("[pi-subagent] Failed to allocate subagent names (continuing without):", err);
+                throw new Error(`Failed to allocate unique subagent names: ${err instanceof Error ? err.message : String(err)}`);
               }
             }
           }
@@ -2037,10 +1955,10 @@ ${agentList}\n\n${subagentsGuidance}\n\n${delegationGuardGuidance}${resumeGuidan
       description: configuredToolPrompts[RESUME_SUBAGENTS_TOOL_NAME] ?? [
         "Resume previously run subagents by name with a new task, keeping their full context.",
         "",
-        "Every subagent run returns a unique name (e.g. code-writer-01). Pass those names",
+        "Every subagent run returns a unique human name (e.g. John). Pass those names",
         "as `subagent` to continue them. All resumes in one call run IN PARALLEL.",
         "",
-        'Example: { resumes: [{ subagent: "code-writer-01", task: "Also update the tests." }] }',
+        'Example: { resumes: [{ subagent: "John", task: "Also update the tests." }] }',
       ].join("\n"),
       parameters: ResumeSubagentsParams,
       prepareArguments: prepareResumeArguments,
@@ -2274,7 +2192,9 @@ ${agentList}\n\n${subagentsGuidance}\n\n${delegationGuardGuidance}${resumeGuidan
   // -----------------------------------------------------------------------
 
   function formatNameSuffix(result: SingleResult | undefined): string {
-    return result?.name ? `\n\n(subagent name: ${result.name} — resumable via resume_subagents)` : "";
+    return result?.name
+      ? `\n\n(subagent: ${result.name} (${result.agent}) — resume with the name ${result.name})`
+      : "";
   }
 
   async function executeSingle(
@@ -2326,7 +2246,7 @@ ${agentList}\n\n${subagentsGuidance}\n\n${delegationGuardGuidance}${resumeGuidan
       fallbackModel,
       onHandle: (handle) => {
         activeId = topLevelBaseId;
-        activeSubagents.set(activeId, { agent: agentName, task, taskIndex: 0, handle, name: subagentName });
+        activeSubagents.set(activeId, { agent: agentName, task, handle, name: subagentName });
         updateLatestBroadcastTargets(undefined);
       },
     });
@@ -2345,7 +2265,7 @@ ${agentList}\n\n${subagentsGuidance}\n\n${delegationGuardGuidance}${resumeGuidan
         content: [
           {
             type: "text" as const,
-            text: `Agent ${result.stopReason || "failed"}: ${errorMsg}`,
+            text: `${result.name ? `${result.name} (${result.agent})` : `Agent ${result.agent}`} ${result.stopReason || "failed"}: ${errorMsg}`,
           },
         ],
         details: makeDetails("single")([result]),
@@ -2398,7 +2318,7 @@ ${agentList}\n\n${subagentsGuidance}\n\n${delegationGuardGuidance}${resumeGuidan
         (index, task, handle) => {
           const id = topLevelBaseId + index;
           taskIds.set(index, id);
-          activeSubagents.set(id, { agent: task.agent, task: task.task, taskIndex: index, handle, name: extras?.names?.[index] });
+          activeSubagents.set(id, { agent: task.agent, task: task.task, handle, name: extras?.names?.[index] });
           updateLatestBroadcastTargets(undefined);
         },
         (index) => {

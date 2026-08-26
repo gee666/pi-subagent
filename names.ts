@@ -1,9 +1,9 @@
 /**
  * Durable subagent name registry.
  *
- * Every spawned subagent gets a unique, human-friendly name derived from its
- * agent type plus a per-type counter (e.g. `code-writer-01`, `code-writer-02`,
- * `code-reviwer-01`). Names are unique within one delegation tree (the tree
+ * Every spawned subagent gets a random human first name from the bundled
+ * 500-name pool (e.g. `John`, `Maria`, `Elena`). Names are unique within one
+ * delegation tree (the tree
  * rooted at the top-level pi session) and are persisted in a JSON registry
  * file under the subagent session root, so they survive process restarts.
  *
@@ -20,6 +20,8 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { randomInt } from "node:crypto";
+import { AMERICAN_NAMES } from "./american-names.js";
 
 export const SUBAGENT_NAMES_FILE_ENV = "PI_SUBAGENT_NAMES_FILE";
 
@@ -168,7 +170,7 @@ export interface SubagentNameRecord {
 
 export interface NamesRegistry {
   version: 1;
-  /** Per-agent-type counters used to generate the next name. */
+  /** Retained in the file shape for simple migration from older registries. */
   counters: Record<string, number>;
   /** All allocated names in this delegation tree. */
   agents: Record<string, SubagentNameRecord>;
@@ -306,8 +308,8 @@ export function readNamesRegistry(file: string): NamesRegistry {
     /* fall through to corruption handling */
   }
   // Corrupt registry: keep a backup for forensics and warn instead of
-  // silently resetting (a reset restarts counters, so new names could clash
-  // with names the model remembers from the conversation transcript).
+  // silently resetting (a reset could reuse names the model remembers from
+  // the conversation transcript).
   try {
     const backup = `${file}.corrupt-${Date.now().toString(36)}`;
     fs.copyFileSync(file, backup);
@@ -347,8 +349,9 @@ export async function updateNamesRegistry<T>(
 // Name allocation
 // ---------------------------------------------------------------------------
 
-export function formatSubagentName(agent: string, index: number): string {
-  return `${agent}-${String(index).padStart(2, "0")}`;
+export function getAvailableSubagentNames(registry: NamesRegistry): string[] {
+  const used = new Set(Object.keys(registry.agents).map((name) => name.toLowerCase()));
+  return AMERICAN_NAMES.filter((name) => !used.has(name.toLowerCase()));
 }
 
 export interface AllocateNameRequest {
@@ -371,13 +374,15 @@ export async function allocateSubagentNames(
   if (requests.length === 0) return [];
   return updateNamesRegistry(file, (registry) => {
     const names: string[] = [];
+    const available = getAvailableSubagentNames(registry);
+    if (available.length < requests.length) {
+      throw new Error(
+        `The 500-name subagent pool is exhausted (${available.length} available, ${requests.length} requested).`,
+      );
+    }
     for (const request of requests) {
-      let name: string;
-      do {
-        const next = (registry.counters[request.agent] ?? 0) + 1;
-        registry.counters[request.agent] = next;
-        name = formatSubagentName(request.agent, next);
-      } while (registry.agents[name] !== undefined);
+      const selectedIndex = randomInt(available.length);
+      const [name] = available.splice(selectedIndex, 1);
       registry.agents[name] = {
         name,
         agent: request.agent,

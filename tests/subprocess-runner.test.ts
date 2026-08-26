@@ -1,6 +1,13 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { runAgentSubprocess } from "../runner.js";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import {
+  buildChildProcessEnv,
+  getCurrentRuntimeLaunch,
+  runAgentSubprocess,
+} from "../runner.js";
 import { buildSubagentDetails } from "../types.js";
 import type { AgentConfig } from "../agents.js";
 
@@ -24,6 +31,35 @@ const baseOpts = {
   preventCycles: false,
   makeDetails,
 };
+
+describe("child process environment", () => {
+  test("reuses the current runtime entrypoint without knowing Pi's install layout", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-entrypoint-test-"));
+    try {
+      const entrypoint = path.join(dir, "anything", "future-layout", "start.ts");
+      fs.mkdirSync(path.dirname(entrypoint), { recursive: true });
+      fs.writeFileSync(entrypoint, "// test entrypoint");
+      assert.deepEqual(
+        getCurrentRuntimeLaunch(["bun", entrypoint], "C:\\runtime\\bun.exe"),
+        { command: "C:\\runtime\\bun.exe", argsPrefix: [entrypoint] },
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("preserves env values and repairs executable search paths", () => {
+    const pnpmHome = path.join(process.cwd(), "fake-pnpm-home");
+    const env = buildChildProcessEnv({ PNPM_HOME: pnpmHome, PI_TEST_SENTINEL: "kept" });
+    const pathKeys = Object.keys(env).filter((key) => key.toLowerCase() === "path");
+    assert.equal(pathKeys.length, 1);
+    const entries = String(env[pathKeys[0]]).split(path.delimiter);
+    const normalize = (value: string) => process.platform === "win32" ? value.toLowerCase() : value;
+    assert.ok(entries.map(normalize).includes(normalize(path.dirname(process.execPath))));
+    assert.ok(entries.map(normalize).includes(normalize(pnpmHome)));
+    assert.equal(env.PI_TEST_SENTINEL, "kept");
+  });
+});
 
 describe("runAgentSubprocess — unknown agent", () => {
   test("returns exitCode 1 and agentSource unknown", async () => {

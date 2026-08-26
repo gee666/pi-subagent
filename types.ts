@@ -64,10 +64,12 @@ export interface SingleResult {
 	agent: string;
 	agentSource: "user" | "project" | "builtin" | "unknown";
 	task: string;
-	/** Unique resumable name for this subagent within the delegation tree (e.g. "code-writer-01"). */
+	/** Unique resumable human name within the delegation tree (e.g. "John"). */
 	name?: string;
 	/** Epoch ms when this subagent run started (used for TUI timestamps). */
 	startedAt?: number;
+	/** Most recent semantic activity in this agent's entire live run. */
+	lastActionAt?: number;
 	exitCode: number;
 	messages: Message[];
 	stderr: string;
@@ -264,6 +266,7 @@ export function compactSingleResultForDurableDetails(result: SingleResult): Sing
     subtreeUsageSummary: result.subtreeUsageSummary ?? buildUsageSummary([result]),
     ...(result.name !== undefined ? { name: result.name } : {}),
     ...(result.startedAt !== undefined ? { startedAt: result.startedAt } : {}),
+    ...(result.lastActionAt !== undefined ? { lastActionAt: result.lastActionAt } : {}),
     ...(result.stopReason !== undefined ? { stopReason: result.stopReason } : {}),
     ...(result.errorMessage !== undefined ? { errorMessage: result.errorMessage } : {}),
     ...(result.model !== undefined ? { model: result.model } : {}),

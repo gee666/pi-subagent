@@ -44,6 +44,8 @@ export interface TreeNode {
 	task?: string;
 	/** Epoch ms when this subagent run started (rendered as a dim hh:mm:ss prefix). */
 	startedAt?: number;
+	/** Latest activity across this node and every descendant. */
+	lastActionAt?: number;
 	outputPreview?: string[];
 	liveActivity?: LiveLogEntry[];
 	children: TreeNode[];
@@ -571,7 +573,6 @@ function buildResultNode(rawResult: SingleResult): TreeNode {
 	const status = statusFromResult(result);
 	const usage = formatUsage(result.usage, result.model);
 	const metaParts: string[] = [];
-	if (typeof result.name === "string" && result.name) metaParts.push(result.name);
 	if (typeof result.agentSource === "string" && result.agentSource) metaParts.push(result.agentSource);
 	if (usage) metaParts.push(usage);
 	if (status === "error") {
@@ -584,14 +585,21 @@ function buildResultNode(rawResult: SingleResult): TreeNode {
 	const children = buildNestedChildren(result);
 	const isRunning = status === "running";
 	const liveLog = Array.isArray(result.liveLog) ? result.liveLog : [];
+	const ownLastAction = typeof result.lastActionAt === "number" && Number.isFinite(result.lastActionAt)
+		? result.lastActionAt
+		: liveLog.reduce((latest, entry) => Math.max(latest, typeof entry.at === "number" ? entry.at : 0), result.startedAt ?? 0);
+	const descendantLastAction = children.reduce((latest, child) => Math.max(latest, child.lastActionAt ?? 0), 0);
+	const agentType = stringValue(result.agent, "unknown agent");
+	const humanName = typeof result.name === "string" && result.name ? result.name : undefined;
 	return {
-		label: stringValue(result.agent, "unknown agent"),
+		label: humanName ? `${humanName} (${agentType})` : agentType,
 		status,
 		meta: metaParts.join(" • "),
 		task: typeof result.task === "string" ? result.task : undefined,
 		startedAt: typeof result.startedAt === "number" && Number.isFinite(result.startedAt)
 			? result.startedAt
 			: undefined,
+		lastActionAt: Math.max(ownLastAction, descendantLastAction) || undefined,
 		liveActivity: isRunning && liveLog.length > 0 ? liveLog.slice(-MAX_LIVE_LOG_ENTRIES) : undefined,
 		outputPreview: !isRunning && children.length === 0 ? buildLeafPreview(result) : undefined,
 		children,
@@ -608,6 +616,7 @@ export function renderTreeLines(
 	showOutputPreview: boolean,
 	depth = 0,
 	prefix = "",
+	showFullPrompts = false,
 ): string[] {
 	const lines: string[] = [];
 
@@ -621,6 +630,14 @@ export function renderTreeLines(
 		let line = `${indent}${numberPrefix}${timePrefix}${statusEmoji(node.status, theme)} ${theme.fg("accent", node.label)}`;
 		if (node.meta) line += ` ${theme.fg("dim", node.meta)}`;
 		lines.push(line);
+
+		if (showFullPrompts && node.task) {
+			const promptLines = node.task.replace(/\r\n?/g, "\n").split("\n");
+			promptLines.forEach((promptLine, promptIndex) => {
+				const promptLabel = promptIndex === 0 ? "prompt: " : "        ";
+				lines.push(`${indent}  ${theme.fg("muted", promptLabel)}${theme.fg("toolOutput", promptLine)}`);
+			});
+		}
 
 		if (showOutputPreview && node.outputPreview && node.outputPreview.length > 0) {
 			for (const outputLine of node.outputPreview) {
@@ -641,7 +658,7 @@ export function renderTreeLines(
 		}
 
 		if (node.children.length > 0) {
-			lines.push(...renderTreeLines(node.children, theme, showOutputPreview, depth + 1, number));
+			lines.push(...renderTreeLines(node.children, theme, showOutputPreview, depth + 1, number, showFullPrompts));
 		}
 	});
 

@@ -7,11 +7,36 @@
  */
 
 import { Container, Spacer, Text } from "@mariozechner/pi-tui";
+
+interface Component {
+	render(width: number): string[];
+	invalidate(): void;
+}
+
+function fitLine(text: string, width: number): string {
+	if (width <= 0) return "";
+	let visible = 0;
+	let output = "";
+	for (let i = 0; i < text.length && visible < width;) {
+		if (text[i] === "\u001b") {
+			const match = text.slice(i).match(/^\u001b(?:\[[0-?]*[ -\/]*[@-~]|\][^\u0007]*(?:\u0007|\u001b\\))/);
+			if (match) {
+				output += match[0];
+				i += match[0].length;
+				continue;
+			}
+		}
+		const codePoint = text.codePointAt(i)!;
+		const char = String.fromCodePoint(codePoint);
+		output += char;
+		i += char.length;
+		visible += 1;
+	}
+	return output;
+}
 import {
 	MAX_LIVE_LOG_ENTRIES,
-	isResultError,
 	isSubagentDetails,
-	type SingleResult,
 	type SubagentDetails,
 } from "./types.js";
 import {
@@ -21,6 +46,7 @@ import {
 	formatClockTime,
 	formatLiveLogEntry,
 	hasNestedChildren,
+	statusEmoji,
 	renderTreeLines,
 	setBroadcastNumberingActive,
 	topLevelSummary,
@@ -73,19 +99,8 @@ export function renderCall(
 ): Text {
 	const tasks = Array.isArray(args.tasks) ? args.tasks : [];
 	const count = tasks.length;
-	const icon = context?.isPartial === false
-		? context.isError
-			? theme.fg("error", "❌")
-			: theme.fg("success", "✅")
-		: theme.fg("warning", "⏳");
 	const stamp = getCallStartStamp(context, theme);
-	let text = `${stamp}${theme.fg("toolTitle", theme.bold("subagents "))}${theme.fg("accent", `${count} task${count === 1 ? "" : "s"}`)}`;
-	for (const task of tasks.slice(0, 6)) {
-		const agent = typeof task?.agent === "string" ? task.agent : "...";
-		const preview = typeof task?.task === "string" ? ` ${truncate(task.task, 56)}` : "";
-		text += `\n  ${icon} ${theme.fg("accent", agent)}${theme.fg("dim", preview)}`;
-	}
-	if (tasks.length > 6) text += `\n  ${theme.fg("muted", `... +${tasks.length - 6} more`)}`;
+	const text = `${stamp}${theme.fg("toolTitle", theme.bold("subagents "))}${theme.fg("accent", `${count} task${count === 1 ? "" : "s"}`)}`;
 	return new Text(text, 0, 0);
 }
 
@@ -104,24 +119,8 @@ export function renderResumeCall(
 			? [args.resumes]
 			: [];
 	const count = resumes.length;
-	const icon = context?.isPartial === false
-		? context.isError
-			? theme.fg("error", "❌")
-			: theme.fg("success", "✅")
-		: theme.fg("warning", "⏳");
 	const stamp = getCallStartStamp(context, theme);
-	let text = `${stamp}${theme.fg("toolTitle", theme.bold("resume subagents "))}${theme.fg("accent", `${count} subagent${count === 1 ? "" : "s"}`)}`;
-	for (const resume of resumes.slice(0, 6)) {
-		const name = typeof resume?.subagent === "string"
-			? resume.subagent
-			: typeof resume?.name === "string"
-				? resume.name
-				: "...";
-		const task = typeof resume?.task === "string" ? resume.task : typeof resume?.prompt === "string" ? resume.prompt : undefined;
-		const preview = task !== undefined ? ` ${truncate(task, 56)}` : "";
-		text += `\n  ${icon} ${theme.fg("accent", name)}${theme.fg("dim", preview)}`;
-	}
-	if (resumes.length > 6) text += `\n  ${theme.fg("muted", `... +${resumes.length - 6} more`)}`;
+	const text = `${stamp}${theme.fg("toolTitle", theme.bold("resume subagents "))}${theme.fg("accent", `${count} subagent${count === 1 ? "" : "s"}`)}`;
 	return new Text(text, 0, 0);
 }
 
@@ -143,52 +142,66 @@ function compactText(text: string, maxLength = 240): string {
 	return truncate(firstLine, maxLength);
 }
 
-function isRenderableResult(value: unknown): value is SingleResult {
-	return value !== null &&
-		typeof value === "object" &&
-		!Array.isArray(value) &&
-		typeof (value as Partial<SingleResult>).agent === "string" &&
-		typeof (value as Partial<SingleResult>).exitCode === "number";
+function takePromptLine(text: string, width: number): { line: string; rest: string } {
+	const normalized = text.replace(/\s+/g, " ").trim();
+	if (!normalized || width <= 0) return { line: "", rest: normalized };
+	if (normalized.length <= width) return { line: normalized, rest: "" };
+	let split = normalized.lastIndexOf(" ", width);
+	if (split < Math.max(1, Math.floor(width / 2))) split = width;
+	return { line: normalized.slice(0, split), rest: normalized.slice(split).trimStart() };
 }
 
-function getCollapsedResultText(details: SubagentDetails, fallbackText: string): string {
-	const results = details.results.filter(isRenderableResult);
-	if (results.length === 0) return compactText(fallbackText);
+class CollapsedSubagentComponent implements Component {
+	constructor(
+		private readonly details: SubagentDetails,
+		private readonly theme: { fg: ThemeFg; bold: (s: string) => string },
+	) {}
 
-	const running = results.filter((item) => item.exitCode === -1).length;
-	const finished = results.length - running;
-	const succeeded = results.filter((item) => item.exitCode === 0 && !isResultError(item)).length;
-	const failed = finished - succeeded;
-
-	if (details.mode === "parallel") {
-		return running > 0
-			? `Parallel: ${finished}/${results.length} done, ${running} running...`
-			: `Parallel: ${succeeded}/${results.length} succeeded${failed > 0 ? `, ${failed} failed` : ""}`;
+	render(width: number): string[] {
+		if (width <= 0) return [];
+		const nodes = buildTopLevelNodes(this.details);
+		const lines: string[] = [];
+		for (const node of nodes) {
+			const rawPrefix = `  ${node.status === "running" ? "⏳" : node.status === "error" ? "❌" : "✅"} ${node.label} `;
+			const firstWidth = Math.max(8, width - rawPrefix.length);
+			const first = takePromptLine(node.task ?? "", firstWidth);
+			const continuationIndent = " ".repeat(Math.min(rawPrefix.length, Math.max(2, width - 8)));
+			const second = takePromptLine(first.rest, Math.max(8, width - continuationIndent.length));
+			const firstLine = `  ${statusEmoji(node.status, this.theme)} ${this.theme.fg("accent", node.label)}${first.line ? ` ${this.theme.fg("dim", first.line)}` : ""}`;
+			lines.push(fitLine(firstLine, width));
+			if (first.rest) {
+				const hasMore = second.rest.length > 0;
+				const secondText = `${second.line}${hasMore ? "..." : ""}`;
+				lines.push(fitLine(`${continuationIndent}${this.theme.fg("dim", secondText)}`, width));
+			}
+			const actionAt = node.lastActionAt ?? node.startedAt;
+			if (actionAt !== undefined) {
+				lines.push(fitLine(`     ${this.theme.fg("muted", `last action: ${formatClockTime(actionAt)}`)}`, width));
+			}
+		}
+		const counts = countNodes(nodes);
+		if (lines.length > 0) lines.push("");
+		lines.push(fitLine(this.theme.fg("dim", topLevelSummary(this.details, counts)), width));
+		return lines;
 	}
 
-	const item = results[0];
-	if (item.exitCode === -1) return `Agent ${item.agent}: running...`;
-	if (isResultError(item)) {
-		const reason = [item.errorMessage, item.stderr, item.stopReason]
-			.find((value): value is string => typeof value === "string" && value.length > 0);
-		return `Agent ${item.agent}: failed${reason ? ` — ${compactText(reason, 180)}` : ""}`;
-	}
-	return `Agent ${item.agent}: completed`;
+	invalidate(): void {}
 }
 
 export function renderResult(
 	result: { content: Array<{ type: string; text?: string }>; details?: unknown },
 	expanded: boolean,
 	theme: { fg: ThemeFg; bold: (s: string) => string },
-): Container | Text {
+): Component | Container | Text {
 	const fallbackText = getResultText(result);
 
-	// Keep the normal row compact. Ctrl+O switches to the live tree below.
+	// The collapsed view remains live and shows each direct child separately.
+	// Its status icon comes from that child's result, not the outer tool state,
+	// so completed siblings update while other tasks are still running.
 	if (!expanded) {
-		const text = isSubagentDetails(result.details)
-			? getCollapsedResultText(result.details, fallbackText)
-			: compactText(fallbackText);
-		return new Text(text, 0, 0);
+		return isSubagentDetails(result.details) && result.details.results.length > 0
+			? new CollapsedSubagentComponent(result.details, theme)
+			: new Text(compactText(fallbackText), 0, 0);
 	}
 
 	if (!isSubagentDetails(result.details) || result.details.results.length === 0) {
@@ -216,7 +229,7 @@ export function renderResult(
 		);
 
 		container.addChild(new Spacer(1));
-		container.addChild(new Text(renderTreeLines(nodes, theme, showOutputPreview).join("\n"), 0, 0));
+		container.addChild(new Text(renderTreeLines(nodes, theme, showOutputPreview, 0, "", true).join("\n"), 0, 0));
 		return container;
 	} catch {
 		// Pi falls back to raw result.content when a custom renderer throws, which

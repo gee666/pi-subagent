@@ -150,77 +150,32 @@ function cleanupTempDir(dir: string | null): void {
   }
 }
 
-function getCurrentPiCliScript(): string | null {
-  const script = process.argv[1];
-  if (!script) return null;
+export interface RuntimeLaunchCommand {
+  command: string;
+  argsPrefix: string[];
+}
 
-  // When this extension is loaded by pi, process.argv[1] is the pi entrypoint.
-  // Reusing it with process.execPath avoids relying on PATH while still running
-  // the exact same pi installation as the parent process.
-  //
-  // On Linux/macOS the launched entrypoint is usually the npm `bin` symlink
-  // (e.g. <prefix>/bin/pi) that points at .../pi-coding-agent/dist/cli.js, so
-  // argv[1] does NOT end in /dist/cli.js. Resolve symlinks before matching —
-  // otherwise this check fails and we fall back to scanning PATH, which can
-  // pick a different (e.g. much slower, cross-filesystem) pi install than the
-  // one actually running.
-  const candidates = [script];
+/**
+ * Re-launch the runtime and entrypoint that are executing this Pi process.
+ *
+ * This deliberately knows nothing about npm, pnpm, Pi package names, or dist
+ * layouts. With Node it becomes `node <entrypoint>`; with Bun it becomes
+ * `bun <entrypoint>`. Package-manager shims have already done their job before
+ * the current process starts, so children do not need to execute or parse them.
+ */
+export function getCurrentRuntimeLaunch(
+  argv: readonly string[] = process.argv,
+  execPath = process.execPath,
+): RuntimeLaunchCommand | null {
+  const rawEntrypoint = argv[1];
+  if (!execPath || !rawEntrypoint || rawEntrypoint.startsWith("-")) return null;
+  const entrypoint = path.resolve(rawEntrypoint);
   try {
-    const real = fs.realpathSync(script);
-    if (real && real !== script) candidates.push(real);
+    if (!fs.statSync(entrypoint).isFile()) return null;
   } catch {
-    // argv[1] not statable; fall through with the raw value.
+    return null;
   }
-  for (const candidate of candidates) {
-    const normalized = candidate.replace(/\\/g, "/");
-    if (normalized.includes("/pi-coding-agent/") && normalized.endsWith("/dist/cli.js")) {
-      return candidate;
-    }
-  }
-  return null;
-}
-
-function findPiCliScriptOnPath(): string | null {
-  const pathEnv = process.env.PATH ?? "";
-  for (const dir of pathEnv.split(path.delimiter)) {
-    if (!dir) continue;
-    for (const shimName of process.platform === "win32" ? ["pi.cmd", "pi"] : ["pi"]) {
-      const shimPath = path.join(dir, shimName);
-      if (!fs.existsSync(shimPath)) continue;
-
-      // Common on Linux/macOS: the npm `bin/pi` entry is a symlink pointing
-      // straight at .../pi-coding-agent/dist/cli.js. Resolve it directly — its
-      // file *content* is JS (not a wrapper that names cli.js), so the text
-      // regex below would miss it and we'd skip this (often faster, same-
-      // filesystem) install in favour of a later PATH entry.
-      try {
-        const real = fs.realpathSync(shimPath);
-        const normalized = real.replace(/\\/g, "/");
-        if (normalized.includes("/pi-coding-agent/") && normalized.endsWith("/dist/cli.js")) {
-          return real;
-        }
-      } catch {
-        // not a resolvable symlink; fall through to the wrapper-text scan.
-      }
-
-      let text = "";
-      try {
-        text = fs.readFileSync(shimPath, "utf8");
-      } catch {
-        continue;
-      }
-      const match = text.match(/node_modules[\\/]([^\s"']*pi-coding-agent)[\\/]dist[\\/]cli\.js/);
-      if (!match) continue;
-      const cliPath = path.join(dir, "node_modules", match[1], "dist", "cli.js");
-      if (fs.existsSync(cliPath)) return cliPath;
-    }
-  }
-  return null;
-}
-
-/** Resolve the dist/cli.js of the currently running pi installation, if findable. */
-export function getPiCliScriptPath(): string | null {
-  return getCurrentPiCliScript() ?? findPiCliScriptOnPath();
+  return { command: execPath, argsPrefix: [entrypoint] };
 }
 
 function getPiSpawnCommand(override?: { command: string; argsPrefix?: string[] }): { command: string; argsPrefix: string[] } {
@@ -243,9 +198,61 @@ function getPiSpawnCommand(override?: { command: string; argsPrefix?: string[] }
     return { command: overrideCommand, argsPrefix };
   }
 
-  const cliScript = getCurrentPiCliScript() ?? findPiCliScriptOnPath();
-  if (cliScript) return { command: process.execPath, argsPrefix: [cliScript] };
+  const currentRuntime = getCurrentRuntimeLaunch();
+  if (currentRuntime) return currentRuntime;
+
+  // SDK/embedded hosts may have no script entrypoint. They can set the
+  // explicit command variables above; keep `pi` as a final conventional
+  // fallback for environments where it is a real executable on PATH.
   return { command: "pi", argsPrefix: [] };
+}
+
+/**
+ * Build a child environment with a dependable executable search path.
+ *
+ * Elevated PowerShell sessions and pnpm shims can start Pi with a PATH that
+ * omits PNPM_HOME, the user npm bin directory, or even the Node directory.
+ * Child Pi processes then start (when we resolved cli.js directly) but cannot
+ * launch tools or nested Pi processes. Windows also treats Path/PATH keys
+ * case-insensitively, while Node's env object does not, so emit exactly one.
+ */
+export function buildChildProcessEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  const inherited = { ...process.env, ...extra };
+  const pathEntries: string[] = [];
+  const add = (value: string | undefined) => {
+    if (!value) return;
+    for (const entry of value.split(path.delimiter)) {
+      const clean = entry.trim();
+      if (!clean) continue;
+      const key = process.platform === "win32" ? clean.toLowerCase() : clean;
+      if (!pathEntries.some((existing) => (process.platform === "win32" ? existing.toLowerCase() : existing) === key)) {
+        pathEntries.push(clean);
+      }
+    }
+  };
+
+  for (const [key, value] of Object.entries(inherited)) {
+    if (key.toLowerCase() === "path") add(value);
+  }
+  add(path.dirname(process.execPath));
+  add(process.argv[1] ? path.dirname(path.resolve(process.argv[1])) : undefined);
+  add(inherited.PNPM_HOME);
+  add(inherited.npm_config_prefix);
+  if (inherited.npm_config_prefix) add(path.join(inherited.npm_config_prefix, "bin"));
+  if (process.platform === "win32") {
+    add(inherited.APPDATA ? path.join(inherited.APPDATA, "npm") : undefined);
+    add(inherited.LOCALAPPDATA ? path.join(inherited.LOCALAPPDATA, "pnpm") : undefined);
+    add(inherited.USERPROFILE ? path.join(inherited.USERPROFILE, "AppData", "Local", "pnpm") : undefined);
+    const systemRoot = inherited.SystemRoot ?? inherited.SYSTEMROOT;
+    add(systemRoot ? path.join(systemRoot, "System32") : undefined);
+  }
+
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(inherited)) {
+    if (key.toLowerCase() !== "path") env[key] = value;
+  }
+  env[process.platform === "win32" ? "Path" : "PATH"] = pathEntries.join(path.delimiter);
+  return env;
 }
 
 function resolveExtensionArg(value: string): string {
@@ -472,6 +479,14 @@ export function processJsonLine(line: string, result: SingleResult): boolean {
   // Guard: JSON.parse can return null, a number, boolean, or array — none of which have .type
   if (!event || typeof event !== "object" || Array.isArray(event)) return false;
 
+  const semanticEventTypes = new Set([
+    "message_end", "tool_result_end", "subagent_progress", "turn_start",
+    "turn_end", "tool_execution_start", "tool_execution_end",
+  ]);
+  if (semanticEventTypes.has(event.type)) {
+    result.lastActionAt = typeof event.timestamp === "number" ? event.timestamp : Date.now();
+  }
+
   if (event.type === "message_end" && event.message) {
     const msg = event.message as Message;
     if (hasMessage(result, msg)) return true;
@@ -638,7 +653,7 @@ export interface RunAgentOptions {
   agentName: string;
   /** Task description. */
   task: string;
-  /** Unique resumable name assigned to this subagent (e.g. "code-writer-01"). */
+  /** Unique resumable human name assigned to this subagent (e.g. "John"). */
   subagentName?: string;
   /** When true, send the task text to the child verbatim (no "Task:" / resume preamble). */
   rawPrompt?: boolean;
@@ -745,6 +760,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
     task,
     name: opts.subagentName ?? initialResult?.name,
     startedAt: initialResult?.startedAt ?? Date.now(),
+    lastActionAt: initialResult?.lastActionAt ?? Date.now(),
     exitCode: -1,
     messages: initialResult?.messages ? [...initialResult.messages] : [],
     stderr: initialResult?.stderr ?? "",
@@ -835,8 +851,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
         // agents and tools, rather than only their immediate Pi parent.
         detached: process.platform !== "win32",
         stdio: ["pipe", "pipe", "pipe"],
-        env: {
-          ...process.env,
+        env: buildChildProcessEnv({
           [SUBAGENT_DEPTH_ENV]: String(nextDepth),
           [SUBAGENT_MAX_DEPTH_ENV]: String(propagatedMaxDepth),
           [SUBAGENT_STACK_ENV]: JSON.stringify(propagatedStack),
@@ -844,8 +859,9 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
           ...(sessionRoot ? { [SUBAGENT_SESSION_ROOT_ENV]: sessionRoot } : {}),
           ...(opts.namesFile ? { [SUBAGENT_NAMES_FILE_ENV]: opts.namesFile } : {}),
           ...(fallbackModel ? { [SUBAGENT_FALLBACK_MODEL_ENV]: fallbackModel } : {}),
+          // All other provider/auth/proxy/temp/home variables are inherited.
           // PI_OFFLINE is NOT forced here — see explanation near PI_OFFLINE_ENV.
-        },
+        }),
       });
 
       let buffer = "";
@@ -922,7 +938,10 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
             const systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT ?? "C:\\Windows";
             const killer = spawn(
               path.join(systemRoot, "System32", "taskkill.exe"),
-              ["/PID", String(proc.pid), "/T", ...(force ? ["/F"] : [])],
+              // taskkill has no reliable graceful console-process mode when
+              // launched from elevated PowerShell; without /F it often leaves
+              // the Node child alive until our five-second escalation timer.
+              ["/PID", String(proc.pid), "/T", "/F"],
               { shell: false, stdio: "ignore", windowsHide: true },
             );
             killer.unref();
@@ -993,7 +1012,11 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
             result.stopReason = "error";
             result.errorMessage = message;
             appendBoundedStderr(result, `[pi-subagent] ${message}\n`);
-            forceStopAndSettle(1);
+            // No agent turn ever started, so there is no buffered semantic
+            // output to drain. Kill the rejected RPC process tree and settle
+            // immediately instead of waiting on slow Windows taskkill/stdio.
+            stopChild(true);
+            doResolve(1);
           }
           return;
         }
@@ -1002,6 +1025,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
         // compact-and-retry, or process a queued continuation. Killing here was
         // the direct cause of the WebSocket failures in the inspected session.
         if (event?.type === "agent_end") {
+          result.lastActionAt = Date.now();
           noteSemanticActivity(
             event.willRetry === true ? RETRY_WAIT_GRACE_MS : 0,
           );
@@ -1010,6 +1034,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
 
         if (event?.type === "agent_settled") {
           agentSettled = true;
+          result.lastActionAt = Date.now();
           // No semantic watchdog may fire while we are only waiting for the
           // deliberately terminated RPC process tree to close. On slower
           // launchers (notably Windows taskkill), that cleanup can outlast a
@@ -1052,8 +1077,10 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
           if (event?.type === "message_update" || event?.type === "tool_execution_update") {
             // Streaming deltas are intentionally not retained in result.messages,
             // but they prove the model/tool is still making real progress.
+            result.lastActionAt = Date.now();
             noteSemanticActivity();
           } else if (event?.type === "auto_retry_start") {
+            result.lastActionAt = Date.now();
             const delayMs = Number.isFinite(event.delayMs) ? Math.max(0, Number(event.delayMs)) : 0;
             noteSemanticActivity(delayMs + RETRY_WAIT_GRACE_MS);
           } else if (
@@ -1064,6 +1091,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
             event?.type === "summarization_retry_attempt_start" ||
             event?.type === "summarization_retry_finished"
           ) {
+            result.lastActionAt = Date.now();
             noteSemanticActivity();
           }
         }
@@ -1340,6 +1368,7 @@ export async function executeParallelSubprocess(
     task: t.task,
     name: extras?.names?.[index],
     startedAt: Date.now(),
+    lastActionAt: Date.now(),
     exitCode: -1,
     messages: [],
     stderr: "",
@@ -1434,9 +1463,9 @@ export async function executeParallelSubprocess(
     const output = succeeded
       ? getFinalOutput(r.messages, r.finalOutput)
       : r.errorMessage || r.stderr || getFinalOutput(r.messages, r.finalOutput);
-    const nameTag = r.name ? ` • name: ${r.name}` : "";
+    const identity = r.name ? `${r.name} (${r.agent})` : r.agent;
     const status = succeeded ? "completed" : r.exitCode === -1 ? "unfinished" : "failed";
-    return `[${r.agent}${nameTag}] ${status}: ${output || "(no output)"}`;
+    return `[${identity}] ${status}: ${output || "(no output)"}`;
   });
 
   return {

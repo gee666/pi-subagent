@@ -80,9 +80,34 @@ describe("tree node start timestamps", () => {
   });
 });
 
-describe("subagent names in tree meta", () => {
-  it("shows the resumable name before the agent source", () => {
-    const nodes = buildTopLevelNodes(makeDetails([makeResult({ name: "writer-01" })]));
-    assert.ok(nodes[0].meta?.startsWith("writer-01 • builtin"), nodes[0].meta);
+describe("recursive last action", () => {
+  it("uses the newest descendant action for the parent", () => {
+    const parentAction = Date.now() - 10_000;
+    const childAction = Date.now();
+    const childDetails = makeDetails([makeResult({ name: "Maria", lastActionAt: childAction })]);
+    const parent = makeResult({
+      name: "John",
+      lastActionAt: parentAction,
+      messages: [{
+        role: "assistant",
+        content: [{
+          type: "toolCall",
+          name: "subagents",
+          toolCallId: "nested",
+          arguments: { tasks: [{ agent: "writer", task: "child work" }] },
+        }],
+      }] as any,
+      liveNestedSubagents: { nested: childDetails },
+    });
+    const [node] = buildTopLevelNodes(makeDetails([parent]));
+    assert.equal(node.lastActionAt, childAction);
+  });
+});
+
+describe("subagent human names in tree labels", () => {
+  it("shows name(type) and keeps source in metadata", () => {
+    const nodes = buildTopLevelNodes(makeDetails([makeResult({ name: "John" })]));
+    assert.equal(nodes[0].label, "John (writer)");
+    assert.ok(nodes[0].meta?.startsWith("builtin"), nodes[0].meta);
   });
 });

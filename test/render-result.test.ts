@@ -60,10 +60,12 @@ describe("renderResult collapsed/expanded views", { skip: !registerHooks && "nod
 					mode: "parallel",
 					delegationMode: "spawn",
 					projectAgentsDir: null,
-					results: ["code-writer", "code-reviwer"].map((agent) => ({
+					results: ["code-writer", "code-reviwer"].map((agent, index) => ({
 						agent,
+						name: index === 0 ? "John" : "Maria",
 						agentSource: "builtin",
 						task: `run ${agent}`,
+						startedAt: Date.now(),
 						exitCode: -1,
 						messages: [],
 						stderr: "",
@@ -88,11 +90,16 @@ describe("renderResult collapsed/expanded views", { skip: !registerHooks && "nod
 				theme,
 			) as any).render(120).join("\n");
 
-			assert.match(collapsed, /Parallel: 0\/2 done, 2 running/);
+			assert.match(collapsed, /John \(code-writer\)/);
+			assert.match(collapsed, /Maria \(code-reviwer\)/);
+			assert.match(collapsed, /2 running • 0\/2 finished/);
+			assert.match(collapsed, /last action:/);
 			assert.doesNotMatch(collapsed, /subagent tree/);
 			assert.match(expanded, /subagent tree/);
 			assert.match(expanded, /code-writer/);
 			assert.match(expanded, /code-reviwer/);
+			assert.match(expanded, /prompt: run code-writer/);
+			assert.match(expanded, /prompt: run code-reviwer/);
 			assert.match(expandedImmediately, /code-writer/);
 			assert.match(expandedImmediately, /code-reviwer/);
 			assert.match(expanded, /→ bash/);
@@ -108,8 +115,24 @@ describe("renderResult collapsed/expanded views", { skip: !registerHooks && "nod
 				content: [{ type: "text", text: `long streamed output\n${"hidden".repeat(100)}` }],
 				details: { ...result.details, mode: "single", results: [result.details.results[0]] },
 			}, false, theme) as any).render(120).join("\n");
-			assert.equal(singleCollapsed, "Agent code-writer: running...");
+			assert.match(singleCollapsed, /John \(code-writer\)/);
+			assert.match(singleCollapsed, /1 running • 0\/1 finished/);
 			assert.doesNotMatch(singleCollapsed, /hidden/);
+
+			const mixedDetails = {
+				...result.details,
+				results: [
+					{ ...result.details.results[0], exitCode: 0, turnInProgress: false },
+					result.details.results[1],
+				],
+			};
+			const mixedCollapsed = (renderResult(
+				{ ...result, details: mixedDetails },
+				false,
+				theme,
+			) as any).render(120).join("\n");
+			assert.match(mixedCollapsed, /✅ John \(code-writer\)/);
+			assert.match(mixedCollapsed, /⏳ Maria \(code-reviwer\)/);
 
 			const nestedWriter = {
 				...result.details.results[0],
