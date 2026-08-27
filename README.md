@@ -235,7 +235,7 @@ Note: crash-resume covers `subagents` calls only. An interrupted `resume_subagen
 ## Resumable Subagents by Name (`resume_subagents`)
 
 Every subagent run is assigned a random, durable human first name from a bundled
-list of 500 popular American names — for example `John`, `Maria`, or `Elena`.
+list of 1000 culturally diverse names — for example `John`, `Octavian`, or `Vishnu`.
 Names are never reused anywhere in the same delegation tree. The name is
 returned together with the agent type and shown in every TUI view.
 

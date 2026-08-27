@@ -19,7 +19,7 @@ import {
   updateNameRecord,
   SUBAGENT_NAMES_CUSTOM_TYPE,
 } from "../names.js";
-import { AMERICAN_NAMES } from "../american-names.js";
+import { AGENT_NAMES } from "../agent-names.js";
 
 let tmpDir: string;
 let namesFile: string;
@@ -33,16 +33,22 @@ afterEach(() => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-describe("American name pool", () => {
-  it("contains 500 unique human names", () => {
-    assert.equal(AMERICAN_NAMES.length, 500);
-    assert.equal(new Set(AMERICAN_NAMES.map((name) => name.toLowerCase())).size, 500);
+describe("agent name pool", () => {
+  it("contains exactly 1000 case-insensitively unique given names", () => {
+    assert.equal(AGENT_NAMES.length, 1000);
+    assert.equal(new Set(AGENT_NAMES.map((name) => name.toLowerCase())).size, 1000);
+  });
+
+  it("includes requested culturally diverse examples", () => {
+    assert.ok(AGENT_NAMES.includes("Octavian"));
+    assert.ok(AGENT_NAMES.includes("Achilles"));
+    assert.ok(AGENT_NAMES.includes("Vishnu"));
   });
 });
 
 describe("getNamesFilePath", () => {
   it("derives the path from session root and sanitized session id", () => {
-    const p = getNamesFilePath("/root/subagents", "sess/../weird id", undefined);
+    const p = getNamesFilePath("/root/subagents", "sess/../weird id", "");
     assert.equal(p, path.join("/root/subagents", "sess_.._weird_id", "subagent-names.json"));
   });
 
@@ -59,7 +65,7 @@ describe("allocateSubagentNames", () => {
       { agent: "code-reviewer", task: "c", sessionDir: "/s/2" },
     ]);
     assert.equal(new Set(names).size, 3);
-    assert.ok(names.every((name) => (AMERICAN_NAMES as readonly string[]).includes(name)));
+    assert.ok(names.every((name) => (AGENT_NAMES as readonly string[]).includes(name)));
   });
 
   it("persists allocations across separate calls (restart survival)", async () => {

@@ -2,7 +2,7 @@
  * Durable subagent name registry.
  *
  * Every spawned subagent gets a random human first name from the bundled
- * 500-name pool (e.g. `John`, `Maria`, `Elena`). Names are unique within one
+ * 1000-name culturally diverse pool (e.g. `John`, `Octavian`, `Vishnu`). Names are unique within one
  * delegation tree (the tree
  * rooted at the top-level pi session) and are persisted in a JSON registry
  * file under the subagent session root, so they survive process restarts.
@@ -21,7 +21,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomInt } from "node:crypto";
-import { AMERICAN_NAMES } from "./american-names.js";
+import { AGENT_NAMES } from "./agent-names.js";
 
 export const SUBAGENT_NAMES_FILE_ENV = "PI_SUBAGENT_NAMES_FILE";
 
@@ -351,7 +351,7 @@ export async function updateNamesRegistry<T>(
 
 export function getAvailableSubagentNames(registry: NamesRegistry): string[] {
   const used = new Set(Object.keys(registry.agents).map((name) => name.toLowerCase()));
-  return AMERICAN_NAMES.filter((name) => !used.has(name.toLowerCase()));
+  return AGENT_NAMES.filter((name) => !used.has(name.toLowerCase()));
 }
 
 export interface AllocateNameRequest {
@@ -377,7 +377,7 @@ export async function allocateSubagentNames(
     const available = getAvailableSubagentNames(registry);
     if (available.length < requests.length) {
       throw new Error(
-        `The 500-name subagent pool is exhausted (${available.length} available, ${requests.length} requested).`,
+        `The ${AGENT_NAMES.length}-name subagent pool is exhausted (${available.length} available, ${requests.length} requested).`,
       );
     }
     for (const request of requests) {
