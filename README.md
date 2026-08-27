@@ -171,12 +171,14 @@ semantics. Embedded hosts without a script entrypoint can use
 ## Subagent Liveness Timeouts
 
 A delegated process cannot block its parents forever. The runner applies a
-startup timeout before the first model turn and a semantic-inactivity timeout
-after startup. Tool/turn events and changed nested-agent state reset the idle
-timer; repeated unchanged progress heartbeats do not. On timeout or
-cancellation, the runner terminates the child process tree and bounds cleanup;
-even if a wedged OS process never reports `close`, the tool returns an error
-result so every waiting parent can settle.
+startup timeout before the first model turn and an agent-inactivity timeout
+after startup. The inactivity watchdog is paused while any tool call is in
+progress, so tool executions can run for unlimited time; a fresh full idle
+window starts after the last concurrent tool finishes. Agent/turn events and
+changed nested-agent state reset the idle timer; repeated unchanged progress
+heartbeats do not. On timeout or cancellation, the runner terminates the child
+process tree and bounds cleanup; even if a wedged OS process never reports
+`close`, the tool returns an error result so every waiting parent can settle.
 
 RPC completion is based on Pi's `agent_settled` event—not `agent_end`.
 `agent_end` is only a low-level run boundary and may be followed by Pi's normal
@@ -188,7 +190,7 @@ reported immediately as failures.
 | --- | --- | --- |
 | `PI_SUBAGENT_STARTUP_TIMEOUT` | `120000` | Milliseconds allowed to reach the first model turn; `0` disables |
 | `PI_SUBAGENT_STARTUP_RETRIES` | `2` | Fresh retries after a startup timeout |
-| `PI_SUBAGENT_IDLE_TIMEOUT` | `1200000` | Milliseconds without new semantic RPC activity after startup; `0` disables |
+| `PI_SUBAGENT_IDLE_TIMEOUT` | `1200000` | Milliseconds without agent activity after startup, excluding time spent in ongoing tool calls; `0` disables |
 
 ## Timestamps & Status Footer
 

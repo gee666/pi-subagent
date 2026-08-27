@@ -45,8 +45,9 @@ const RETRY_WAIT_GRACE_MS = 60_000;
 const DEFAULT_STARTUP_TIMEOUT_MS = 120_000; // only for startup (before first assistant turn)
 const SUBAGENT_STARTUP_TIMEOUT_ENV = "PI_SUBAGENT_STARTUP_TIMEOUT";
 // Once startup succeeds, a child can otherwise remain alive forever if Pi loses
-// the next model/RPC turn after a tool result. Bound semantic inactivity (not
-// repeated progress heartbeats) so every delegation eventually settles.
+// the next model/RPC turn after a tool result. Bound agent inactivity (not
+// repeated progress heartbeats), but never while one of its tools is executing:
+// tool runtimes are intentionally unbounded.
 const DEFAULT_IDLE_TIMEOUT_MS = 20 * 60_000;
 const SUBAGENT_IDLE_TIMEOUT_ENV = "PI_SUBAGENT_IDLE_TIMEOUT";
 // A startup timeout is almost always a transient cold-start stall (slow cli /
@@ -874,6 +875,10 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       let agentSettled = false;
       let forcedExitCode: number | undefined;
       let lastNestedProgressSignature: string | undefined;
+      // Track only tool calls from this process attempt. Persisted live render
+      // state may contain a tool that was interrupted before a resume and must
+      // not disable the new process's watchdog forever.
+      const activeToolCallIds = new Set<string>();
       let abortHandler: (() => void) | undefined;
       const promptRequestId = `pi-subagent-${process.pid}-${Date.now()}-${attempt}`;
       let steeringRequest = 0;
@@ -982,12 +987,18 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       })();
 
       const noteSemanticActivity = (minimumQuietPeriodMs = 0) => {
+        if (idleTimer) { clearTimeout(idleTimer); idleTimer = undefined; }
         if (!receivedFirstEvent || idleTimeoutMs === 0 || resolved) return;
-        if (idleTimer) clearTimeout(idleTimer);
+        // The idle timeout measures the agent itself, not tools it has invoked.
+        // A tool may legitimately be silent for longer than the configured
+        // timeout, so leave the watchdog disarmed until every concurrent tool
+        // execution has ended. tool_execution_end will call this again and
+        // start a fresh full inactivity window.
+        if (activeToolCallIds.size > 0) return;
         const quietPeriodMs = Math.max(idleTimeoutMs, minimumQuietPeriodMs);
         idleTimer = setTimeout(() => {
           if (resolved) return;
-          const message = `Subagent inactivity timeout: no new RPC activity for ${quietPeriodMs}ms.`;
+          const message = `Subagent inactivity timeout: no agent activity for ${quietPeriodMs}ms.`;
           forcedExitCode = 1;
           result.stopReason = "error";
           result.errorMessage = message;
@@ -1000,6 +1011,12 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       const flushLine = (line: string) => {
         let event: any;
         try { event = JSON.parse(line); } catch { event = null; }
+
+        if (event?.type === "tool_execution_start" && typeof event.toolCallId === "string") {
+          activeToolCallIds.add(event.toolCallId);
+        } else if (event?.type === "tool_execution_end" && typeof event.toolCallId === "string") {
+          activeToolCallIds.delete(event.toolCallId);
+        }
 
         if (
           event?.type === "response" &&
