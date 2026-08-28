@@ -41,6 +41,7 @@ import {
   SUBAGENT_NAMES_CUSTOM_TYPE,
 } from "./names.js";
 import {
+  clearRenderCaches,
   recordToolCallStart,
   renderCall,
   renderResult,
@@ -73,6 +74,7 @@ import {
   type SingleResult,
   type SubagentDetails,
   type SubagentUsageSummary,
+  type UsageStats,
   DEFAULT_DELEGATION_MODE,
   buildLiveSubagentDetails,
   buildSubagentDetails,
@@ -507,44 +509,63 @@ function collectLiveUsageSummary(details: SubagentDetails): SubagentUsageSummary
   return summary;
 }
 
+type PersistedUsageTotals = {
+  leafId: unknown;
+  hasEntries: boolean;
+  parentUsage: UsageStats;
+  subagents: SubagentUsageSummary;
+};
+
+// SessionManager owns the history; a WeakMap lets its one current aggregate be
+// reclaimed with the manager. Repeated progress/heartbeat updates no longer
+// rescan a week-long branch when its leaf has not changed.
+const persistedUsageCache = new WeakMap<object, PersistedUsageTotals>();
+
 function collectCombinedUsageStatusLine(
   ctx: any,
   liveSummaries: SubagentUsageSummary[] = [],
 ): string | undefined {
-  const entries = typeof ctx?.sessionManager?.getEntries === "function" || typeof ctx?.sessionManager?.getBranch === "function"
-    ? branchEntries(ctx)
-    : [];
-  if (entries.length === 0 && liveSummaries.length === 0) return undefined;
+  const manager = ctx?.sessionManager;
+  const canReadEntries = typeof manager?.getEntries === "function" || typeof manager?.getBranch === "function";
+  const leafId = typeof manager?.getLeafId === "function" ? manager.getLeafId() : undefined;
+  const cacheKey = manager !== null && typeof manager === "object" ? manager as object : undefined;
+  let persisted = cacheKey && leafId !== undefined ? persistedUsageCache.get(cacheKey) : undefined;
 
-  const parentUsage = emptyUsage();
-  const subagents = emptyUsageSummary();
-  for (const entry of entries as any[]) {
-    if (entry?.type !== "message") continue;
-    const msg = entry.message;
-    if (!msg) continue;
-    if (msg.role === "assistant" && msg.provider !== RESUME_PROVIDER) {
-      const usage = msg.usage;
-      if (usage) {
-        parentUsage.input += usage.input || 0;
-        parentUsage.output += usage.output || 0;
-        parentUsage.cacheRead += usage.cacheRead || 0;
-        parentUsage.cacheWrite += usage.cacheWrite || 0;
-        parentUsage.cost += typeof usage.cost === "number" ? usage.cost : usage.cost?.total || 0;
-        parentUsage.turns += 1;
+  if (!persisted || persisted.leafId !== leafId) {
+    const entries = canReadEntries ? branchEntries(ctx) : [];
+    const parentUsage = emptyUsage();
+    const subagents = emptyUsageSummary();
+    for (const entry of entries as any[]) {
+      if (entry?.type !== "message") continue;
+      const msg = entry.message;
+      if (!msg) continue;
+      if (msg.role === "assistant" && msg.provider !== RESUME_PROVIDER) {
+        const usage = msg.usage;
+        if (usage) {
+          parentUsage.input += usage.input || 0;
+          parentUsage.output += usage.output || 0;
+          parentUsage.cacheRead += usage.cacheRead || 0;
+          parentUsage.cacheWrite += usage.cacheWrite || 0;
+          parentUsage.cost += typeof usage.cost === "number" ? usage.cost : usage.cost?.total || 0;
+          parentUsage.turns += 1;
+        }
+      }
+      if (msg.role === "toolResult" && isSubagentToolName(msg.toolName) && isSubagentDetails(msg.details)) {
+        addUsageSummary(
+          subagents,
+          msg.details.usageSummary ?? usageSummaryFromUsage(msg.details.aggregatedUsage),
+        );
       }
     }
-    if (msg.role === "toolResult" && isSubagentToolName(msg.toolName) && isSubagentDetails(msg.details)) {
-      addUsageSummary(
-        subagents,
-        msg.details.usageSummary ?? usageSummaryFromUsage(msg.details.aggregatedUsage),
-      );
-    }
+    persisted = { leafId, hasEntries: entries.length > 0, parentUsage, subagents };
+    if (cacheKey && leafId !== undefined) persistedUsageCache.set(cacheKey, persisted);
   }
-  for (const liveSummary of liveSummaries) {
-    addUsageSummary(subagents, liveSummary);
-  }
-  const subagentUsage = usageSummaryToUsageStats(subagents) ?? emptyUsage();
-  addUsage(parentUsage, subagentUsage);
+
+  if (!persisted.hasEntries && liveSummaries.length === 0) return undefined;
+  const parentUsage = { ...persisted.parentUsage };
+  const subagents = { ...persisted.subagents };
+  for (const liveSummary of liveSummaries) addUsageSummary(subagents, liveSummary);
+  addUsage(parentUsage, usageSummaryToUsageStats(subagents) ?? emptyUsage());
   return formatCombinedUsageStatusLine(parentUsage, subagents.subagentCount);
 }
 
@@ -1464,6 +1485,11 @@ export default function (pi: ExtensionAPI) {
     activeSubagentUsageSummaries.clear();
     forcedErrorToolCallIds.clear();
     activeSubagents.clear();
+    activeResumeNames.clear();
+    approvedProjectAgentDirsForSession.clear();
+    latestBroadcastTargets.all = [];
+    latestBroadcastTargets.youngest = [];
+    clearRenderCaches();
   });
 
   /**
@@ -1942,8 +1968,8 @@ ${agentList}\n\n${subagentsGuidance}\n\n${delegationGuardGuidance}${resumeGuidan
       },
 
       renderCall: (args, theme, context) => renderCall(args, theme, context),
-      renderResult: (result, { expanded }, theme) =>
-        renderResult(result, expanded, theme),
+      renderResult: (result, { expanded }, theme, context) =>
+        renderResult(result, expanded, theme, context),
       });
     };
 
@@ -2158,8 +2184,8 @@ ${agentList}\n\n${subagentsGuidance}\n\n${delegationGuardGuidance}${resumeGuidan
       },
 
       renderCall: (args, theme, context) => renderResumeCall(args, theme, context),
-      renderResult: (result, { expanded }, theme) =>
-        renderResult(result, expanded, theme),
+      renderResult: (result, { expanded }, theme, context) =>
+        renderResult(result, expanded, theme, context),
       });
     };
 
@@ -2225,34 +2251,38 @@ ${agentList}\n\n${subagentsGuidance}\n\n${delegationGuardGuidance}${resumeGuidan
     }
 
     let activeId: number | undefined;
-    const result = await runAgentSubprocess({
-      cwd: defaultCwd,
-      agents,
-      agentName,
-      task,
-      subagentName,
-      parentDepth: currentDepth,
-      parentAgentStack: ancestorAgentStack,
-      maxDepth,
-      preventCycles,
-      signal,
-      onUpdate,
-      makeDetails: makeDetails("single"),
-      sessionDir: previousResult?.sessionDir ?? sessionDir,
-      sessionRoot: currentSubagentSessionRoot,
-      namesFile: currentNamesFile || undefined,
-      resumeSession: resumeExistingSession,
-      initialResult: previousResult,
-      fallbackModel,
-      onHandle: (handle) => {
-        activeId = topLevelBaseId;
-        activeSubagents.set(activeId, { agent: agentName, task, handle, name: subagentName });
+    let result: SingleResult;
+    try {
+      result = await runAgentSubprocess({
+        cwd: defaultCwd,
+        agents,
+        agentName,
+        task,
+        subagentName,
+        parentDepth: currentDepth,
+        parentAgentStack: ancestorAgentStack,
+        maxDepth,
+        preventCycles,
+        signal,
+        onUpdate,
+        makeDetails: makeDetails("single"),
+        sessionDir: previousResult?.sessionDir ?? sessionDir,
+        sessionRoot: currentSubagentSessionRoot,
+        namesFile: currentNamesFile || undefined,
+        resumeSession: resumeExistingSession,
+        initialResult: previousResult,
+        fallbackModel,
+        onHandle: (handle) => {
+          activeId = topLevelBaseId;
+          activeSubagents.set(activeId, { agent: agentName, task, handle, name: subagentName });
+          updateLatestBroadcastTargets(undefined);
+        },
+      });
+    } finally {
+      if (activeId !== undefined) {
+        activeSubagents.delete(activeId);
         updateLatestBroadcastTargets(undefined);
-      },
-    });
-    if (activeId !== undefined) {
-      activeSubagents.delete(activeId);
-      updateLatestBroadcastTargets(undefined);
+      }
     }
 
     if (isResultError(result)) {
@@ -2332,6 +2362,7 @@ ${agentList}\n\n${subagentsGuidance}\n\n${delegationGuardGuidance}${resumeGuidan
       );
     } finally {
       for (const id of taskIds.values()) activeSubagents.delete(id);
+      updateLatestBroadcastTargets(undefined);
     }
   }
 }

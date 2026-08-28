@@ -41,6 +41,7 @@ import {
 } from "./types.js";
 import {
 	type ThemeFg,
+	type TreeNode,
 	buildTopLevelNodes,
 	countNodes,
 	formatClockTime,
@@ -75,6 +76,10 @@ export function recordToolCallStart(toolCallId: string): void {
 		const oldest = callStartTimes.keys().next().value;
 		if (oldest !== undefined) callStartTimes.delete(oldest);
 	}
+}
+
+export function clearRenderCaches(): void {
+	callStartTimes.clear();
 }
 
 function getCallStartStamp(
@@ -159,7 +164,10 @@ class CollapsedSubagentComponent implements Component {
 
 	render(width: number): string[] {
 		if (width <= 0) return [];
-		const nodes = buildTopLevelNodes(this.details);
+		// Collapsed rows intentionally use durable result metadata only. Reading
+		// child session transcripts here made every TUI repaint scale with the
+		// total number of historical subagents.
+		const nodes = buildTopLevelNodes(this.details, { hydrateSessions: false });
 		const lines: string[] = [];
 		for (const node of nodes) {
 			const rawPrefix = `  ${node.status === "running" ? "⏳" : node.status === "error" ? "❌" : "✅"} ${node.label} `;
@@ -181,17 +189,43 @@ class CollapsedSubagentComponent implements Component {
 		}
 		const counts = countNodes(nodes);
 		if (lines.length > 0) lines.push("");
-		lines.push(fitLine(this.theme.fg("dim", topLevelSummary(this.details, counts)), width));
+		lines.push(fitLine(this.theme.fg("dim", topLevelSummary(this.details, counts, { directOnly: true })), width));
 		return lines;
 	}
 
 	invalidate(): void {}
 }
 
+type ResultRenderContext = {
+	state?: Record<string, unknown>;
+};
+
+type SettledTreeCache = {
+	details: SubagentDetails;
+	nodes: TreeNode[];
+};
+
+function expandedNodes(details: SubagentDetails, context?: ResultRenderContext): TreeNode[] {
+	const settled = details.results.every((result) => result?.exitCode !== -1);
+	const cached = context?.state?.subagentSettledTree as SettledTreeCache | undefined;
+	if (settled && cached?.details === details) return cached.nodes;
+
+	const nodes = buildTopLevelNodes(details);
+	// Row-local state lives only as long as Pi's tool row. Keep one compact tree,
+	// replacing the prior value, and never retain the hydrated transcripts.
+	if (settled && context?.state) {
+		context.state.subagentSettledTree = { details, nodes } satisfies SettledTreeCache;
+	} else if (context?.state && cached) {
+		delete context.state.subagentSettledTree;
+	}
+	return nodes;
+}
+
 export function renderResult(
 	result: { content: Array<{ type: string; text?: string }>; details?: unknown },
 	expanded: boolean,
 	theme: { fg: ThemeFg; bold: (s: string) => string },
+	context?: ResultRenderContext,
 ): Component | Container | Text {
 	const fallbackText = getResultText(result);
 
@@ -210,7 +244,7 @@ export function renderResult(
 	const details: SubagentDetails = result.details;
 
 	try {
-		const nodes = buildTopLevelNodes(details);
+		const nodes = expandedNodes(details, context);
 		const counts = countNodes(nodes);
 		const showOutputPreview = !hasNestedChildren(nodes);
 		const icon = counts.running > 0

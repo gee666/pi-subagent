@@ -245,12 +245,12 @@ function buildPendingNodes(call: PendingSubagentCall): TreeNode[] {
 	}));
 }
 
-function buildNodesFromDetails(details: SubagentDetails): TreeNode[] {
-	return details.results.map((result) => buildResultNode(result));
+function buildNodesFromDetails(details: SubagentDetails, hydrateSessions: boolean): TreeNode[] {
+	return details.results.map((result) => buildResultNode(result, hydrateSessions));
 }
 
-function buildNodesFromNestedResult(nested: NestedSubagentResult): TreeNode[] {
-	return buildNodesFromDetails(nested.details);
+function buildNodesFromNestedResult(nested: NestedSubagentResult, hydrateSessions: boolean): TreeNode[] {
+	return buildNodesFromDetails(nested.details, hydrateSessions);
 }
 
 function subagentCallSignature(call: PendingSubagentCall): string {
@@ -316,7 +316,14 @@ function findLiveNestedDetailsForCall(
 	return undefined;
 }
 
-function buildNestedChildren(result: SingleResult): TreeNode[] {
+function buildNestedChildren(result: SingleResult, hydrateSessions: boolean): TreeNode[] {
+	if (
+		hydrateSessions &&
+		(!Array.isArray(result.messages) || result.messages.length === 0) &&
+		typeof result.sessionDir === "string"
+	) {
+		return loadNestedNodesFromSession(result.sessionDir);
+	}
 	const parentIsRunning = result.exitCode === -1;
 	const completedByToolCallId = new Map<string, NestedSubagentResult>();
 	for (const nested of getNestedSubagentResults(result.messages)) {
@@ -349,7 +356,7 @@ function buildNestedChildren(result: SingleResult): TreeNode[] {
 		}
 
 		if (completed && isSubagentDetails(completed.details)) {
-			nodes.push(...buildNodesFromNestedResult(completed));
+			nodes.push(...buildNodesFromNestedResult(completed, hydrateSessions));
 			return;
 		}
 
@@ -357,7 +364,7 @@ function buildNestedChildren(result: SingleResult): TreeNode[] {
 			? findLiveNestedDetailsForCall(result, call, usedLiveKeys)
 			: undefined;
 		if (liveDetails) {
-			nodes.push(...buildNodesFromDetails(liveDetails));
+			nodes.push(...buildNodesFromDetails(liveDetails, hydrateSessions));
 			return;
 		}
 
@@ -494,8 +501,6 @@ function buildLeafPreview(result: SingleResult): string[] | undefined {
 	return unique.length > 0 ? unique.slice(-OUTPUT_PREVIEW_LINE_COUNT) : undefined;
 }
 
-const sessionMessageCache = new Map<string, { mtimeMs: number; messages: SingleResult["messages"] }>();
-
 function latestSessionFile(sessionDir: string): string | undefined {
 	try {
 		const entries = fs.readdirSync(sessionDir)
@@ -512,14 +517,9 @@ function latestSessionFile(sessionDir: string): string | undefined {
 	}
 }
 
-function loadMessagesFromSession(sessionDir: string | undefined): SingleResult["messages"] {
-	if (!sessionDir) return [];
+function loadNestedNodesFromSession(sessionDir: string): TreeNode[] {
 	const file = latestSessionFile(sessionDir);
 	if (!file) return [];
-	let mtimeMs = 0;
-	try { mtimeMs = fs.statSync(file).mtimeMs; } catch { return []; }
-	const cached = sessionMessageCache.get(file);
-	if (cached && cached.mtimeMs === mtimeMs) return cached.messages;
 
 	const messages: SingleResult["messages"] = [];
 	try {
@@ -532,20 +532,25 @@ function loadMessagesFromSession(sessionDir: string | undefined): SingleResult["
 	} catch {
 		return [];
 	}
-	sessionMessageCache.set(file, { mtimeMs, messages });
-	return messages;
+
+	// Parse the transcript into compact display nodes, then let the potentially
+	// very large messages array become unreachable immediately.
+	return buildNestedChildren({
+		agent: "session",
+		agentSource: "unknown",
+		task: "",
+		exitCode: 0,
+		messages,
+		stderr: "",
+		usage: {} as UsageStats,
+		toolCalls: {},
+		completedTurns: 0,
+		turnInProgress: false,
+		liveLog: [],
+	}, true);
 }
 
-function hydrateResultFromSession(result: SingleResult): SingleResult {
-	if (Array.isArray(result.messages) && result.messages.length > 0) return result;
-	const messages = loadMessagesFromSession(
-		typeof result.sessionDir === "string" ? result.sessionDir : undefined,
-	);
-	if (messages.length > 0) return { ...result, messages };
-	return Array.isArray(result.messages) ? result : { ...result, messages: [] };
-}
-
-function buildResultNode(rawResult: SingleResult): TreeNode {
+function buildResultNode(rawResult: SingleResult, hydrateSessions: boolean): TreeNode {
 	let result: SingleResult;
 	if (
 		rawResult !== null &&
@@ -554,7 +559,7 @@ function buildResultNode(rawResult: SingleResult): TreeNode {
 		typeof rawResult.agent === "string" &&
 		typeof rawResult.exitCode === "number"
 	) {
-		result = hydrateResultFromSession(rawResult);
+		result = rawResult;
 	} else {
 		result = {
 			agent: "unknown agent",
@@ -582,7 +587,7 @@ function buildResultNode(rawResult: SingleResult): TreeNode {
 		}
 	}
 
-	const children = buildNestedChildren(result);
+	const children = buildNestedChildren(result, hydrateSessions);
 	const isRunning = status === "running";
 	const liveLog = Array.isArray(result.liveLog) ? result.liveLog : [];
 	const ownLastAction = typeof result.lastActionAt === "number" && Number.isFinite(result.lastActionAt)
@@ -606,8 +611,11 @@ function buildResultNode(rawResult: SingleResult): TreeNode {
 	};
 }
 
-export function buildTopLevelNodes(details: SubagentDetails): TreeNode[] {
-	return details.results.map((result) => buildResultNode(result));
+export function buildTopLevelNodes(
+	details: SubagentDetails,
+	options: { hydrateSessions?: boolean } = {},
+): TreeNode[] {
+	return details.results.map((result) => buildResultNode(result, options.hydrateSessions !== false));
 }
 
 export function renderTreeLines(
@@ -665,7 +673,11 @@ export function renderTreeLines(
 	return lines;
 }
 
-export function topLevelSummary(details: SubagentDetails, counts: TreeCounts): string {
+export function topLevelSummary(
+	details: SubagentDetails,
+	counts: TreeCounts,
+	options: { directOnly?: boolean } = {},
+): string {
 	// aggregatedUsage includes own agents + all their nested descendants;
 	// fall back to summing only direct results for old serialised data lacking the field.
 	const safeResults = details.results.filter(
@@ -674,11 +686,18 @@ export function topLevelSummary(details: SubagentDetails, counts: TreeCounts): s
 	const totalUsage = formatUsage(
 		usageSummaryToUsageStats(details.usageSummary) ?? details.aggregatedUsage ?? aggregateUsage(safeResults),
 	);
+	const historicalTotal = options.directOnly
+		? Math.max(counts.total, details.usageSummary?.subagentCount ?? 0)
+		: counts.total;
+	const historicalFinished = options.directOnly && counts.running === 0
+		? historicalTotal
+		: counts.finished;
+	const outcomeScope = options.directOnly && historicalTotal > counts.total ? " direct" : "";
 	const parts = [
 		`${counts.running} running`,
-		`${counts.finished}/${counts.total} finished`,
-		`${counts.success} ok`,
-		`${counts.error} error`,
+		`${historicalFinished}/${historicalTotal} finished`,
+		`${counts.success}${outcomeScope} ok`,
+		`${counts.error}${outcomeScope} error`,
 	];
 	if (totalUsage) parts.push(totalUsage);
 	return parts.join(" • ");

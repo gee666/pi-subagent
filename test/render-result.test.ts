@@ -1,5 +1,8 @@
 import { strict as assert } from "node:assert";
+import * as fs from "node:fs";
 import * as nodeModule from "node:module";
+import * as os from "node:os";
+import * as path from "node:path";
 import { describe, it } from "node:test";
 
 const registerHooks = (nodeModule as any).registerHooks as undefined | ((hooks: {
@@ -176,6 +179,54 @@ describe("renderResult collapsed/expanded views", { skip: !registerHooks && "nod
 			assert.match(nestedExpanded, /unknown agent/);
 			assert.match(nestedExpanded, /nested-writer/);
 			assert.match(nestedExpanded, /tool-6/);
+
+			// Historical collapsed rows must not read and retain child transcripts.
+			// Nested session hydration is reserved for an explicitly expanded row.
+			const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-render-lazy-"));
+			try {
+				fs.writeFileSync(path.join(sessionDir, "session.jsonl"), [
+					JSON.stringify({ type: "session", id: "child" }),
+					JSON.stringify({
+						type: "message",
+						message: {
+							role: "assistant",
+							content: [{ type: "toolCall", name: "subagents", toolCallId: "nested", arguments: { tasks: [{ agent: "nested-agent", task: "nested work" }] } }],
+						},
+					}),
+					JSON.stringify({
+						type: "message",
+						message: {
+							role: "toolResult",
+							toolName: "subagents",
+							toolCallId: "nested",
+							details: {
+								...result.details,
+								results: [{ ...result.details.results[0], agent: "nested-agent", exitCode: 0, liveLog: [] }],
+							},
+						},
+					}),
+				].join("\n"));
+				const historical = {
+					content: [{ type: "text", text: "done" }],
+					details: {
+						...result.details,
+						results: [{ ...result.details.results[0], exitCode: 0, messages: [], liveLog: [], sessionDir }],
+					},
+				};
+				const renderContext = { state: {} };
+				const historicalCollapsed = (renderResult(historical as any, false, theme, renderContext) as any).render(120).join("\n");
+				const historicalExpanded = (renderResult(historical as any, true, theme, renderContext) as any).render(120).join("\n");
+				assert.doesNotMatch(historicalCollapsed, /nested-agent/);
+				assert.match(historicalExpanded, /nested-agent/);
+
+				// A settled row reuses only its compact parsed tree on repaint; it does
+				// not synchronously reread the full transcript every time.
+				fs.rmSync(path.join(sessionDir, "session.jsonl"));
+				const repainted = (renderResult(historical as any, true, theme, renderContext) as any).render(120).join("\n");
+				assert.match(repainted, /nested-agent/);
+			} finally {
+				fs.rmSync(sessionDir, { recursive: true, force: true });
+			}
 		} finally {
 			hooks.deregister();
 		}
