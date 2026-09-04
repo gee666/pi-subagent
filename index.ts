@@ -39,10 +39,19 @@ import {
   resolveResumeTarget,
   updateNameRecord,
   SUBAGENT_NAMES_CUSTOM_TYPE,
+  type NamesRegistry,
+  type SubagentNameRecord,
 } from "./names.js";
+import {
+  type SubagentDetail,
+  buildSubagentDetail,
+  findNameRecord,
+} from "./detail.js";
+import { SubagentPager, SubagentPicker, filterPickerItems, type PickerItem } from "./overlay.js";
 import {
   clearRenderCaches,
   recordToolCallStart,
+  setHistoricalCallOrder,
   renderCall,
   renderResult,
   renderResumeCall,
@@ -521,7 +530,7 @@ type PersistedUsageTotals = {
 // rescan a week-long branch when its leaf has not changed.
 const persistedUsageCache = new WeakMap<object, PersistedUsageTotals>();
 
-function collectCombinedUsageStatusLine(
+export function collectCombinedUsageStatusLine(
   ctx: any,
   liveSummaries: SubagentUsageSummary[] = [],
 ): string | undefined {
@@ -532,32 +541,54 @@ function collectCombinedUsageStatusLine(
   let persisted = cacheKey && leafId !== undefined ? persistedUsageCache.get(cacheKey) : undefined;
 
   if (!persisted || persisted.leafId !== leafId) {
-    const entries = canReadEntries ? branchEntries(ctx) : [];
+    // Pi documents session token/cost stats as an extension-side aggregation of
+    // sessionManager.getEntries() (extensions/tui docs; ExtensionContext exposes
+    // no stats API), so this mirrors AgentSession.getSessionStats exactly: ALL
+    // entries count, including off-branch retries, history compacted away,
+    // branch summaries, and tool-reported usage. Summing only the active branch
+    // made "WITH SUBS" report LESS than Pi's own parent-only cost.
+    const allEntries: any[] = canReadEntries && typeof manager?.getEntries === "function"
+      ? manager.getEntries()
+      : (canReadEntries ? branchEntries(ctx) : []);
     const parentUsage = emptyUsage();
     const subagents = emptyUsageSummary();
-    for (const entry of entries as any[]) {
+    const addRawUsage = (usage: any, countTurn: boolean) => {
+      if (!usage) return;
+      parentUsage.input += usage.input || 0;
+      parentUsage.output += usage.output || 0;
+      parentUsage.cacheRead += usage.cacheRead || 0;
+      parentUsage.cacheWrite += usage.cacheWrite || 0;
+      parentUsage.cost += typeof usage.cost === "number" ? usage.cost : usage.cost?.total || 0;
+      if (countTurn) parentUsage.turns += 1;
+    };
+
+    for (const entry of allEntries) {
+      if ((entry?.type === "branch_summary" || entry?.type === "compaction") && entry.usage) {
+        addRawUsage(entry.usage, false);
+        continue;
+      }
       if (entry?.type !== "message") continue;
       const msg = entry.message;
       if (!msg) continue;
       if (msg.role === "assistant" && msg.provider !== RESUME_PROVIDER) {
-        const usage = msg.usage;
-        if (usage) {
-          parentUsage.input += usage.input || 0;
-          parentUsage.output += usage.output || 0;
-          parentUsage.cacheRead += usage.cacheRead || 0;
-          parentUsage.cacheWrite += usage.cacheWrite || 0;
-          parentUsage.cost += typeof usage.cost === "number" ? usage.cost : usage.cost?.total || 0;
-          parentUsage.turns += 1;
+        addRawUsage(msg.usage, Boolean(msg.usage));
+      }
+      if (msg.role === "toolResult") {
+        if (isSubagentToolName(msg.toolName)) {
+          // Delegated cost is accounted through the durable usage summary only;
+          // never also via msg.usage, or it would be counted twice.
+          if (isSubagentDetails(msg.details)) {
+            addUsageSummary(
+              subagents,
+              msg.details.usageSummary ?? usageSummaryFromUsage(msg.details.aggregatedUsage),
+            );
+          }
+        } else {
+          addRawUsage(msg.usage, false);
         }
       }
-      if (msg.role === "toolResult" && isSubagentToolName(msg.toolName) && isSubagentDetails(msg.details)) {
-        addUsageSummary(
-          subagents,
-          msg.details.usageSummary ?? usageSummaryFromUsage(msg.details.aggregatedUsage),
-        );
-      }
     }
-    persisted = { leafId, hasEntries: entries.length > 0, parentUsage, subagents };
+    persisted = { leafId, hasEntries: allEntries.length > 0, parentUsage, subagents };
     if (cacheKey && leafId !== undefined) persistedUsageCache.set(cacheKey, persisted);
   }
 
@@ -1359,6 +1390,26 @@ export default function (pi: ExtensionAPI) {
     lifecycleGeneration += 1;
     sessionActive = true;
     latestSessionCtx = ctx;
+    const historicalCallIds: string[] = [];
+    const leafId = ctx.sessionManager.getLeafId?.();
+    const visibleEntries = leafId
+      ? ctx.sessionManager.getBranch?.(leafId) ?? ctx.sessionManager.getEntries?.() ?? []
+      : ctx.sessionManager.getEntries?.() ?? [];
+    for (const rawEntry of visibleEntries) {
+      const entry = rawEntry && typeof rawEntry === "object" ? rawEntry as any : {};
+      const message = entry.message && typeof entry.message === "object" ? entry.message : entry;
+      if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+      for (const part of message.content) {
+        if (
+          part?.type === "toolCall" &&
+          typeof (part.id ?? part.toolCallId) === "string" &&
+          isSubagentToolName(part.name)
+        ) {
+          historicalCallIds.push(part.id ?? part.toolCallId);
+        }
+      }
+    }
+    setHistoricalCallOrder(historicalCallIds);
     const includeProjectConfig =
       typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted() === true;
     refreshRegisteredToolPrompts?.(ctx.cwd, includeProjectConfig);
@@ -2204,6 +2255,142 @@ ${agentList}\n\n${subagentsGuidance}\n\n${delegationGuardGuidance}${resumeGuidan
       registerToolsWithConfig(cwd, includeProject);
     };
     registerToolsWithConfig(undefined, false, true);
+  }
+
+  registerSubagentExpandCommand();
+
+  // -----------------------------------------------------------------------
+  // /subagent-expand <name> — full work of one named subagent in a popup
+  // -----------------------------------------------------------------------
+
+  function resolveDetailSessionDir(record: SubagentNameRecord): string {
+    // Read-only mirror of resolveResumeTarget: a non-owner sees its own fork if
+    // one was already created, otherwise the original session.
+    if (record.ownerSessionId !== currentOwnerId) {
+      const fork = record.forks?.[currentOwnerId];
+      if (fork?.sessionDir) return fork.sessionDir;
+    }
+    return record.sessionDir;
+  }
+
+  function readCurrentRegistry(): NamesRegistry | undefined {
+    if (!currentNamesFile) return undefined;
+    try {
+      return readNamesRegistry(currentNamesFile);
+    } catch {
+      return undefined;
+    }
+  }
+
+  function registerSubagentExpandCommand(): void {
+    if (typeof (pi as any).registerCommand !== "function") return;
+
+    (pi as any).registerCommand("subagent-expand", {
+      description: "Show the full work of one named subagent (prompt, tools, children, resumes)",
+      getArgumentCompletions: (prefix: string) => {
+        const registry = readCurrentRegistry();
+        if (!registry) return null;
+        // Fuzzy, not prefix-only: with hundreds of names the user needs to find
+        // one by any fragment of the name, agent type, or task.
+        const pickerItems: PickerItem[] = Object.values(registry.agents ?? {})
+          .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
+          .map((record) => ({ name: record.name, agent: record.agent, task: record.task }));
+        const items = filterPickerItems(pickerItems, prefix).map((item) => ({
+          value: item.name,
+          label: item.name,
+          description: `${item.agent}${item.task ? ` — ${item.task.replace(/\s+/g, " ").slice(0, 80)}` : ""}`,
+        }));
+        return items.length > 0 ? items : null;
+      },
+      handler: async (args: string, ctx: any) => {
+        const name = (args ?? "").trim().split(/\s+/)[0] ?? "";
+        const uiAvailable = ctx?.mode === "tui" && ctx?.ui && typeof ctx.ui.custom === "function";
+        if (!uiAvailable) {
+          const message = "/subagent-expand is a UI-only feature (interactive TUI mode).";
+          if (typeof ctx?.ui?.notify === "function") ctx.ui.notify(message, "warning");
+          else console.log(`[pi-subagent] ${message}`);
+          return;
+        }
+
+        const registry = readCurrentRegistry();
+        if (!registry) {
+          ctx.ui.notify("No subagent name registry for this session yet.", "warning");
+          return;
+        }
+        const sortedRecords = Object.values(registry.agents ?? {})
+          .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
+        if (sortedRecords.length === 0) {
+          ctx.ui.notify("No subagents have run in this session yet.", "info");
+          return;
+        }
+
+        let record = name ? findNameRecord(registry, name) : undefined;
+        if (!record) {
+          if (name) {
+            const suggestions = filterPickerItems(
+              sortedRecords.map((item) => ({ name: item.name, agent: item.agent, task: item.task })),
+              name,
+            ).slice(0, 10).map((item) => item.name);
+            ctx.ui.notify(
+              `Unknown subagent "${name}".${suggestions.length > 0 ? ` Did you mean: ${suggestions.join(", ")}?` : ""}`,
+              "error",
+            );
+            return;
+          }
+          // A delegation tree can hold hundreds of names, so the chooser is a
+          // searchable overlay rather than a flat select list.
+          const picked = await ctx.ui.custom(
+            (tui: any, theme: any, _keybindings: any, done: (value: string | undefined) => void) =>
+              new SubagentPicker({
+                items: sortedRecords.map((item) => ({ name: item.name, agent: item.agent, task: item.task })),
+                getRows: () => tui?.terminal?.rows ?? 30,
+                theme,
+                requestRender: () => tui?.requestRender?.(),
+                onPick: (value) => done(value),
+              }) as any,
+            {
+              overlay: true,
+              overlayOptions: { anchor: "center", width: "80%", maxHeight: "90%", margin: 1 },
+            },
+          );
+          if (!picked) return;
+          record = findNameRecord(registry, picked);
+          if (!record) return;
+        }
+
+        let detail: SubagentDetail;
+        try {
+          detail = buildSubagentDetail(record, { sessionDir: resolveDetailSessionDir(record) });
+        } catch (err: any) {
+          ctx.ui.notify(`Failed to read subagent session: ${err?.message ?? err}`, "error");
+          return;
+        }
+
+        await ctx.ui.custom(
+          (tui: any, theme: any, _keybindings: any, done: (value: void) => void) =>
+            new SubagentPager({
+              detail,
+              resolveDetail: (childName) => {
+                const childRecord = findNameRecord(registry, childName);
+                if (!childRecord) return undefined;
+                try {
+                  return buildSubagentDetail(childRecord, { sessionDir: resolveDetailSessionDir(childRecord) });
+                } catch {
+                  return undefined;
+                }
+              },
+              getRows: () => tui?.terminal?.rows ?? 30,
+              theme,
+              requestRender: () => tui?.requestRender?.(),
+              onClose: () => done(undefined),
+            }) as any,
+          {
+            overlay: true,
+            overlayOptions: { anchor: "center", width: "90%", maxHeight: "90%", margin: 1 },
+          },
+        );
+      },
+    });
   }
 
   function getSessionDirForTask(toolCallId: string, index: number): string {

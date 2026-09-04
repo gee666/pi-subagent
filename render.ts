@@ -68,8 +68,53 @@ export { setBroadcastNumberingActive };
 const callStartTimes = new Map<string, number>();
 const CALL_START_CACHE_LIMIT = 500;
 
+// ---------------------------------------------------------------------------
+// Newest-call tracking
+//
+// Ctrl+O expands every subagent row at once. Rendering full detail for all of
+// them is both noisy and slow, so only the most recent subagent tool call gets
+// the verbose treatment (full prompts + output previews). Rows are rendered in
+// chronological order, so "the highest sequence number seen so far" is a cheap
+// and stable way to identify the newest call, both for live calls and for rows
+// restored from a session file.
+// ---------------------------------------------------------------------------
+
+const callSequence = new Map<string, number>();
+let nextCallSequence = 0;
+let newestCallId: string | undefined;
+
+function registerCall(toolCallId: string | undefined): void {
+	if (!toolCallId) return;
+	let seq = callSequence.get(toolCallId);
+	if (seq === undefined) {
+		seq = nextCallSequence++;
+		callSequence.set(toolCallId, seq);
+		if (callSequence.size > CALL_START_CACHE_LIMIT) {
+			const oldest = callSequence.keys().next().value;
+			if (oldest !== undefined && oldest !== newestCallId) callSequence.delete(oldest);
+		}
+	}
+	const newestSeq = newestCallId === undefined ? -1 : callSequence.get(newestCallId) ?? -1;
+	if (seq >= newestSeq) newestCallId = toolCallId;
+}
+
+/** Prime chronological call order from the already-loaded parent session. */
+export function setHistoricalCallOrder(toolCallIds: string[]): void {
+	callSequence.clear();
+	nextCallSequence = 0;
+	newestCallId = undefined;
+	for (const toolCallId of toolCallIds) registerCall(toolCallId);
+}
+
+/** True for the most recent subagent tool call this process has rendered. */
+export function isNewestCall(toolCallId: string | undefined): boolean {
+	if (!toolCallId) return false;
+	return newestCallId === toolCallId;
+}
+
 /** Record the start time of a subagent tool call. Called from execute(). */
 export function recordToolCallStart(toolCallId: string): void {
+	registerCall(toolCallId);
 	if (callStartTimes.has(toolCallId)) return;
 	callStartTimes.set(toolCallId, Date.now());
 	if (callStartTimes.size > CALL_START_CACHE_LIMIT) {
@@ -80,6 +125,9 @@ export function recordToolCallStart(toolCallId: string): void {
 
 export function clearRenderCaches(): void {
 	callStartTimes.clear();
+	callSequence.clear();
+	nextCallSequence = 0;
+	newestCallId = undefined;
 }
 
 function getCallStartStamp(
@@ -102,6 +150,7 @@ export function renderCall(
 	theme: { fg: ThemeFg; bold: (s: string) => string },
 	context?: { isPartial?: boolean; isError?: boolean; toolCallId?: string },
 ): Text {
+	registerCall(context?.toolCallId);
 	const tasks = Array.isArray(args.tasks) ? args.tasks : [];
 	const count = tasks.length;
 	const stamp = getCallStartStamp(context, theme);
@@ -123,6 +172,7 @@ export function renderResumeCall(
 		: args.resumes && typeof args.resumes === "object"
 			? [args.resumes]
 			: [];
+	registerCall(context?.toolCallId);
 	const count = resumes.length;
 	const stamp = getCallStartStamp(context, theme);
 	const text = `${stamp}${theme.fg("toolTitle", theme.bold("resume subagents "))}${theme.fg("accent", `${count} subagent${count === 1 ? "" : "s"}`)}`;
@@ -198,27 +248,16 @@ class CollapsedSubagentComponent implements Component {
 
 type ResultRenderContext = {
 	state?: Record<string, unknown>;
+	toolCallId?: string;
 };
 
-type SettledTreeCache = {
-	details: SubagentDetails;
-	nodes: TreeNode[];
-};
-
-function expandedNodes(details: SubagentDetails, context?: ResultRenderContext): TreeNode[] {
-	const settled = details.results.every((result) => result?.exitCode !== -1);
-	const cached = context?.state?.subagentSettledTree as SettledTreeCache | undefined;
-	if (settled && cached?.details === details) return cached.nodes;
-
-	const nodes = buildTopLevelNodes(details);
-	// Row-local state lives only as long as Pi's tool row. Keep one compact tree,
-	// replacing the prior value, and never retain the hydrated transcripts.
-	if (settled && context?.state) {
-		context.state.subagentSettledTree = { details, nodes } satisfies SettledTreeCache;
-	} else if (context?.state && cached) {
-		delete context.state.subagentSettledTree;
-	}
-	return nodes;
+function expandedNodes(details: SubagentDetails): TreeNode[] {
+	// Never read child session transcripts here. Ctrl+O expands every historical
+	// subagent row in one synchronous repaint; hydrating sessions made that cost
+	// scale with every byte every subagent ever produced. Durable result metadata
+	// is enough for an instant tree; `/subagent-expand <name>` shows the full
+	// transcript of a single agent on demand.
+	return buildTopLevelNodes(details, { hydrateSessions: false });
 }
 
 export function renderResult(
@@ -227,6 +266,7 @@ export function renderResult(
 	theme: { fg: ThemeFg; bold: (s: string) => string },
 	context?: ResultRenderContext,
 ): Component | Container | Text {
+	registerCall(context?.toolCallId);
 	const fallbackText = getResultText(result);
 
 	// The collapsed view remains live and shows each direct child separately.
@@ -243,10 +283,15 @@ export function renderResult(
 	}
 	const details: SubagentDetails = result.details;
 
+	// Only the newest subagent call gets the verbose view (full prompts + output
+	// previews). Older rows render as a compact tree, which keeps Ctrl+O both
+	// instant and readable.
+	const verbose = !context?.toolCallId || isNewestCall(context.toolCallId);
+
 	try {
-		const nodes = expandedNodes(details, context);
+		const nodes = expandedNodes(details);
 		const counts = countNodes(nodes);
-		const showOutputPreview = !hasNestedChildren(nodes);
+		const showOutputPreview = verbose && !hasNestedChildren(nodes);
 		const icon = counts.running > 0
 			? theme.fg("warning", "⏳")
 			: counts.error > 0
@@ -263,7 +308,12 @@ export function renderResult(
 		);
 
 		container.addChild(new Spacer(1));
-		container.addChild(new Text(renderTreeLines(nodes, theme, showOutputPreview, 0, "", true).join("\n"), 0, 0));
+		container.addChild(new Text(renderTreeLines(nodes, theme, showOutputPreview, 0, "", verbose).join("\n"), 0, 0));
+		if (!verbose) {
+			container.addChild(
+				new Text(theme.fg("muted", "  /subagent-expand <name> for the full work of one subagent"), 0, 0),
+			);
+		}
 		return container;
 	} catch {
 		// Pi falls back to raw result.content when a custom renderer throws, which

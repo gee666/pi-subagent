@@ -198,8 +198,33 @@ Subagent tool calls and live activity lines render a dim `hh:mm:ss` timestamp.
 The collapsed view shows every direct child as `Name (agent-type)`, two prompt
 lines, its current status, and `last action`. That timestamp is the newest
 activity anywhere in the child's recursive subtree, so active grandchildren
-keep their ancestor visibly alive. Press `Ctrl+O` to expand the full recursive
-tree, including every agent's complete prompt and latest activity lines.
+keep their ancestor visibly alive. Press `Ctrl+O` for an instant in-memory
+view: the newest subagent tool call is shown verbosely, while older calls stay
+as lightweight trees. Ctrl+O never reads historical child session transcripts.
+
+Use `/subagent-expand <name>` (for example `/subagent-expand Olga`) to open a
+centered, turn-oriented popup. It starts on the latest turn and shows only that
+turn's task/resume prompt, final response, compact tool summary, and collapsed
+named children. Use Left/Right to change turns and `T` to open that turn's tool
+list; delegation tool rows include a minimal tree of their named children.
+Select a tool with Up/Down and press Enter to inspect its full arguments and
+result. Every overview also shows its distinct direct children across all turns;
+press `C`, select a child, and press Enter to open that child's same expanded
+view. `Esc` returns to the parent. `/` opens visible search, `n`/`N` moves
+through matches, and `q` closes from anywhere. The command offers fuzzy name
+completion, and running `/subagent-expand` with no argument opens a searchable
+picker (type to filter hundreds of names by name, agent type, or task). It is
+available only in the interactive TUI.
+
+In the tool list, delegation rows expand into their named children, and those
+child rows are selectable: press Enter on one to open that subagent's own view.
+
+The `WITH SUBS` status line aggregates `ctx.sessionManager.getEntries()`, which
+is the approach Pi documents for extension-side token stats. It applies Pi's own
+rules (`AgentSession.getSessionStats`): every billed entry counts, including
+off-branch retries, history compacted away, branch summaries, and tool-reported
+usage. Delegated cost is added once, from the durable subagent usage summary, so
+the combined line can never be lower than Pi's parent-only cost.
 
 In the interactive TUI the extension publishes the combined `total` usage line
 (parent + all subagents, recursively) via Pi's normal `ctx.ui.setStatus()`

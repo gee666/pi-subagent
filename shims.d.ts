@@ -114,8 +114,25 @@ declare module "@mariozechner/pi-tui" {
   export class Container {
     addChild(child: unknown): void;
   }
+  export const Key: {
+    escape: string;
+    enter: string;
+    up: string;
+    down: string;
+    left: string;
+    right: string;
+    pageUp: string;
+    pageDown: string;
+    home: string;
+    end: string;
+    space: string;
+    ctrl(key: string): string;
+  };
+  export function matchesKey(data: string, keyId: string): boolean;
+  export function fuzzyFilter<T>(items: T[], query: string, getText: (item: T) => string): T[];
   export function truncateToWidth(text: string, width: number, ellipsis?: string): string;
   export function visibleWidth(text: string): number;
+  export function stripTerminalSequences(text: string): string;
 }
 
 declare module "express" {

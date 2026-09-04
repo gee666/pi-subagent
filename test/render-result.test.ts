@@ -180,8 +180,8 @@ describe("renderResult collapsed/expanded views", { skip: !registerHooks && "nod
 			assert.match(nestedExpanded, /nested-writer/);
 			assert.match(nestedExpanded, /tool-6/);
 
-			// Historical collapsed rows must not read and retain child transcripts.
-			// Nested session hydration is reserved for an explicitly expanded row.
+			// Neither collapsed nor Ctrl+O-expanded rows may read child transcripts.
+			// Full transcript hydration is reserved for /subagent-expand <name>.
 			const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-render-lazy-"));
 			try {
 				fs.writeFileSync(path.join(sessionDir, "session.jsonl"), [
@@ -217,13 +217,12 @@ describe("renderResult collapsed/expanded views", { skip: !registerHooks && "nod
 				const historicalCollapsed = (renderResult(historical as any, false, theme, renderContext) as any).render(120).join("\n");
 				const historicalExpanded = (renderResult(historical as any, true, theme, renderContext) as any).render(120).join("\n");
 				assert.doesNotMatch(historicalCollapsed, /nested-agent/);
-				assert.match(historicalExpanded, /nested-agent/);
+				assert.doesNotMatch(historicalExpanded, /nested-agent/);
 
-				// A settled row reuses only its compact parsed tree on repaint; it does
-				// not synchronously reread the full transcript every time.
+				// Repaint remains independent of the child transcript file.
 				fs.rmSync(path.join(sessionDir, "session.jsonl"));
 				const repainted = (renderResult(historical as any, true, theme, renderContext) as any).render(120).join("\n");
-				assert.match(repainted, /nested-agent/);
+				assert.doesNotMatch(repainted, /nested-agent/);
 			} finally {
 				fs.rmSync(sessionDir, { recursive: true, force: true });
 			}
