@@ -10,12 +10,12 @@ describe("concurrent subagent budgets", () => {
     const dir = workspace();
     try {
       const root = createBudget(path.join(dir, "budget"), 4);
-      const [child] = reserveSubagentBudgets(root, "first", [task(1)]);
+      const [child] = reserveSubagentBudgets(root, "first", [task(0)]);
       const ids = Array.from({ length: 6 }, (_, index) => `resize-${index}`);
       const results = await race(
         dir,
         ids,
-        ids.map(() => ({ override: { budget: child, max_agents_allowed: 4 } })),
+        ids.map(() => ({ override: { budget: child, max_subagents_allowed: 3 } })),
       );
       assert.ok(results.every((result) => result.ok));
       assert.equal(readBudget(root).remaining, 0);
@@ -29,11 +29,11 @@ describe("concurrent subagent budgets", () => {
     const dir = workspace();
     try {
       const root = createBudget(path.join(dir, "budget"), 5);
-      const [child] = reserveSubagentBudgets(root, "first", [task(3)]);
+      const [child] = reserveSubagentBudgets(root, "first", [task(2)]);
       const results = await race(
         dir,
         ["decrease", "launch"],
-        [{ override: { budget: child, max_agents_allowed: 1 } }, { reserveBudget: child }],
+        [{ override: { budget: child, max_subagents_allowed: 0 } }, { reserveBudget: child }],
       );
       assert.equal(results.filter((result) => result.ok).length, 1);
       assert.equal(readBudget(child).remaining, 0);

@@ -23,16 +23,16 @@ import {
 } from "./fixtures/resume.js";
 
 describe("findLatestResumableSubagentCall", () => {
-  test("converts recorded exclusive allowances to inclusive branch sizes", () => {
+  test("preserves recorded descendant allowances and converts legacy inclusive branch sizes", () => {
     const oldTasks = tasks.map((task) => ({ ...task, max_subagents_allowed: 2 }));
-    const newTasks = tasks.map((task) => ({ ...task, max_agents_allowed: 3 }));
+    const newTasks = tasks.map((task) => ({ ...task, max_subagents_allowed: 2 }));
     const plan = findLatestResumableSubagentCall(makeCtx([assistantSubagentCall("old-budget", oldTasks)]));
     assert.deepEqual(plan?.tasks, newTasks);
     assert.equal(sameTasks(oldTasks, newTasks), true);
     assert.equal(
       sameTasks(
         oldTasks,
-        tasks.map((task) => ({ ...task, max_agents_allowed: 2 })),
+        tasks.map((task) => ({ ...task, max_subagents_allowed: 1 })),
       ),
       false,
     );
@@ -42,9 +42,15 @@ describe("findLatestResumableSubagentCall", () => {
       makeCtx([assistantSubagentCall("previous-name", previousName)]),
     );
     assert.deepEqual(previousPlan?.tasks, newTasks);
+    const inclusiveTasks = tasks.map((task) => ({ ...task, max_agents_allowed: 3 }));
+    assert.equal(sameTasks(inclusiveTasks, newTasks), true);
+    const inclusivePlan = findLatestResumableSubagentCall(
+      makeCtx([assistantSubagentCall("legacy-inclusive", inclusiveTasks)]),
+    );
+    assert.deepEqual(inclusivePlan?.tasks, newTasks);
   });
   test("keeps task allowances and durable branch budgets during recovery", () => {
-    const budgetedTasks = tasks.map((task) => ({ ...task, max_agents_allowed: 3 }));
+    const budgetedTasks = tasks.map((task) => ({ ...task, max_subagents_allowed: 2 }));
     const budget = { directory: "/saved/branch-budget" };
     const plan = findLatestResumableSubagentCall(
       makeCtx([
@@ -57,7 +63,7 @@ describe("findLatestResumableSubagentCall", () => {
     assert.equal(sameTasks(budgetedTasks, tasks), false);
     assert.equal(
       sameTasks(
-        tasks.map((task) => ({ ...task, max_agents_allowed: 1 })),
+        tasks.map((task) => ({ ...task, max_subagents_allowed: 0 })),
         tasks,
       ),
       true,

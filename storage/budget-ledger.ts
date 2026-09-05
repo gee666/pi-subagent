@@ -30,29 +30,28 @@ function decodeReservation(value: unknown, version: number): Reservation {
     if (!isRecord(task) || typeof task.agent !== "string" || typeof task.task !== "string") {
       throw new Error("invalid reservation task");
     }
-    let size = task.max_agents_allowed;
-    if (version < 3) {
-      const legacy = version === 1 ? task.max_subagents_allowed : task.max_agents_in_branch;
-      if (!isBudgetAmount(legacy)) throw new Error("invalid legacy child allowance");
-      size = version === 1 ? legacy + 1 : legacy;
+    // Versions 2–4 stored inclusive task sizes. Keep old ledgers readable
+    // without changing their balances or inclusive reservation high-water marks.
+    let allowance = task.max_subagents_allowed;
+    if (version >= 2 && version <= 4) {
+      const inclusive = version === 2 ? task.max_agents_in_branch : task.max_agents_allowed;
+      if (!isBudgetAmount(inclusive) || inclusive < 1) throw new Error("invalid legacy child allowance");
+      allowance = inclusive - 1;
     }
     const child: unknown = value.children[index];
     if (
-      !isBranchBudgetAmount(size) ||
+      !isBranchBudgetAmount(allowance) ||
       !isRecord(child) ||
       typeof child.directory !== "string" ||
       !path.isAbsolute(child.directory)
     ) {
       throw new Error("invalid child allowance");
     }
+    const size = allowance + 1;
     const reserved: unknown = Array.isArray(sizes) ? (sizes[index] ?? size) : size;
-    if (!isBranchBudgetAmount(reserved) || reserved < size) throw new Error("invalid reserved size");
-    // Legacy replay uses only the migrated argument, not the obsolete field.
-    reservation.tasks.push(
-      version < 3
-        ? { agent: task.agent, task: task.task, max_agents_allowed: size }
-        : { ...task, agent: task.agent, task: task.task, max_agents_allowed: size },
-    );
+    if (!isBudgetAmount(reserved) || reserved < size) throw new Error("invalid reserved size");
+    // Replay uses the migrated argument, not obsolete inclusive fields.
+    reservation.tasks.push({ agent: task.agent, task: task.task, max_subagents_allowed: allowance });
     reservation.children.push({ ...child, directory: child.directory });
     reservedSizes.push(reserved);
   }
@@ -63,7 +62,7 @@ function decodeReservation(value: unknown, version: number): Reservation {
 function decodeState(value: unknown): BudgetState {
   if (
     !isRecord(value) ||
-    (value.version !== 1 && value.version !== 2 && value.version !== 3 && value.version !== 4) ||
+    (value.version !== 1 && value.version !== 2 && value.version !== 3 && value.version !== 4 && value.version !== 5) ||
     !isBudgetAmount(value.limit) ||
     !isBudgetAmount(value.remaining) ||
     value.remaining > value.limit ||
@@ -78,14 +77,14 @@ function decodeState(value: unknown): BudgetState {
   let allocated = 0;
   for (const reservation of Object.values(reservations)) {
     allocated += reservation.tasks.reduce(
-      (sum, task, index) => sum + (reservation.reservedSizes?.[index] ?? task.max_agents_allowed),
+      (sum, task, index) => sum + (reservation.reservedSizes?.[index] ?? task.max_subagents_allowed + 1),
       0,
     );
   }
   if (!Number.isSafeInteger(allocated) || value.limit - allocated !== value.remaining) {
     throw new Error("budget totals do not match reservations");
   }
-  return { ...value, version: 4, limit: value.limit, remaining: value.remaining, reservations };
+  return { ...value, version: 5, limit: value.limit, remaining: value.remaining, reservations };
 }
 
 export function latestState(budget: SubagentBudget): { revision: number; state: BudgetState } {

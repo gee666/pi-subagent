@@ -234,12 +234,12 @@ describe("subagent usage guidance", () => {
     assert.match(description, /parallel work will save substantial time/);
     assert.match(description, /crowd out your context and force compaction/);
     assert.match(description, /Every new agent costs money/);
-    assert.match(description, /Set max_agents_allowed on every task/);
-    assert.match(description, /include the assigned agent and everyone below it/);
-    assert.match(description, /2 for a worker that launches its own reviewer/);
+    assert.match(description, /Set max_subagents_allowed on every task/);
+    assert.match(description, /exclud(?:e|es|ing) (?:the )?(?:assigned )?(?:agent|worker)(?: itself)?/);
+    assert.match(description, /1 for a worker that launches its own reviewer/);
     assert.match(description, /Respect any tighter user limit/);
-    assert.match(description, /exactly the number of slots reserved/);
-    assert.doesNotMatch(description, /max_subagents_allowed|max_agents_in_branch|1 slot plus/);
+    assert.match(description, /one slot for the worker plus its descendant cap/);
+    assert.doesNotMatch(description, /max_agents_in_branch|include the assigned agent and everyone below it/);
     assert.match(description, /Siblings get separate shares/);
     assert.match(description, /not workers each building teams/);
     assert.match(description, /before deep research/);

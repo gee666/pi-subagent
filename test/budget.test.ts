@@ -8,6 +8,7 @@ import {
   createBudget,
   findPersistedBudget,
   readBudget,
+  overrideResumeBudgets,
   reserveSubagentBudgets,
   SUBAGENT_BUDGET_CUSTOM_TYPE,
 } from "../budget.js";
@@ -45,7 +46,7 @@ describe("subagent budgets", () => {
           assert.equal(budgetPrompt(budget), expected);
           continue;
         }
-        assert.match(budgetPrompt(budget), /Set max_agents_allowed on each task/);
+        assert.match(budgetPrompt(budget), /Set max_subagents_allowed on each task/);
         const limitPattern = new RegExp(`launch at most ${count} more`);
         if (count < 30) assert.match(mainPrompt, limitPattern);
         else assert.doesNotMatch(mainPrompt, limitPattern);
@@ -53,13 +54,31 @@ describe("subagent budgets", () => {
       }
       const budget = createBudget(path.join(dir, "remaining"), 1000);
       assert.throws(
-        () => reserveSubagentBudgets(budget, "too-large", [task(1001)], "main"),
+        () => reserveSubagentBudgets(budget, "too-large", [task(1000)], "main"),
         (error: Error) => /budget exceeded/.test(error.message) && !/\b1000\b/.test(error.message),
       );
       assert.equal(readBudget(budget).remaining, 1000);
-      reserveSubagentBudgets(budget, "assigned", [task(971)], "main");
+      reserveSubagentBudgets(budget, "assigned", [task(970)], "main");
       assert.match(budgetPrompt(budget, "main"), /launch at most 29 more/);
-      assert.throws(() => reserveSubagentBudgets(budget, "too-many", [task(30)], "main"), /has 29 slots left/);
+      assert.throws(() => reserveSubagentBudgets(budget, "too-many", [task(29)], "main"), /has 29 slots left/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("zero and one descendant caps reserve one and two parent slots", () => {
+    const dir = workspace();
+    try {
+      const root = createBudget(path.join(dir, "root"), 3);
+      const [leaf, worker] = reserveSubagentBudgets(root, "pair", [task(0), task(1)]);
+      assert.deepEqual(readBudget(root), { limit: 3, remaining: 0 });
+      assert.deepEqual(readBudget(leaf), { limit: 0, remaining: 0 });
+      assert.deepEqual(readBudget(worker), { limit: 1, remaining: 1 });
+      assert.throws(() => reserveSubagentBudgets(leaf, "denied", [task(0)]), /has 0 slots left/);
+      const [grandchild] = reserveSubagentBudgets(worker, "allowed", [task(0)]);
+      assert.deepEqual(readBudget(grandchild), { limit: 0, remaining: 0 });
+      assert.equal(readBudget(worker).remaining, 0);
+      assert.equal(readBudget(root).remaining, 0);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -69,14 +88,14 @@ describe("subagent budgets", () => {
     const dir = workspace();
     try {
       const root = createBudget(path.join(dir, "root"), 8);
-      const [a, b] = reserveSubagentBudgets(root, "first", [task(4), task(3)]);
+      const [a, b] = reserveSubagentBudgets(root, "first", [task(3), task(2)]);
       assert.deepEqual(readBudget(root), { limit: 8, remaining: 1 });
       assert.deepEqual(readBudget(a), { limit: 3, remaining: 3 });
       assert.deepEqual(readBudget(b), { limit: 2, remaining: 2 });
-      assert.throws(() => reserveSubagentBudgets(a, "too-much", [task(2), task(2)]), /needs 4 slots.*has 3 slots left/);
+      assert.throws(() => reserveSubagentBudgets(a, "too-much", [task(1), task(1)]), /needs 4 slots.*has 3 slots left/);
       assert.equal(readBudget(a).remaining, 3);
       assert.equal(fs.existsSync(path.join(a.directory, "children")), false);
-      const [nested] = reserveSubagentBudgets(a, "nested", [task(3)]);
+      const [nested] = reserveSubagentBudgets(a, "nested", [task(2)]);
       assert.equal(readBudget(a).remaining, 0);
       assert.equal(readBudget(b).remaining, 2);
       reserveSubagentBudgets(nested, "leaves", [task(), task()]);
@@ -92,32 +111,32 @@ describe("subagent budgets", () => {
     const dir = workspace();
     try {
       const root = createBudget(path.join(dir, "root"), 3);
-      const [child] = reserveSubagentBudgets(root, "first", [task(3)]);
+      const [child] = reserveSubagentBudgets(root, "first", [task(2)]);
       reserveSubagentBudgets(child, "work", [task()]);
       const restored = findPersistedBudget([{ type: "custom", customType: SUBAGENT_BUDGET_CUSTOM_TYPE, data: root }])!;
-      assert.deepEqual(reserveSubagentBudgets(restored, "first", [task(3)]), [child]);
+      assert.deepEqual(reserveSubagentBudgets(restored, "first", [task(2)]), [child]);
       assert.equal(readBudget(root).remaining, 0);
       assert.equal(readBudget(child).remaining, 1);
       assert.equal(budgetPrompt(child), "You may launch one subagent and resume it as often as needed.");
       createBudget(root.directory, 999);
       assert.equal(readBudget(root).limit, 3);
-      assert.throws(() => reserveSubagentBudgets(root, "first", [task(1)]), /different budget/);
+      assert.throws(() => reserveSubagentBudgets(root, "first", [task(0)]), /different budget/);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  test("rejects missing, zero, fractional, negative, and overflowing allowances", () => {
+  test("rejects missing, fractional, negative, and overflowing allowances", () => {
     const dir = workspace();
     try {
       const root = createBudget(path.join(dir, "root"), 10);
-      for (const value of [undefined, 0, -1, 1.5, NaN, Infinity, "2", Number.MAX_SAFE_INTEGER]) {
+      for (const value of [undefined, -1, 1.5, NaN, Infinity, "2", Number.MAX_SAFE_INTEGER]) {
         const invalidTask = task();
-        Reflect.set(invalidTask, "max_agents_allowed", value);
+        Reflect.set(invalidTask, "max_subagents_allowed", value);
         assert.throws(() => reserveSubagentBudgets(root, "bad", [invalidTask]));
       }
       assert.throws(
-        () => reserveSubagentBudgets(root, "overflow", [task(Number.MAX_SAFE_INTEGER), task()]),
+        () => reserveSubagentBudgets(root, "overflow", [task(Number.MAX_SAFE_INTEGER - 1), task()]),
         /too large/,
       );
       assert.equal(readBudget(root).remaining, 10);
@@ -132,9 +151,9 @@ describe("subagent budgets", () => {
     const dir = workspace();
     try {
       const root = createBudget(path.join(dir, "root"), 3);
-      const [child] = reserveSubagentBudgets(root, "first", [task(2)]);
+      const [child] = reserveSubagentBudgets(root, "first", [task(1)]);
       fs.rmSync(child.directory, { recursive: true, force: true });
-      assert.throws(() => reserveSubagentBudgets(root, "first", [task(2)]), /Cannot read subagent budget/);
+      assert.throws(() => reserveSubagentBudgets(root, "first", [task(1)]), /Cannot read subagent budget/);
       fs.writeFileSync(path.join(root.directory, "state-1.json"), "broken");
       assert.throws(() => reserveSubagentBudgets(root, "second", [task()]), /allowance will not be reset/);
       assert.throws(
@@ -146,11 +165,11 @@ describe("subagent budgets", () => {
     }
   });
 
-  test("a branch size of ten reserves exactly ten slots, including its worker", () => {
+  test("a descendant cap of nine reserves ten slots, including its worker", () => {
     const dir = workspace();
     try {
       const root = createBudget(path.join(dir, "root"), 50);
-      const [child] = reserveSubagentBudgets(root, "ten", [task(10)]);
+      const [child] = reserveSubagentBudgets(root, "ten", [task(9)]);
       assert.equal(readBudget(root).remaining, 40);
       assert.equal(readBudget(child).remaining, 9);
       assert.match(budgetPrompt(child), /You may launch at most 9 more subagents/);
@@ -158,7 +177,7 @@ describe("subagent budgets", () => {
       const leaves = reserveSubagentBudgets(
         child,
         "nine",
-        Array.from({ length: 9 }, () => task(1)),
+        Array.from({ length: 9 }, () => task(0)),
       );
       assert.equal(readBudget(child).remaining, 0);
       assert.ok(leaves.every((leaf) => readBudget(leaf).remaining === 0));
@@ -171,30 +190,71 @@ describe("subagent budgets", () => {
     const dir = workspace();
     try {
       const root = createBudget(path.join(dir, "root"), 5);
-      const [child] = reserveSubagentBudgets(root, "old-call", [task(3)]);
-      reserveSubagentBudgets(child, "work", [task(1)]);
+      const [child] = reserveSubagentBudgets(root, "old-call", [task(2)]);
+      reserveSubagentBudgets(child, "work", [task(0)]);
       const file = path.join(root.directory, "state-1.json");
       rewriteLegacyBudget(file, 1);
-      assert.deepEqual(reserveSubagentBudgets(root, "old-call", [task(3)]), [child]);
+      assert.deepEqual(reserveSubagentBudgets(root, "old-call", [task(2)]), [child]);
       assert.equal(readBudget(root).remaining, 2);
       assert.equal(readBudget(child).remaining, 1);
-      reserveSubagentBudgets(root, "new-call", [task(2)]);
+      reserveSubagentBudgets(root, "new-call", [task(1)]);
       assert.equal(readBudget(root).remaining, 0);
-      assert.equal(JSON.parse(fs.readFileSync(path.join(root.directory, "state-2.json"), "utf8")).version, 4);
+      assert.equal(JSON.parse(fs.readFileSync(path.join(root.directory, "state-2.json"), "utf8")).version, 5);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  test("renaming the inclusive argument preserves existing reservations", () => {
+  for (const version of [3, 4] as const) {
+    test(`migrates v${version} inclusive reservations to v5 without losing funded capacity`, () => {
+      const dir = workspace();
+      try {
+        const root = createBudget(path.join(dir, "root"), 10);
+        const [child] = reserveSubagentBudgets(root, "original", [task(2)]);
+        reserveSubagentBudgets(child, "spent", [task(0)]);
+        overrideResumeBudgets(root, [{ budget: child, max_subagents_allowed: 4 }]);
+        overrideResumeBudgets(root, [{ budget: child, max_subagents_allowed: 1 }]);
+        const latest = () => {
+          const files = fs.readdirSync(root.directory).filter((file) => /^state-\d+\.json$/.test(file));
+          return path.join(
+            root.directory,
+            files.sort((a, b) => Number(a.match(/\d+/)![0]) - Number(b.match(/\d+/)![0])).at(-1)!,
+          );
+        };
+        rewriteLegacyBudget(latest(), version);
+        const legacy = JSON.parse(fs.readFileSync(latest(), "utf8"));
+        const oldReservation = Object.values(legacy.reservations)[0] as { tasks: unknown[]; reservedSizes: number[] };
+        assert.deepEqual(oldReservation.tasks, [{ agent: "worker", task: "work", max_agents_allowed: 3 }]);
+        assert.deepEqual(oldReservation.reservedSizes, [5]);
+        assert.deepEqual(reserveSubagentBudgets(root, "original", [task(2)]), [child]);
+        assert.deepEqual(readBudget(child), { limit: 1, remaining: 0 });
+        assert.equal(readBudget(root).remaining, 5);
+
+        overrideResumeBudgets(root, [{ budget: child, max_subagents_allowed: 4 }]);
+        assert.equal(readBudget(root).remaining, 5, "restoring legacy funded capacity is free");
+        assert.deepEqual(readBudget(child), { limit: 4, remaining: 3 });
+        reserveSubagentBudgets(root, "commit-migration", [task(0)]);
+        assert.equal(readBudget(root).remaining, 4);
+        const migrated = JSON.parse(fs.readFileSync(latest(), "utf8"));
+        assert.equal(migrated.version, 5);
+        const reservation = Object.values(migrated.reservations)[0] as { tasks: unknown[]; reservedSizes: number[] };
+        assert.deepEqual(reservation.tasks, [task(2)]);
+        assert.deepEqual(reservation.reservedSizes, [5], "high-water reservations still include the worker");
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  test("converting the legacy inclusive argument preserves existing reservations", () => {
     const dir = workspace();
     try {
       const root = createBudget(path.join(dir, "root"), 10);
-      const [child] = reserveSubagentBudgets(root, "previous-name", [task(4)]);
-      reserveSubagentBudgets(child, "used", [task(1)]);
+      const [child] = reserveSubagentBudgets(root, "previous-name", [task(3)]);
+      reserveSubagentBudgets(child, "used", [task(0)]);
       const file = path.join(root.directory, "state-1.json");
       rewriteLegacyBudget(file, 2);
-      assert.deepEqual(reserveSubagentBudgets(root, "previous-name", [task(4)]), [child]);
+      assert.deepEqual(reserveSubagentBudgets(root, "previous-name", [task(3)]), [child]);
       assert.equal(readBudget(root).remaining, 6);
       assert.equal(readBudget(child).remaining, 2);
     } finally {

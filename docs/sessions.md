@@ -4,19 +4,19 @@
 
 A new main session has 50 agent slots by default. Set `PI_SUBAGENT_MAX_TOTAL_AGENTS` before starting a new session to change this. `0` blocks new launches but permits named resumes. Invalid values block launches.
 
-Each task reserves exactly `max_agents_allowed` slots, including its assigned worker and all descendants. Two tasks with allowances of `4` and `1` reserve five slots. A direct worker needs `1`; `0` is invalid.
+`max_subagents_allowed` caps all descendants a worker may launch, excluding the worker itself. Each task reserves `1 + max_subagents_allowed` slots from the caller. Two tasks with descendant caps of `3` and `0` reserve five slots. Use `0` for a direct worker; `1` lets the worker launch one subagent.
 
 - Batch reservations are atomic across processes. If a batch exceeds the caller's remaining allowance, no task starts and no name is allocated.
 - Siblings cannot borrow each other's slots. Unused, failed, or canceled reservations stay assigned to their branch for later resumes.
 - Interrupted calls reuse their original reservations during recovery.
 - Named resumes consume no new slots and retain the worker's current allowance.
-- Children receive their remaining allowance in the prompt automatically.
+- Workers with a positive descendant cap receive their remaining allowance in the prompt. Workers with a zero cap receive neither delegation tools nor added delegation guidance. A higher cap on resume restores the tools, subject to the depth limit.
 
-The main agent sees its remaining count only below 30, to avoid presenting larger caps as spending targets. Children always see their branch allowance. Enforcement is the same regardless of prompt visibility.
+The main agent sees its remaining count only below 30, to avoid presenting larger caps as spending targets. Delegating workers see their branch allowance. Enforcement is the same regardless of prompt visibility.
 
 Budgets persist across reloads, restarts, compaction, and forks. Changing the environment does not enlarge an existing tree. Workers from older sessions without recorded reservations may resume but cannot launch new descendants.
 
-Older calls with exclusive budget arguments remain resumable. The extension converts their recorded allowances without changing reserved or remaining slots.
+Older recorded calls and ledgers remain resumable. The extension converts their allowances to descendant caps without changing reserved or remaining slots. New calls use only `max_subagents_allowed`.
 
 The ledger uses immutable files and atomic hard links beside saved worker sessions. Its filesystem must support hard links. Missing or corrupt state blocks launches instead of silently resetting the budget. Agent counts do not limit money spent or sandbox tool access.
 
@@ -25,12 +25,12 @@ The ledger uses immutable files and atomic hard links beside saved worker sessio
 ```json
 {
   "resumes": [
-    { "subagent": "John", "task": "Continue the implementation", "max_agents_allowed": 10 }
+    { "subagent": "John", "task": "Continue the implementation", "max_subagents_allowed": 10 }
   ]
 }
 ```
 
-The override replaces the worker's lifetime cap, including itself. It does not grant ten fresh launches. Omit it to retain the existing cap.
+The override replaces the worker's lifetime descendant cap, excluding itself. It does not grant ten fresh launches. Omit it to retain the existing cap.
 
 - Increases reserve only additional capacity from the original launcher's allowance.
 - Decreases cannot remove slots already spent or assigned. They do not refund the parent. Raising a cap to a previously funded value needs no new reservation.

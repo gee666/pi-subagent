@@ -69,10 +69,10 @@ test("identity lookup ignores malformed custom entry data", () => {
 
 test("invalid reservation tasks cannot reset or expand an existing budget", () => {
   const budget = createBudget(path.join(directory, "budget"), 3);
-  reserveSubagentBudgets(budget, "call", [{ agent: "worker", task: "work", max_agents_allowed: 2 }]);
+  reserveSubagentBudgets(budget, "call", [{ agent: "worker", task: "work", max_subagents_allowed: 1 }]);
   const file = path.join(budget.directory, "state-1.json");
   const state = {
-    version: 4,
+    version: 5,
     limit: 3,
     remaining: 1,
     reservations: { broken: { tasks: [null], children: [{ directory: path.join(directory, "child") }] } },

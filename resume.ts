@@ -20,11 +20,11 @@ type SessionEntry = ReturnType<ExtensionContext["sessionManager"]["getEntries"]>
 export interface ResumableTask {
   agent: string;
   task: string;
-  max_agents_allowed?: number;
-  /** Read-only compatibility for the previous inclusive argument name. */
-  max_agents_in_branch?: number;
-  /** Read-only compatibility for recorded calls with exclusive allowances. */
+  /** Lifetime descendant cap, excluding the assigned worker. */
   max_subagents_allowed?: number;
+  /** Read-only compatibility for recorded inclusive allowances. */
+  max_agents_allowed?: number;
+  max_agents_in_branch?: number;
 }
 
 export function getTaskBranchSize(task: ResumableTask): number | undefined {
@@ -104,7 +104,11 @@ function normalizeTasks(args: unknown): ResumableTask[] | null {
       if (task[field] !== undefined) normalized[field] = typeof task[field] === "number" ? task[field] : NaN;
     }
     const size = getTaskBranchSize(normalized);
-    tasks.push({ agent: task.agent, task: task.task, ...(size !== undefined ? { max_agents_allowed: size } : {}) });
+    tasks.push({
+      agent: task.agent,
+      task: task.task,
+      ...(size !== undefined ? { max_subagents_allowed: size - 1 } : {}),
+    });
   }
   return tasks;
 }

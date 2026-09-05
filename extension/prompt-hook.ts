@@ -57,7 +57,7 @@ keeping their full previous context:
 - \`agent\` (in \`subagents\`) is an agent TYPE; \`subagent\` (in \`resume_subagents\`)
   is the unique name of an already-run subagent instance.
 - All resumes in one call run in parallel.
-- Optional \`max_agents_allowed\` changes a worker's lifetime cap, including itself. Omit it to keep the current allowance. Past launches and assigned slots still count; increases reserve extra slots from its original launcher.
+- Optional \`max_subagents_allowed\` changes a worker's lifetime descendant cap, excluding itself. Omit it to keep the current allowance. Past launches and assigned slots still count; increases reserve extra slots from its original launcher.
 - Names survive restarts; you can resume them in a later session of this conversation.`);
       return {
         systemPrompt: `${event.systemPrompt}\n\n## Available Subagents

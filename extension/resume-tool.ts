@@ -38,7 +38,7 @@ export function registerResumeSubagentsTool(state: ExtensionState) {
       state.configuredToolPrompts[RESUME_SUBAGENTS_TOOL_NAME] ??
       [
         "Continue agents by their returned names, keeping their previous context.",
-        "Optional max_agents_allowed replaces the lifetime cap, including the resumed agent. Past launches and assigned slots still count. Increases reserve extra slots from the original launcher; omitting it keeps the current allowance.",
+        "Optional max_subagents_allowed replaces the lifetime descendant cap, excluding the resumed agent. Past launches and assigned slots still count. Increases reserve extra slots from the original launcher; omitting it keeps the current allowance.",
         "Pass { resumes: [{ subagent, task }] }. Resumes in one call run in parallel; wait between dependent tasks.",
       ].join("\n"),
     parameters: ResumeSubagentsParams,
@@ -116,7 +116,7 @@ export function registerResumeSubagentsTool(state: ExtensionState) {
               model?: string;
               tools?: string[];
               budget: SubagentBudget;
-              max_agents_allowed?: number;
+              max_subagents_allowed?: number;
             }> = [];
             const hasSessionFiles = (dir: string): boolean => {
               try {
@@ -165,7 +165,7 @@ export function registerResumeSubagentsTool(state: ExtensionState) {
                 tools: resolution.record.tools,
                 budget:
                   resolution.record.budget ?? createBudget(path.join(resolution.record.sessionDir, "legacy-budget"), 0),
-                max_agents_allowed: resume.max_agents_allowed,
+                max_subagents_allowed: resume.max_subagents_allowed,
               });
             }
             if (errors.length > 0) {
@@ -196,9 +196,9 @@ export function registerResumeSubagentsTool(state: ExtensionState) {
               return fail("Resume canceled or session changed. No budgets were changed.");
             }
             const overrides = targets.flatMap((target) =>
-              target.max_agents_allowed === undefined
+              target.max_subagents_allowed === undefined
                 ? []
-                : [{ budget: target.budget, max_agents_allowed: target.max_agents_allowed }],
+                : [{ budget: target.budget, max_subagents_allowed: target.max_subagents_allowed }],
             );
             if (overrides.length) {
               overrideResumeBudgets(ensureBudget(state), overrides, state.currentDepth === 0 ? "main" : "subagent");

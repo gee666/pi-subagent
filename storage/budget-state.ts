@@ -5,7 +5,7 @@ export interface SubagentBudget {
 export interface BudgetTask {
   agent: string;
   task: string;
-  max_agents_allowed: number;
+  max_subagents_allowed: number;
 }
 
 export interface Reservation {
@@ -16,7 +16,7 @@ export interface Reservation {
 }
 
 export interface BudgetState {
-  version: 4;
+  version: 5;
   /** Slots for new agents. The branch's existing worker is already paid for. */
   limit: number;
   remaining: number;
@@ -30,5 +30,5 @@ export function isBudgetAmount(value: unknown): value is number {
 }
 
 export function isBranchBudgetAmount(value: unknown): value is number {
-  return isBudgetAmount(value) && value >= 1;
+  return isBudgetAmount(value) && value < Number.MAX_SAFE_INTEGER;
 }

@@ -109,8 +109,8 @@ function persistedBudget(entries: SessionEntry[]): SubagentBudget {
   return budget;
 }
 
-function task(max_agents_allowed: number) {
-  return { agent: "budget-worker", task: "work", max_agents_allowed };
+function task(max_subagents_allowed: number) {
+  return { agent: "budget-worker", task: "work", max_subagents_allowed };
 }
 
 function calls(log: string): Array<{ prompt: string; budget: string; args: string[] }> {
@@ -153,7 +153,7 @@ describe("budget tool integration", () => {
       process.env.PI_SUBAGENT_MAX_TOTAL_AGENTS = "1000";
       const main = await harness(dir, "main");
       assert.doesNotMatch(await main.prompt(), /\b1000\b/);
-      const rejected = await main.call("subagents", "too-large", { tasks: [task(1001)] });
+      const rejected = await main.call("subagents", "too-large", { tasks: [task(1000)] });
       assert.equal(rejected.isError, true);
       assert.doesNotMatch(rejected.content[0].text, /\b1000\b/);
       const budget = persistedBudget(main.entries);
@@ -173,20 +173,24 @@ describe("budget tool integration", () => {
       const h = await harness(dir, "root");
       assert.equal(h.tool("subagents").parameters, SubagentParams);
       const schema = SubagentParams.properties.tasks.items;
-      assert.ok(schema.required.includes("max_agents_allowed"));
-      assert.equal(schema.properties.max_agents_allowed.minimum, 1);
+      assert.ok(schema.required.includes("max_subagents_allowed"));
+      assert.equal(schema.properties.max_subagents_allowed.minimum, 0);
+      assert.equal(schema.properties.max_subagents_allowed.maximum, Number.MAX_SAFE_INTEGER - 1);
       assert.equal(Object.hasOwn(schema.properties, "max_agents_in_branch"), false);
-      assert.equal(Object.hasOwn(schema.properties, "max_subagents_allowed"), false);
       // The real host rejects malformed arguments before invoking execute.
       await assert.rejects(
         h.call("subagents", "missing", { tasks: [{ agent: "budget-worker", task: "work" }] }),
         /Expected required property/,
       );
       await assert.rejects(
-        h.call("subagents", "zero", { tasks: [task(0)] }),
-        /Expected integer to be greater or equal to 1/,
+        h.call("subagents", "negative", { tasks: [task(-1)] }),
+        /Expected integer to be greater or equal to 0/,
       );
-      const rejected = await h.call("subagents", "too-large", { tasks: [task(4), task(3)] });
+      await assert.rejects(
+        h.call("subagents", "overflow", { tasks: [task(Number.MAX_SAFE_INTEGER)] }),
+        /Expected integer to be less or equal to/,
+      );
+      const rejected = await h.call("subagents", "too-large", { tasks: [task(3), task(2)] });
       assert.equal(rejected.isError, true);
       assert.match(rejected.content[0].text, /needs 7 slots.*has 5 slots left/);
       assert.equal(readBudget(persistedBudget(h.entries)).remaining, 5);
@@ -198,7 +202,7 @@ describe("budget tool integration", () => {
   test("passes private branch budgets through launches, nested calls, resumes, forks, and reloads", async () => {
     await withSetup(async (dir, log) => {
       const root = await harness(dir, "root");
-      const result = await root.call("subagents", "first", { tasks: [task(3), task(2)] });
+      const result = await root.call("subagents", "first", { tasks: [task(2), task(1)] });
       assert.notEqual(result.isError, true, JSON.stringify(result.content));
       const [a, b] = result.details.results;
       assert.ok(a.budget && b.budget && a.name);
@@ -215,9 +219,7 @@ describe("budget tool integration", () => {
         const remaining = readBudget({ directory: record.budget }).remaining;
         assert.match(
           record.prompt,
-          remaining === 1
-            ? /You may launch one subagent and resume it as often as needed\./
-            : /exactly the number of slots reserved/,
+          remaining === 1 ? /You may launch one subagent and resume it as often as needed\./ : /max_subagents_allowed/,
         );
         assert.ok([a.budget.directory, b.budget.directory].includes(record.budget));
       }
@@ -228,10 +230,10 @@ describe("budget tool integration", () => {
       const branch = await harness(dir, "branch");
       process.env.PI_SUBAGENT_BUDGET_DIR = "";
       assert.deepEqual(findPersistedBudget(branch.entries), a.budget);
-      const tooLarge = await branch.call("subagents", "too-large", { tasks: [task(3)] });
+      const tooLarge = await branch.call("subagents", "too-large", { tasks: [task(2)] });
       assert.equal(tooLarge.isError, true);
       assert.match(tooLarge.content[0].text, /needs 3 slots.*has 2 slots left/);
-      const leaves = await branch.call("subagents", "leaves", { tasks: [task(1), task(1)] });
+      const leaves = await branch.call("subagents", "leaves", { tasks: [task(0), task(0)] });
       assert.notEqual(leaves.isError, true, JSON.stringify(leaves.content));
       assert.equal(readBudget(a.budget).remaining, 0);
       assert.equal(readBudget(b.budget).remaining, 1);
@@ -244,7 +246,7 @@ describe("budget tool integration", () => {
       assert.notEqual(resumed.isError, true, JSON.stringify(resumed.content));
       assert.deepEqual(resumed.details.results[0].budget, a.budget);
       assert.match(lastCall(log).prompt, /You cannot launch subagents\./);
-      assert.doesNotMatch(lastCall(log).prompt, /Set max_agents_allowed on each task/);
+      assert.doesNotMatch(lastCall(log).prompt, /Set max_subagents_allowed on each task/);
       assert.equal(readBudget(rootBudget).remaining, 0);
 
       // A different owner gets a session fork, not a fresh descendant allowance.
@@ -257,7 +259,7 @@ describe("budget tool integration", () => {
 
       process.env.PI_SUBAGENT_MAX_TOTAL_AGENTS = "500";
       const reloaded = await harness(dir, "new-session-id", undefined, [...root.entries]);
-      const denied = await reloaded.call("subagents", "another", { tasks: [task(1)] });
+      const denied = await reloaded.call("subagents", "another", { tasks: [task(0)] });
       assert.equal(denied.isError, true);
       assert.match(denied.content[0].text, /has 0 slots left/);
       assert.equal(readBudget(persistedBudget(reloaded.entries)).limit, 5);
@@ -267,40 +269,42 @@ describe("budget tool integration", () => {
   test("optional resume overrides persist, preserve unique names, and reject unaffordable increases", async () => {
     await withSetup(async (dir, log) => {
       const root = await harness(dir, "root");
-      const result = await root.call("subagents", "first", { tasks: [task(2)] });
+      const result = await root.call("subagents", "first", { tasks: [task(1)] });
       const worker = result.details.results[0];
       assert.ok(worker.budget && worker.name);
       const parentBudget = persistedBudget(root.entries);
-      const resume = (id: string, max_agents_allowed?: number) =>
+      const resume = (id: string, max_subagents_allowed?: number) =>
         root.call("resume_subagents", id, {
           resumes: [
             {
               subagent: worker.name,
               task: "continue",
-              ...(max_agents_allowed === undefined ? {} : { max_agents_allowed }),
+              ...(max_subagents_allowed === undefined ? {} : { max_subagents_allowed }),
             },
           ],
         });
-      const raised = await resume("raise", 4);
+      const raised = await resume("raise", 3);
       assert.notEqual(raised.isError, true, JSON.stringify(raised.content));
       assert.equal(readBudget(parentBudget).remaining, 1);
       assert.equal(readBudget(worker.budget).remaining, 3);
       assert.match(lastCall(log).prompt, /launch at most 3 more/);
       assert.notEqual((await resume("unchanged")).isError, true);
       assert.equal(readBudget(worker.budget).remaining, 3);
-      assert.notEqual((await resume("lower", 1)).isError, true);
+      assert.notEqual((await resume("lower", 0)).isError, true);
       assert.equal(readBudget(worker.budget).remaining, 0);
+      assert.doesNotMatch(lastCall(log).prompt, /You cannot launch subagents|max_subagents_allowed/);
       assert.equal(readBudget(parentBudget).remaining, 1);
-      assert.notEqual((await resume("restore", 4)).isError, true);
+      assert.notEqual((await resume("restore", 3)).isError, true);
       assert.equal(readBudget(parentBudget).remaining, 1);
       const before = calls(log).length;
-      const denied = await resume("too-large", 6);
+      const denied = await resume("too-large", 5);
       assert.equal(denied.isError, true);
       assert.match(denied.content[0].text, /needs 2 extra slots/);
       assert.equal(calls(log).length, before);
       assert.equal(readBudget(worker.budget).remaining, 3);
       assert.equal(readBudget(parentBudget).remaining, 1);
-      await assert.rejects(resume("invalid", 0), /Expected union value/);
+      await assert.rejects(resume("invalid", -1), /Expected union value/);
+      await assert.rejects(resume("overflow", Number.MAX_SAFE_INTEGER), /Expected union value/);
       assert.equal(calls(log).length, before);
       assert.equal(Object.keys(readNamesRegistry(path.join(dir, "names.json")).agents).length, 1);
       const reloaded = await harness(dir, "reloaded", undefined, [...root.entries]);
@@ -318,12 +322,13 @@ describe("budget tool integration", () => {
       process.env.PI_SUBAGENT_MAX_TOTAL_AGENTS = "1";
       const h = await harness(dir, "root");
       assert.equal(h.tools.has("resume_subagents"), false);
-      const result = await h.call("subagents", "one", { tasks: [task(1)] });
+      const result = await h.call("subagents", "one", { tasks: [task(0)] });
       assert.notEqual(result.isError, true, JSON.stringify(result.content));
       assert.ok(result.details.results[0].budget);
-      const denied = await h.call("subagents", "two", { tasks: [task(1)] });
+      const denied = await h.call("subagents", "two", { tasks: [task(0)] });
       assert.equal(denied.isError, true);
       assert.equal(calls(log).length, 1);
+      assert.doesNotMatch(lastCall(log).prompt, /You cannot launch subagents|max_subagents_allowed/);
     });
   });
 });

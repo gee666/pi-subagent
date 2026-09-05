@@ -112,6 +112,7 @@ export function createExtensionHarness(options: { confirmAnswer?: boolean } = {}
   const handlers = new Map<EventName, Array<(event: ExtensionEvent, ctx: ExtensionContext) => unknown>>();
   const providers = new Map<string, Provider>();
   const tools = new Map<string, CapturedTool>();
+  let activeTools = ["read", "bash", "subagent"];
   const calls = { setModel: [] as Model<Api>[], sentUserMessages: [] as string[], confirms: 0 };
   let entriesToAppend: SessionEntry[] | undefined;
 
@@ -125,6 +126,7 @@ export function createExtensionHarness(options: { confirmAnswer?: boolean } = {}
   }
 
   function registerTool<T extends TSchema, D>(tool: ToolDefinition<T, D>): void {
+    if (!tools.has(tool.name)) activeTools.push(tool.name);
     tools.set(tool.name, {
       description: tool.description,
       parameters: tool.parameters,
@@ -148,8 +150,10 @@ export function createExtensionHarness(options: { confirmAnswer?: boolean } = {}
       registerTool,
       // SDK overloads describe the same event-key association checked by the dispatcher above.
       on: on as ExtensionAPI["on"],
-      getActiveTools: () => ["subagent"],
-      setActiveTools() {},
+      getActiveTools: () => [...activeTools],
+      setActiveTools(names) {
+        activeTools = [...names];
+      },
       async setModel(value) {
         calls.setModel.push(value);
         return true;
@@ -203,6 +207,7 @@ export function createExtensionHarness(options: { confirmAnswer?: boolean } = {}
   return {
     calls,
     tools,
+    getActiveTools: () => [...activeTools],
     makeCtx,
     provider(id: string): Provider {
       const found = providers.get(id);

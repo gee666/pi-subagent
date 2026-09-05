@@ -55,12 +55,12 @@ describe("resume argument compatibility", () => {
   });
 
   test("preserves optional budget overrides in the resume shorthand", () => {
-    assert.deepEqual(prepareResumeArguments({ subagent: "writer-01", task: "continue", max_agents_allowed: 4 }), {
-      resumes: [{ subagent: "writer-01", task: "continue", max_agents_allowed: 4 }],
+    assert.deepEqual(prepareResumeArguments({ subagent: "writer-01", task: "continue", max_subagents_allowed: 3 }), {
+      resumes: [{ subagent: "writer-01", task: "continue", max_subagents_allowed: 3 }],
     });
     assert.deepEqual(
-      prepareResumeArguments({ subagent: "writer-01", task: "continue", max_agents_allowed: 0 }),
-      { resumes: [{ subagent: "writer-01", task: "continue", max_agents_allowed: 0 }] },
+      prepareResumeArguments({ subagent: "writer-01", task: "continue", max_subagents_allowed: 0 }),
+      { resumes: [{ subagent: "writer-01", task: "continue", max_subagents_allowed: 0 }] },
       "invalid overrides must reach validation, not silently disappear",
     );
   });

@@ -11,8 +11,8 @@ export function workspace(): string {
   return fs.mkdtempSync(path.join(root, "budget-test-"));
 }
 
-export function task(max_agents_allowed = 1): BudgetTask {
-  return { agent: "worker", task: "work", max_agents_allowed };
+export function task(max_subagents_allowed = 0): BudgetTask {
+  return { agent: "worker", task: "work", max_subagents_allowed };
 }
 
 export async function race(
@@ -29,7 +29,7 @@ export async function race(
     process.once('message', ({ budget, id, override, reserveBudget }) => {
       try {
         if (override) overrideResumeBudgets(budget, [override]);
-        else reserveSubagentBudgets(reserveBudget || budget, id, [{ agent: 'worker', task: 'work', max_agents_allowed: 2 }]);
+        else reserveSubagentBudgets(reserveBudget || budget, id, [{ agent: 'worker', task: 'work', max_subagents_allowed: 1 }]);
         process.send({ ok: true });
       } catch (error) { process.send({ ok: false, error: error.message }); }
       process.disconnect();

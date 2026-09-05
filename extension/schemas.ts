@@ -14,11 +14,11 @@ export const TaskItem = Type.Object(
       description:
         "What to do, what to return, constraints, and known findings or a handoff file path. It cannot see your conversation.",
     }),
-    max_agents_allowed: Type.Integer({
-      minimum: 1,
-      maximum: Number.MAX_SAFE_INTEGER,
+    max_subagents_allowed: Type.Integer({
+      minimum: 0,
+      maximum: Number.MAX_SAFE_INTEGER - 1,
       description:
-        "Maximum total subagents for this task, including the assigned subagent and all nested workers. Required on every task. Use 1 for a direct worker. Otherwise count everyone the planned work actually needs; do not add speculative teams or give each worker the full budget. A value of 10 reserves exactly 10 slots. Unused slots stay reserved for that worker's future resumes. The sum across tasks must fit your remaining budget or no tasks launch.",
+        "Maximum descendants this worker may launch, including all nested workers but excluding itself. Required on every task. Use 0 for a direct worker; 1 lets it launch one subagent. Count only the descendants the planned work needs. Each task reserves 1 + max_subagents_allowed slots from your budget. Unused slots stay reserved for that worker's future resumes. The sum of these reservations must fit your remaining budget or no tasks launch.",
     }),
   },
   { additionalProperties: false },
@@ -43,12 +43,12 @@ export const ResumeItem = Type.Object(
     task: Type.String({
       description: "New task for the resumed subagent. It keeps its previous context.",
     }),
-    max_agents_allowed: Type.Optional(
+    max_subagents_allowed: Type.Optional(
       Type.Integer({
-        minimum: 1,
-        maximum: Number.MAX_SAFE_INTEGER,
+        minimum: 0,
+        maximum: Number.MAX_SAFE_INTEGER - 1,
         description:
-          "Optional replacement lifetime cap, including the resumed subagent and all nested workers. Omit to keep its current allowance. Set only what the remaining work needs, while retaining slots already spent or assigned. Increases reserve extra slots from its original launcher's budget. Decreases do not refund reserved slots. Resuming itself uses no slot; the counter never resets.",
+          "Optional replacement lifetime descendant cap, excluding the resumed worker but including all nested workers. Use 0 for no descendants. Omit to keep its current allowance. Set only what the remaining work needs, while retaining slots already spent or assigned. Increases reserve extra slots from its original launcher's budget. Decreases do not refund reserved slots. Resuming itself uses no slot; the counter never resets.",
       }),
     ),
   },
@@ -64,24 +64,24 @@ export const ResumeSubagentsParams = Type.Object(
   { additionalProperties: false },
 );
 
-export function normalizeResumes(raw: unknown): Array<{ name: string; task: string; max_agents_allowed?: number }> {
+export function normalizeResumes(raw: unknown): Array<{ name: string; task: string; max_subagents_allowed?: number }> {
   const items = Array.isArray(raw) ? raw : raw && typeof raw === "object" ? [raw] : [];
-  const normalized: Array<{ name: string; task: string; max_agents_allowed?: number }> = [];
+  const normalized: Array<{ name: string; task: string; max_subagents_allowed?: number }> = [];
   for (const item of items) {
     if (!isRecord(item)) continue;
     const name =
       typeof item.subagent === "string" ? item.subagent : typeof item.name === "string" ? item.name : undefined;
     const task = typeof item.task === "string" ? item.task : typeof item.prompt === "string" ? item.prompt : undefined;
-    if (item.max_agents_allowed !== undefined && !isBranchBudgetAmount(item.max_agents_allowed)) {
+    if (item.max_subagents_allowed !== undefined && !isBranchBudgetAmount(item.max_subagents_allowed)) {
       throw new SubagentBudgetError(
-        "Resume max_agents_allowed must be a positive safe integer. Omit it to keep the current allowance.",
+        "Resume max_subagents_allowed must be a non-negative safe integer below Number.MAX_SAFE_INTEGER. Omit it to keep the current allowance.",
       );
     }
     if (name !== undefined && task !== undefined)
       normalized.push({
         name,
         task,
-        ...(item.max_agents_allowed !== undefined ? { max_agents_allowed: item.max_agents_allowed } : {}),
+        ...(item.max_subagents_allowed !== undefined ? { max_subagents_allowed: item.max_subagents_allowed } : {}),
       });
   }
   return normalized;
@@ -102,8 +102,8 @@ export function prepareRecoveryArguments(args: unknown, plans: ResumableSubagent
   return {
     ...args,
     tasks: tasks.map((task) => {
-      const { max_subagents_allowed: _exclusive, max_agents_in_branch: _previous, ...rest } = task;
-      return { ...rest, max_agents_allowed: getTaskBranchSize(task) ?? 1 };
+      const { max_agents_allowed: _inclusive, max_agents_in_branch: _previous, ...rest } = task;
+      return { ...rest, max_subagents_allowed: (getTaskBranchSize(task) ?? 1) - 1 };
     }),
   };
 }

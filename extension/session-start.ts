@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { discoverAgents } from "../agents.js";
 import {
   findPersistedBudget,
+  readBudget,
   SUBAGENT_BUDGET_CUSTOM_TYPE,
   SUBAGENT_BUDGET_DIR_ENV,
   SubagentBudgetError,
@@ -19,7 +20,7 @@ import { getDefaultSubagentSessionRoot, parseBooleanEnv, SUBAGENT_RESUME_DISABLE
 import { RESUME_PROVIDER } from "../shared.js";
 import { isSubagentToolName } from "../types.js";
 import { getRestorableModel } from "./models.js";
-import { filterAgentsForPrompt, resumableSubagentsDisabled } from "./policy.js";
+import { ensureSubagentToolActive, filterAgentsForPrompt, resumableSubagentsDisabled } from "./policy.js";
 import { maybeOfferSubagentResume } from "./resume-offer.js";
 import { clearSyntheticResumeState, restoreModelAfterResumeFailure, updateCombinedUsageStatus } from "./runtime.js";
 import type { ExtensionState } from "./state.js";
@@ -29,6 +30,8 @@ export function registerSessionLifecycle(state: ExtensionState): void {
     state.lifecycleGeneration += 1;
     state.sessionActive = true;
     state.latestSessionCtx = ctx;
+    const previouslyCouldDelegate = state.canDelegate;
+    state.canDelegate = state.currentDepth < state.maxDepth;
     state.currentBudget = undefined;
     state.budgetSetupError = undefined;
     try {
@@ -41,6 +44,11 @@ export function registerSessionLifecycle(state: ExtensionState): void {
       }
       state.currentBudget = persisted ?? (inherited ? { directory: inherited } : undefined);
       if (state.currentBudget && !persisted) state.pi.appendEntry?.(SUBAGENT_BUDGET_CUSTOM_TYPE, state.currentBudget);
+      // A zero lifetime descendant allowance means this worker has no children
+      // to launch or resume. Exhausted positive allowances must retain resume.
+      if (state.currentDepth > 0 && state.currentBudget && readBudget(state.currentBudget).limit === 0) {
+        state.canDelegate = false;
+      }
     } catch (error) {
       state.budgetSetupError = error;
     }
@@ -66,6 +74,14 @@ export function registerSessionLifecycle(state: ExtensionState): void {
     setHistoricalCallOrder(historicalCallIds);
     const includeProjectConfig = typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted() === true;
     state.refreshRegisteredToolPrompts?.(ctx.cwd, includeProjectConfig);
+    if (!state.canDelegate) {
+      // Documented Pi API: inactive tools are neither exposed nor callable.
+      const active = state.pi.getActiveTools();
+      const filtered = active.filter((name) => !isSubagentToolName(name));
+      if (filtered.length !== active.length) state.pi.setActiveTools(filtered);
+    } else if (!previouslyCouldDelegate) {
+      ensureSubagentToolActive(state.pi);
+    }
     state.resumeModelRegistry = ctx.modelRegistry;
     clearSyntheticResumeState(state);
     state.pendingResumePlans = [];

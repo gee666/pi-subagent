@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import { isRecord } from "../../storage/values.js";
 
-/** Convert a committed ledger into either historical argument format. */
-export function rewriteLegacyBudget(file: string, version: 1 | 2): void {
+/** Convert a committed ledger into a historical argument format. */
+export function rewriteLegacyBudget(file: string, version: 1 | 2 | 3 | 4): void {
   const state: unknown = JSON.parse(fs.readFileSync(file, "utf8"));
   assert.ok(isRecord(state));
   assert.ok(isRecord(state.reservations));
@@ -15,13 +15,15 @@ export function rewriteLegacyBudget(file: string, version: 1 | 2): void {
       assert.ok(isRecord(item));
       assert.equal(typeof item.agent, "string");
       assert.equal(typeof item.task, "string");
-      assert.ok(typeof item.max_agents_allowed === "number");
+      assert.ok(typeof item.max_subagents_allowed === "number");
       return {
         agent: item.agent,
         task: item.task,
         ...(version === 1
-          ? { max_subagents_allowed: item.max_agents_allowed - 1 }
-          : { max_agents_in_branch: item.max_agents_allowed }),
+          ? { max_subagents_allowed: item.max_subagents_allowed }
+          : version === 2
+            ? { max_agents_in_branch: item.max_subagents_allowed + 1 }
+            : { max_agents_allowed: item.max_subagents_allowed + 1 }),
       };
     });
   }

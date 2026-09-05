@@ -1,5 +1,5 @@
 import { emptyUsage, extractToolCalls, getFinalOutput, isResultError, type SingleResult } from "../types.js";
-import { budgetPrompt } from "../budget.js";
+import { budgetPrompt, readBudget } from "../budget.js";
 import {
   configuredNonNegativeInt,
   DEFAULT_STARTUP_RETRIES,
@@ -120,7 +120,10 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       fallbackModel,
       opts.rawPrompt === true,
     );
-    const prompt = result.budget ? `${taskPrompt}\n\n${budgetPrompt(result.budget)}` : taskPrompt;
+    const prompt =
+      result.budget && readBudget(result.budget).limit > 0
+        ? `${taskPrompt}\n\n${budgetPrompt(result.budget)}`
+        : taskPrompt;
     let wasAborted = false;
     const startupRetries = configuredNonNegativeInt(SUBAGENT_STARTUP_RETRIES_ENV, DEFAULT_STARTUP_RETRIES);
     let startupTimedOut = false;

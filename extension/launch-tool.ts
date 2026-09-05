@@ -67,9 +67,9 @@ export function registerSubagentsTool(state: ExtensionState) {
           }
 
           for (const [index, task] of tasks.entries()) {
-            if (!isBranchBudgetAmount(task.max_agents_allowed)) {
+            if (!isBranchBudgetAmount(task.max_subagents_allowed)) {
               throw new SubagentBudgetError(
-                `tasks[${index}].max_agents_allowed is required. Use a positive safe integer, including the assigned agent. Use 1 for a direct worker.`,
+                `tasks[${index}].max_subagents_allowed is required. Use a non-negative safe integer below Number.MAX_SAFE_INTEGER, excluding the assigned agent. Use 0 for a direct worker.`,
               );
             }
           }
@@ -176,7 +176,7 @@ export function registerSubagentsTool(state: ExtensionState) {
               runnable.map(({ task }) => ({
                 agent: task.agent,
                 task: task.task,
-                max_agents_allowed: task.max_agents_allowed,
+                max_subagents_allowed: task.max_subagents_allowed,
               })),
               state.currentDepth === 0 ? "main" : "subagent",
             );

@@ -23,13 +23,15 @@ pi remove npm:oira666_pi-subagent
 ```json
 {
   "tasks": [
-    { "agent": "code-writer", "task": "Implement the API", "max_agents_allowed": 1 },
-    { "agent": "code-reviwer", "task": "Review the design", "max_agents_allowed": 1 }
+    { "agent": "code-writer", "task": "Implement the API", "max_subagents_allowed": 0 },
+    { "agent": "code-reviwer", "task": "Review the design", "max_subagents_allowed": 0 }
   ]
 }
 ```
 
-Call `subagents` with one or more tasks. Tasks run in parallel, subject to the concurrency limit. Every task requires an agent type, task text, and an inclusive agent allowance. Use `1` for a worker that will not delegate.
+Call `subagents` with one or more tasks. Tasks run in parallel, subject to the concurrency limit. Every task requires an agent type, task text, and a descendant allowance. Use `0` for a worker that will not delegate, or `1` to let it launch one subagent. The caller reserves one slot for the worker plus its descendant allowance.
+
+Workers with zero descendant allowance receive neither active delegation tools nor added delegation guidance. Raising `max_subagents_allowed` on resume restores the tools, subject to the depth limit. This uses Pi's documented `getActiveTools()` and `setActiveTools()` APIs during `session_start`. Workers that spent a positive allowance keep their tools so they can resume existing children.
 
 Workers receive durable human names. Call `resume_subagents` to continue one with its previous context:
 

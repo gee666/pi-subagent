@@ -28,7 +28,9 @@ export function prepareResumeArguments(args: unknown): unknown {
         {
           subagent: record.subagent,
           task: record.task,
-          ...(record.max_agents_allowed !== undefined ? { max_agents_allowed: record.max_agents_allowed } : {}),
+          ...(record.max_subagents_allowed !== undefined
+            ? { max_subagents_allowed: record.max_subagents_allowed }
+            : {}),
         },
       ],
     };
