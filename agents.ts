@@ -17,6 +17,11 @@ import { fileURLToPath } from "node:url";
 
 export type AgentScope = "user" | "project" | "both";
 export type AgentSource = "user" | "project" | "builtin";
+export type LayerSetting = boolean | "only";
+export interface LayerRule {
+	layers: number[];
+	setting: LayerSetting;
+}
 
 export const SUBAGENT_HIDE_BUILTIN_AGENTS_ENV = "PI_SUBAGENT_HIDE_BUILTIN_AGENTS";
 
@@ -26,10 +31,11 @@ export interface AgentConfig {
 	tools?: string[];
 	model?: string;
 	thinking?: string;
-	/** Whether this agent may be launched at delegation depth 1 (default: true). */
-	firstLayer?: boolean;
-	/** Whether this agent may be launched at the maximum delegation depth (default: true). */
-	lastLayer?: boolean;
+	firstLayer?: LayerSetting;
+	secondLayer?: LayerSetting;
+	lastLayer?: LayerSetting;
+	/** Signed layer selectors from nth-layer(...). Negative numbers count from max depth. */
+	layerRules?: LayerRule[];
 	systemPrompt: string;
 	source: AgentSource;
 	filePath: string;
@@ -71,19 +77,35 @@ function findNearestProjectAgentsDir(cwd: string): string | null {
 
 function parseLayerSetting(
 	value: unknown,
-	field: "first-layer" | "last-layer",
+	field: string,
 	filePath: string,
-): boolean {
+): LayerSetting {
 	if (value === undefined) return true;
 	if (typeof value === "string") {
 		const normalized = value.trim().toLowerCase();
 		if (normalized === "enabled") return true;
 		if (normalized === "disabled") return false;
+		if (normalized === "only") return "only";
 	}
 	console.warn(
-		`[pi-subagent] Ignoring invalid ${field} field in "${filePath}". Expected enabled or disabled.`,
+		`[pi-subagent] Ignoring invalid ${field} field in "${filePath}". Expected enabled, disabled, or only.`,
 	);
 	return true;
+}
+
+function parseNumberedLayers(frontmatter: Record<string, unknown>, filePath: string): LayerRule[] {
+	const rules: LayerRule[] = [];
+	for (const [field, value] of Object.entries(frontmatter)) {
+		if (!field.startsWith("nth-layer")) continue;
+		const match = /^nth-layer\(([^)]+)\)$/.exec(field);
+		const parts = match?.[1].split(",").map((part) => part.trim());
+		if (!parts || !parts.every((part) => /^-?\d+$/.test(part) && Number.isSafeInteger(Number(part)) && Number(part) !== 0)) {
+			console.warn(`[pi-subagent] Ignoring invalid layer selector "${field}" in "${filePath}". Use nonzero integers, for example nth-layer(1,2,-1).`);
+			continue;
+		}
+		rules.push({ layers: [...new Set(parts.map(Number))], setting: parseLayerSetting(value, field, filePath) });
+	}
+	return rules;
 }
 
 /** Parse a single agent markdown file into an AgentConfig. Returns null on skip. */
@@ -137,7 +159,9 @@ export function parseAgentFile(filePath: string, source: AgentSource): AgentConf
 		model: typeof frontmatter.model === "string" ? frontmatter.model : undefined,
 		thinking: typeof frontmatter.thinking === "string" ? frontmatter.thinking : undefined,
 		firstLayer: parseLayerSetting(frontmatter["first-layer"], "first-layer", filePath),
+		secondLayer: parseLayerSetting(frontmatter["second-layer"], "second-layer", filePath),
 		lastLayer: parseLayerSetting(frontmatter["last-layer"], "last-layer", filePath),
+		layerRules: parseNumberedLayers(frontmatter, filePath),
 		systemPrompt: body,
 		source,
 		filePath,
@@ -195,9 +219,26 @@ export function isAgentEnabledAtLayer(
 	targetDepth: number,
 	maxDepth: number,
 ): boolean {
-	if (targetDepth === 1 && agent.firstLayer === false) return false;
-	if (targetDepth === maxDepth && agent.lastLayer === false) return false;
-	return true;
+	if (!Number.isInteger(targetDepth) || !Number.isInteger(maxDepth) || targetDepth < 1 || targetDepth > maxDepth) return false;
+	const rules: LayerRule[] = [
+		{ layers: [1], setting: agent.firstLayer ?? true },
+		{ layers: [2], setting: agent.secondLayer ?? true },
+		{ layers: [-1], setting: agent.lastLayer ?? true },
+		...agent.layerRules ?? [],
+	];
+	let hasOnly = false;
+	let matchesOnly = false;
+	for (const { layers, setting } of rules) {
+		const matches = layers.some((layer) =>
+			(layer < 0 ? maxDepth + layer + 1 : layer) === targetDepth,
+		);
+		if (setting === false && matches) return false;
+		if (setting === "only") {
+			hasOnly = true;
+			if (matches) matchesOnly = true;
+		}
+	}
+	return !hasOnly || matchesOnly;
 }
 
 /**

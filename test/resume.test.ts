@@ -159,6 +159,30 @@ function makeCtx(entries: any[]): any {
 }
 
 describe("findLatestResumableSubagentCall", () => {
+  test("converts recorded exclusive allowances to inclusive branch sizes", () => {
+    const oldTasks = tasks.map((task) => ({ ...task, max_subagents_allowed: 2 }));
+    const newTasks = tasks.map((task) => ({ ...task, max_agents_allowed: 3 }));
+    const plan = findLatestResumableSubagentCall(makeCtx([assistantSubagentCall("old-budget", oldTasks)]));
+    assert.deepEqual(plan?.tasks, newTasks);
+    assert.equal(sameTasks(oldTasks, newTasks), true);
+    assert.equal(sameTasks(oldTasks, tasks.map((task) => ({ ...task, max_agents_allowed: 2 }))), false);
+    const previousName = tasks.map((task) => ({ ...task, max_agents_in_branch: 3 }));
+    assert.equal(sameTasks(previousName, newTasks), true);
+    const previousPlan = findLatestResumableSubagentCall(makeCtx([assistantSubagentCall("previous-name", previousName)]));
+    assert.deepEqual(previousPlan?.tasks, newTasks);
+  });
+  test("keeps task allowances and durable branch budgets during recovery", () => {
+    const budgetedTasks = tasks.map((task) => ({ ...task, max_agents_allowed: 3 }));
+    const budget = { directory: "/saved/branch-budget" };
+    const plan = findLatestResumableSubagentCall(makeCtx([
+      assistantSubagentCall("budgeted", budgetedTasks),
+      subagentToolResult("budgeted", buildSubagentDetails("parallel", "spawn", null, [makeResult({ budget })])),
+    ]));
+    assert.deepEqual(plan?.tasks, budgetedTasks);
+    assert.deepEqual(plan?.details?.results[0].budget, budget);
+    assert.equal(sameTasks(budgetedTasks, tasks), false);
+    assert.equal(sameTasks(tasks.map((task) => ({ ...task, max_agents_allowed: 1 })), tasks), true);
+  });
   test("resumes an unfinished subagent result at the end of the branch", () => {
     const plan = findLatestResumableSubagentCall(makeCtx([
       assistantSubagentCall(),

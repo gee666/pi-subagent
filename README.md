@@ -40,7 +40,7 @@ The delegation tool is called `subagents` (older sessions may contain the
 legacy name `subagent`, which is still recognized when reading history):
 
 ```json
-{ "tasks": [{ "agent": "code-writer", "task": "Implement the API" }] }
+{ "tasks": [{ "agent": "code-writer", "task": "Implement the API", "max_agents_allowed": 1 }] }
 ```
 
 Multiple tasks run in parallel:
@@ -48,13 +48,46 @@ Multiple tasks run in parallel:
 ```json
 {
   "tasks": [
-    { "agent": "code-writer", "task": "Draft the implementation" },
-    { "agent": "code-reviwer", "task": "Review the plan" }
+    { "agent": "code-writer", "task": "Draft the implementation", "max_agents_allowed": 1 },
+    { "agent": "code-reviwer", "task": "Review the plan", "max_agents_allowed": 1 }
   ]
 }
 ```
 
-Each task supports `agent` (the agent *type* to spawn) and `task`.
+Each task requires `agent`, `task`, and `max_agents_allowed`. The number includes the assigned agent and every agent below it. Use `1` for a worker that will finish directly.
+
+## Delegation policy
+
+Before launching new agents, the default prompts require a concrete time or context saving that outweighs startup, discovery, and coordination costs.
+
+- Default to direct work rather than launching new agents. Use a small, flat set of specialists for substantial independent slices.
+- Choose the fewest agents the task needs. Plan for the whole task, including nested workers and later phases, and respect any limit the user sets.
+- Nested workers share the same budget. Each delegated task gets an explicit allowance.
+- Another management layer must save enough attention to pay for itself. Prefer direct workers and count all nested agents in the same budget.
+- Delegate before deep discovery, or pass existing findings directly or through a handoff file under the project's `tmp/` directory.
+
+The efficiency guidance is a model instruction. Agent budgets and depth restrictions are enforced at runtime, but neither limits dollar spending. Use `pi --subagent-max-depth 1` to block nested delegation.
+
+## Agent budgets
+
+A main session starts with a budget of 50 new agents for its entire delegation tree. Set `PI_SUBAGENT_MAX_TOTAL_AGENTS` before starting a new session to change it. `0` blocks new launches but still permits named resumes. Invalid values block launches rather than silently removing the limit.
+
+The main agent sees its remaining count only when it is below 30. Larger counts stay out of automatic prompts and budget-rejection messages so they do not suggest a target to spend. Enforcement is unchanged. Delegated workers always receive their own remaining allowance.
+
+Each task reserves exactly `max_agents_allowed` slots from its caller. A value of `10` means ten agents total, including the assigned worker. The worker's automatic prompt says it may launch at most nine more subagents, including nested launches. Two tasks with budgets of `4` and `1` reserve five slots in total.
+
+- Choose budgets from the planned work, not the available maximum. Use `1` for a direct worker; `0` is invalid because the assigned worker needs a slot.
+- Every nested call must specify allowances too. If a batch would exceed its caller's remaining slots, the extension rejects the whole batch before launching or naming any workers. The error explains the requested and remaining amounts.
+- Siblings cannot borrow each other's slots. The extension commits reservations atomically across processes, so concurrent calls cannot spend the same slots.
+- Unused allowances stay reserved for later resumes. Finished, failed, or canceled branches do not return slots to their parent. Interrupted calls reuse their original reservations when recovered.
+- Named resumes do not consume new slots. The resumed worker, including any private session forks, keeps its current budget unless `max_agents_allowed` overrides it. Past launches and assigned slots still count.
+- The extension adds the remaining allowance and explains inclusive branch sizes in the worker's prompt automatically. No hand-written budget instructions are needed.
+
+Budgets survive reloads, restarts, compaction, and session forks. The cap covers the main session's entire tree, not each tool call or user message. Changing the environment does not enlarge an existing tree; start a new main session for a fresh budget. Resuming older workers without recorded budgets gives them no new descendant allowance.
+
+Recorded calls and budgets from the older, exclusive argument remain resumable. The extension converts them without changing their reserved slots or remaining allowance.
+
+Budget state is stored alongside subagent sessions using immutable files and atomic hard links. Missing or corrupt saved state blocks new launches instead of resetting the allowance. The session filesystem must support hard links. This is an agent-count limit, not a spending limit or a security sandbox.
 
 ## Tool Prompt Overrides
 
@@ -66,7 +99,7 @@ The complete LLM-facing description of each extension tool can be replaced in
 3. The nearest trusted project `.pi/pi-subagents.json`, walking up from the current directory
 
 Project values override global values per tool. Missing prompts keep their
-built-in defaults. Use a JSON object for `tool-prompts`:
+built-in defaults. Overrides replace the written delegation guidance, not the required budget argument or runtime enforcement. Keep estimation guidance in custom descriptions. Use a JSON object for `tool-prompts`:
 
 ```json
 {
@@ -84,7 +117,7 @@ Four built-in agents ship with the extension and remain available alongside cust
 - `code-writer` — implementation and refactoring
 - `code-reviwer` — code review and risk finding
 - `code-architect` — technical design and approach selection
-- `team-lead` — decomposition and delegated multi-agent implementation
+- `team-lead`: rare coordination of one large subproject. Its bundled `first-layer: only` setting limits launches to the main agent.
 
 ## Defining Agents
 
@@ -97,7 +130,7 @@ Create Markdown files with YAML frontmatter:
 Agent discovery priority (highest wins on name collision): project > env/user > built-in.
 Built-in agents remain available alongside custom agents unless
 `PI_SUBAGENT_HIDE_BUILTIN_AGENTS=true`. A custom definition with the same name
-as a built-in agent overrides that built-in definition.
+as a built-in agent overrides that built-in definition, including its delegation instructions. Update custom copies separately to adopt the bundled policy.
 
 ```markdown
 ---
@@ -121,8 +154,31 @@ You are an expert technical writer focused on clarity and conciseness.
 | `model`       | No       | Current parent model | Legacy fallback only when live parent model context is unavailable |
 | `thinking`    | No       | Pi default           | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`       |
 | `tools`       | No       | `read,bash,edit,write` | Comma-separated built-in tools                         |
-| `first-layer` | No       | `enabled`            | Set to `disabled` to hide/block this agent at depth 1    |
-| `last-layer`  | No       | `enabled`            | Set to `disabled` to hide/block this agent at max depth  |
+| `first-layer` | No       | `enabled`            | Rule for depth 1, launched by the main agent |
+| `second-layer` | No      | `enabled`            | Rule for depth 2 |
+| `last-layer`  | No       | `enabled`            | Rule for the configured maximum depth |
+| `nth-layer(1,2,-1)` | No | `enabled`            | Rule for a comma-separated list of layer numbers |
+
+Layer rules accept `enabled`, `disabled`, or `only`:
+
+- `enabled` leaves the selected layers available. It does not restrict other layers or override another rule.
+- `disabled` blocks the selected layers.
+- `only` restricts the agent to the selected layers. Multiple `only` rules combine their selections. A matching `disabled` rule still wins, regardless of order.
+
+Layer numbers start at 1. Negative numbers count back from the configured maximum depth, so `-1` means last and `-2` means next to last. Repeated numbers are harmless. Numbers outside the configured depth range match nothing. Zero, fractions, malformed selectors, and invalid values produce warnings and are ignored.
+
+```yaml
+# Only the main agent can launch this agent.
+first-layer: only
+```
+
+```yaml
+# Allow these layers, then exclude the second layer.
+nth-layer(1,2,5,-1,-5): only
+second-layer: disabled
+```
+
+With maximum depth 8, the second example allows layers 1, 4, 5, and 8. With maximum depth 1, `first-layer: only` still allows layer 1. Adding `last-layer: disabled` would block it.
 
 Available tools: `read`, `bash`, `edit`, `write`.
 
@@ -130,7 +186,7 @@ The Markdown body becomes the agent's system prompt (appended to Pi's default, n
 
 ## Delegation Guards
 
-Depth and cycle guards prevent runaway recursive delegation. Layer availability is evaluated for the child being launched: depth 1 is the first layer, and `PI_SUBAGENT_MAX_DEPTH` is the last layer. The bundled `team-lead` agent sets `last-layer: disabled` so it cannot consume the final delegation layer. When cycle prevention is enabled, agents already in the current delegation stack are omitted from the child model's available-agent list. The runner still checks every task as a safety boundary: in a mixed parallel call, cyclic tasks fail while legal siblings still run.
+Depth and cycle guards restrict nesting but do not cap total launches or spending. Layer availability is evaluated for the child being launched: depth 1 is the first layer, and `PI_SUBAGENT_MAX_DEPTH` is the last layer. The bundled `team-lead` agent sets `first-layer: only`, so only the main agent can launch it. Custom agent definitions can choose other layer rules. When cycle prevention is enabled, agents already in the current delegation stack are omitted from the child model's available-agent list. The runner still checks every task as a safety boundary: in a mixed parallel call, cyclic tasks fail while legal siblings still run.
 
 A nested delegation failure is returned to its calling agent as a recoverable tool error. If that agent subsequently retries, completes the work itself, and produces a successful final answer, the earlier tool error does not incorrectly turn the completed agent—and all of its ancestors—into failures.
 
@@ -149,6 +205,7 @@ pi --no-subagent-prevent-cycles   # allow cycles (not recommended)
 
 | Env Var                          | Default | Description                              |
 | -------------------------------- | ------- | ---------------------------------------- |
+| `PI_SUBAGENT_MAX_TOTAL_AGENTS` | `50` | Total new-agent budget for a new main session's tree |
 | `PI_SUBAGENT_MAX_PARALLEL_TASKS` | `30`    | Max tasks per single call                |
 | `PI_SUBAGENT_MAX_CONCURRENCY`    | `8`     | Max subagents running simultaneously     |
 
@@ -219,6 +276,8 @@ available only in the interactive TUI.
 In the tool list, delegation rows expand into their named children, and those
 child rows are selectable: press Enter on one to open that subagent's own view.
 
+The count in `WITH SUBS: (N)` is the number of unique subagents, including nested workers. Resuming a subagent or continuing its private session fork does not increase this count. Resume costs and tokens still contribute to the usage totals. Older compact history uses the name registry to recover identities that are no longer stored in the chat.
+
 The `WITH SUBS` status line aggregates `ctx.sessionManager.getEntries()`, which
 is the approach Pi documents for extension-side token stats. It applies Pi's own
 rules (`AgentSession.getSessionStats`): every billed entry counts, including
@@ -271,6 +330,21 @@ preserving their full previous context:
 { "resumes": [{ "subagent": "John", "task": "Now also update the tests." }] }
 ```
 
+Each resume entry may optionally set `max_agents_allowed`:
+
+```json
+{ "resumes": [{ "subagent": "John", "task": "Continue the implementation", "max_agents_allowed": 10 }] }
+```
+
+This replaces the worker's lifetime cap, including the worker itself. It does not grant ten fresh launches. Omit the field to keep the current cap.
+
+- Increases reserve only the extra capacity from the original launcher's remaining budget. The full-tree cap still applies.
+- A decrease cannot remove slots already spent or assigned to nested workers. It also does not return reserved capacity to the parent. Raising the cap back to a previously funded value needs no extra slots.
+- A caller can override workers in its own delegation tree. For nested workers, increases use their immediate launcher's allowance. Increase that launcher's cap first if necessary.
+- Overrides in one call must share an original launcher. Split overrides for different launchers into separate calls.
+- Recorded reservations are required for overrides. Older workers without them can still resume without the optional field.
+- Budget changes persist across resumes and forks. If interrupted after funding an increase, the extra capacity stays reserved and a retry does not charge it again.
+
 Naming is deliberately unambiguous: `agent` (in `subagents`) selects an agent
 *type* to spawn; `subagent` (in `resume_subagents`) addresses an already-run
 subagent *instance* by its unique name.
@@ -305,6 +379,7 @@ subagent *instance* by its unique name.
 | --- | --- | --- |
 | `DISABLE_RESUMABLE_SUBAGENTS` | `false` | Set to `true`/`on`/`1` to disable resumable subagents entirely: no names are allocated, the `resume_subagents` tool is not registered, and the system prompt omits the feature. |
 | `PI_SUBAGENT_NAMES_FILE` | (internal) | Path of the shared name registry, propagated to child processes so the whole delegation tree allocates unique names. |
+| `PI_SUBAGENT_BUDGET_DIR` | internal | Child's reserved branch ledger. Passed through the process environment and persisted in session metadata. |
 
 ## Agent Discovery
 

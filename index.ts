@@ -9,6 +9,7 @@
  */
 
 import * as fs from "node:fs";
+import * as path from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
   createFauxCore,
@@ -25,6 +26,20 @@ import {
   isAgentEnabledAtLayer,
 } from "./agents.js";
 import { loadPiSubagentsConfig } from "./config.js";
+import {
+  budgetPrompt,
+  configuredTotalBudget,
+  createBudget,
+  findPersistedBudget,
+  isBranchBudgetAmount,
+  readBudget,
+  reserveSubagentBudgets,
+  overrideResumeBudgets,
+  SubagentBudgetError,
+  SUBAGENT_BUDGET_CUSTOM_TYPE,
+  SUBAGENT_BUDGET_DIR_ENV,
+  type SubagentBudget,
+} from "./budget.js";
 import {
   allocateSubagentNames,
   clearResumeActive,
@@ -64,6 +79,7 @@ import {
   buildSubagentSessionDir,
   findLatestResumableSubagentCalls,
   getDefaultSubagentSessionRoot,
+  getTaskBranchSize,
   isFinishedResult,
   parseBooleanEnv,
   sameTasks,
@@ -102,6 +118,8 @@ import {
   addUsageSummary,
   usageSummaryToUsageStats,
   usageSummaryFromUsage,
+  subagentIdentity,
+  withSubagentIdentities,
 } from "./types.js";
 import { formatCombinedUsageStatusLine } from "./tree.js";
 
@@ -118,22 +136,16 @@ const SUBAGENT_STACK_ENV = "PI_SUBAGENT_STACK";
 const SUBAGENT_PREVENT_CYCLES_ENV = "PI_SUBAGENT_PREVENT_CYCLES";
 const SUBAGENT_CONFIRM_PROJECT_AGENTS_ENV = "PI_SUBAGENT_CONFIRM_PROJECT_AGENTS";
 
-const BASE_SUBAGENTS_TOOL_DESCRIPTION = [
-  "Delegate work to specialized subagents running as isolated pi processes.",
-  "",
-  "Pass a `tasks` array. Every task in the same call runs IN PARALLEL.",
-  "  - 1 task  -> single delegation",
-  "  - N tasks -> all N run concurrently in one call",
-  "",
-  "For sequential work (task B depends on task A's output), make separate",
-  "tool calls one after another. Do NOT put dependent tasks in the same array.",
-  "",
-  'Single:   { tasks: [{ agent: "writer", task: "Rewrite README.md" }] }',
-  'Parallel: { tasks: [{ agent: "writer", task: "..." }, { agent: "tester", task: "..." }] }',
-].join("\n");
+const BASE_SUBAGENTS_TOOL_DESCRIPTION =
+  "Run agents in separate processes. Pass { tasks: [{ agent, task, max_agents_allowed }] }. Tasks in one call run in parallel; wait between dependent tasks.";
 
-const SUBAGENT_USAGE_GUIDANCE =
-  "Be careful with subagents: use them when the user explicitly asks or when they are truly necessary, because they are expensive. Good cases: running several exploration tasks in parallel, solving several tasks in parallel, or delegating several large tasks to separate subagents. Bad cases (don't do this): creating many nested subagents with similar tasks, using sequential subagents for simple short tasks, running a subagent just to read a file or execute a bash command, or delegating work that does not need a team or parallel execution (unless the user asked you to).";
+const SUBAGENT_USAGE_GUIDANCE = [
+  "When to launch new subagents:",
+  "1. Launch new subagents only when parallel work will save substantial time, or a large task would crowd out your context and force compaction. Every new agent costs money and must learn its task from scratch. The savings must cover that setup and the work of combining results. Permission to delegate is not a reason to do it.",
+  "2. Before launching, say what each agent will do and what time or context it saves. Set max_agents_allowed on every task: include the assigned agent and everyone below it. Use 1 for a direct worker. The number you choose is exactly the number of slots reserved. Siblings get separate shares; unused shares stay reserved for resumes. Count only workers the planned work needs, not speculative teams. The whole call is rejected if the total exceeds your remaining slots. Respect any tighter user limit.",
+  "3. Prefer a few independent workers, not workers each building teams. Another management layer must save enough attention to pay for itself. Passing your whole task unchanged to another agent just adds a relay. Do not launch new agents merely to read a file, run a command, or make a small edit.",
+  "4. Delegate before deep research. Agents do not inherit your conversation. If you already gathered findings, share them in the task or a handoff file under the project's tmp/ directory, using its absolute path. Include scope, constraints, relevant files, decisions, completed checks, and expected output. Ask agents to check evidence and fill gaps, not repeat your research.",
+].join("\n");
 
 export function getSubagentsToolDescription(): string {
   return `${BASE_SUBAGENTS_TOOL_DESCRIPTION}\n\n${SUBAGENT_USAGE_GUIDANCE}`;
@@ -162,7 +174,12 @@ const TaskItem = Type.Object({
   }),
   task: Type.String({
     description:
-      "Task description for this delegated run. Include all required context; the subagent receives only this prompt.",
+      "What to do, what to return, constraints, and known findings or a handoff file path. It cannot see your conversation.",
+  }),
+  max_agents_allowed: Type.Integer({
+    minimum: 1,
+    maximum: Number.MAX_SAFE_INTEGER,
+    description: "Maximum total subagents for this task, including the assigned subagent and all nested workers. Required on every task. Use 1 for a direct worker. Otherwise count everyone the planned work actually needs; do not add speculative teams or give each worker the full budget. A value of 10 reserves exactly 10 slots. Unused slots stay reserved for that worker's future resumes. The sum across tasks must fit your remaining budget or no tasks launch.",
   }),
 }, { additionalProperties: false });
 
@@ -181,6 +198,11 @@ const ResumeItem = Type.Object({
   task: Type.String({
     description: "New task for the resumed subagent. It keeps its previous context.",
   }),
+  max_agents_allowed: Type.Optional(Type.Integer({
+    minimum: 1,
+    maximum: Number.MAX_SAFE_INTEGER,
+    description: "Optional replacement lifetime cap, including the resumed subagent and all nested workers. Omit to keep its current allowance. Set only what the remaining work needs, while retaining slots already spent or assigned. Increases reserve extra slots from its original launcher's budget. Decreases do not refund reserved slots. Resuming itself uses no slot; the counter never resets.",
+  })),
 }, { additionalProperties: false });
 
 // The single bare-object form is tolerated for robustness but deliberately
@@ -202,14 +224,20 @@ const ResumeSubagentsParams = Type.Object({
  * Accept both `resumes: [{...}]` and a single bare `resumes: {...}` object.
  * Also tolerates the legacy {name, prompt} field names from older sessions.
  */
-function normalizeResumes(raw: unknown): Array<{ name: string; task: string }> {
+function normalizeResumes(raw: unknown): Array<{ name: string; task: string; max_agents_allowed?: number }> {
   const items = Array.isArray(raw) ? raw : raw && typeof raw === "object" ? [raw] : [];
-  const normalized: Array<{ name: string; task: string }> = [];
+  const normalized: Array<{ name: string; task: string; max_agents_allowed?: number }> = [];
   for (const item of items as any[]) {
     if (!item || typeof item !== "object") continue;
     const name = typeof item.subagent === "string" ? item.subagent : typeof item.name === "string" ? item.name : undefined;
     const task = typeof item.task === "string" ? item.task : typeof item.prompt === "string" ? item.prompt : undefined;
-    if (name !== undefined && task !== undefined) normalized.push({ name, task });
+    if (item.max_agents_allowed !== undefined && !isBranchBudgetAmount(item.max_agents_allowed)) {
+      throw new SubagentBudgetError("Resume max_agents_allowed must be a positive safe integer. Omit it to keep the current allowance.");
+    }
+    if (name !== undefined && task !== undefined) normalized.push({
+      name, task,
+      ...(item.max_agents_allowed !== undefined ? { max_agents_allowed: item.max_agents_allowed } : {}),
+    });
   }
   return normalized;
 }
@@ -472,14 +500,14 @@ function liveDetailsSignature(details: SubagentDetails): string {
   })));
 }
 
-function collectLiveUsageSummary(details: SubagentDetails): SubagentUsageSummary {
+export function collectLiveUsageSummary(details: SubagentDetails): SubagentUsageSummary {
   const summary = emptyUsageSummary();
   for (const result of details.results) {
     if (result.subtreeUsageSummary) {
-      addUsageSummary(summary, result.subtreeUsageSummary);
+      addUsageSummary(summary, withSubagentIdentities(result.subtreeUsageSummary, [result]));
       continue;
     }
-    addUsageSummary(summary, usageSummaryFromUsage(result.usage));
+    addUsageSummary(summary, usageSummaryFromUsage(result.usage, subagentIdentity(result)));
     if (result.priorDescendantUsageSummary) {
       addUsageSummary(summary, result.priorDescendantUsageSummary);
     }
@@ -496,7 +524,9 @@ function collectLiveUsageSummary(details: SubagentDetails): SubagentUsageSummary
       );
       addUsageSummary(
         summary,
-        nested.details.usageSummary ?? collectLiveUsageSummary(nested.details),
+        nested.details.usageSummary
+          ? withSubagentIdentities(nested.details.usageSummary, nested.details.results)
+          : collectLiveUsageSummary(nested.details),
       );
     }
 
@@ -523,7 +553,36 @@ type PersistedUsageTotals = {
   hasEntries: boolean;
   parentUsage: UsageStats;
   subagents: SubagentUsageSummary;
+  namesFile?: string;
+  registeredNames?: { signature: string; ids: string[]; aliases: Map<string, string> };
 };
+
+// Old compact summaries kept counts but discarded nested identities. The name
+// registry recovers those identities, including descendants no longer in chat.
+function registeredSubagentIds(totals: PersistedUsageTotals): string[] | undefined {
+  if (!totals.namesFile) return undefined;
+  try {
+    const stat = fs.statSync(totals.namesFile);
+    const signature = `${stat.mtimeMs}:${stat.size}`;
+    if (totals.registeredNames?.signature === signature) return totals.registeredNames.ids;
+    const registry = JSON.parse(fs.readFileSync(totals.namesFile, "utf8"));
+    if (!registry?.agents || typeof registry.agents !== "object" || Array.isArray(registry.agents)) return undefined;
+    const ids = Object.keys(registry.agents).map((name) => `name:${name.toLowerCase()}`);
+    const aliases = new Map<string, string>();
+    for (const [name, record] of Object.entries(registry.agents) as Array<[string, any]>) {
+      const id = `name:${name.toLowerCase()}`;
+      if (record?.sessionDir) aliases.set(`session:${record.sessionDir}`, id);
+      if (record?.budget?.directory) aliases.set(`budget:${record.budget.directory}`, id);
+      for (const fork of Object.values(record?.forks ?? {}) as any[]) {
+        if (fork?.sessionDir) aliases.set(`session:${fork.sessionDir}`, id);
+      }
+    }
+    totals.registeredNames = { signature, ids, aliases };
+    return ids;
+  } catch {
+    return undefined;
+  }
+}
 
 // SessionManager owns the history; a WeakMap lets its one current aggregate be
 // reclaimed with the manager. Repeated progress/heartbeat updates no longer
@@ -580,7 +639,10 @@ export function collectCombinedUsageStatusLine(
           if (isSubagentDetails(msg.details)) {
             addUsageSummary(
               subagents,
-              msg.details.usageSummary ?? usageSummaryFromUsage(msg.details.aggregatedUsage),
+              withSubagentIdentities(
+                msg.details.usageSummary ?? usageSummaryFromUsage(msg.details.aggregatedUsage),
+                msg.details.results,
+              ),
             );
           }
         } else {
@@ -588,7 +650,10 @@ export function collectCombinedUsageStatusLine(
         }
       }
     }
-    persisted = { leafId, hasEntries: allEntries.length > 0, parentUsage, subagents };
+    persisted = {
+      leafId, hasEntries: allEntries.length > 0, parentUsage, subagents,
+      namesFile: findPersistedNamesIdentity(allEntries)?.namesFile,
+    };
     if (cacheKey && leafId !== undefined) persistedUsageCache.set(cacheKey, persisted);
   }
 
@@ -597,7 +662,11 @@ export function collectCombinedUsageStatusLine(
   const subagents = { ...persisted.subagents };
   for (const liveSummary of liveSummaries) addUsageSummary(subagents, liveSummary);
   addUsage(parentUsage, usageSummaryToUsageStats(subagents) ?? emptyUsage());
-  return formatCombinedUsageStatusLine(parentUsage, subagents.subagentCount);
+  const registered = registeredSubagentIds(persisted);
+  const uniqueCount = registered?.length
+    ? new Set([...registered, ...(subagents.subagentIds ?? []).map((id) => persisted.registeredNames?.aliases.get(id) ?? id)]).size
+    : subagents.subagentCount;
+  return formatCombinedUsageStatusLine(parentUsage, uniqueCount);
 }
 
 /** Get project-local agents referenced by the current request. */
@@ -1049,6 +1118,24 @@ export default function (pi: ExtensionAPI) {
   let currentNamesFile = "";
   /** Stable ownership/fork key for this session's delegation tree position. */
   let currentOwnerId = "ephemeral";
+  let currentBudget: SubagentBudget | undefined;
+  let budgetSetupError: unknown;
+
+  function ensureBudget(): SubagentBudget {
+    if (budgetSetupError) throw budgetSetupError;
+    if (!currentBudget) {
+      if (!currentSubagentSessionRoot) throw new SubagentBudgetError("Session budget is not initialized. Start or reload the session before launching agents.");
+      // Older nested sessions without a recorded grant must not get a new root allowance.
+      const limit = currentDepth === 0 ? configuredTotalBudget() : 0;
+      currentBudget = createBudget(
+        path.join(currentSubagentSessionRoot, currentSessionId.replace(/[^a-zA-Z0-9_.-]+/g, "_"), "subagent-budget"),
+        limit,
+      );
+      pi.appendEntry?.(SUBAGENT_BUDGET_CUSTOM_TYPE, currentBudget);
+    }
+    readBudget(currentBudget);
+    return currentBudget;
+  }
   let pendingResumePlans: ResumableSubagentCall[] = [];
   let modelToRestoreAfterResume: any | undefined;
   const approvedProjectAgentDirsForSession = new Set<string>();
@@ -1390,6 +1477,19 @@ export default function (pi: ExtensionAPI) {
     lifecycleGeneration += 1;
     sessionActive = true;
     latestSessionCtx = ctx;
+    currentBudget = undefined;
+    budgetSetupError = undefined;
+    try {
+      const persisted = findPersistedBudget(ctx.sessionManager.getEntries?.() ?? []);
+      const inherited = process.env[SUBAGENT_BUDGET_DIR_ENV];
+      if (!persisted && inherited && !path.isAbsolute(inherited)) {
+        throw new SubagentBudgetError(`Invalid ${SUBAGENT_BUDGET_DIR_ENV}: expected an absolute branch-ledger path. New launches are blocked.`);
+      }
+      currentBudget = persisted ?? (inherited ? { directory: inherited } : undefined);
+      if (currentBudget && !persisted) pi.appendEntry?.(SUBAGENT_BUDGET_CUSTOM_TYPE, currentBudget);
+    } catch (error) {
+      budgetSetupError = error;
+    }
     const historicalCallIds: string[] = [];
     const leafId = ctx.sessionManager.getLeafId?.();
     const visibleEntries = leafId
@@ -1748,33 +1848,23 @@ export default function (pi: ExtensionAPI) {
             .map((a) => `- **${a.name}**: ${a.description}`)
             .join("\n")
         : "_No agents are available for the next delegation layer. Do not call the subagents tool._";
-      const subagentsGuidance = configuredToolPrompts[SUBAGENT_TOOL_NAME] ?? `### How to call the subagents tool
+      let allowance: string;
+      try {
+        allowance = budgetPrompt(ensureBudget(), currentDepth === 0 ? "main" : "subagent");
+      } catch (error) {
+        allowance = `New subagent launches are blocked: ${error instanceof Error ? error.message : error}`;
+      }
+      const subagentsGuidance = configuredToolPrompts[SUBAGENT_TOOL_NAME] ?? `### Subagent use
 
-Each subagent runs in an **isolated process**.
+${getSubagentsToolDescription()}
 
-Pass a \`tasks\` array. **Every task in the same call runs in parallel.**
-- 1 task  -> single delegation
-- N tasks -> all N run concurrently in one call
-
-For **sequential** work (task B needs task A's output), make separate tool
-calls one after another. Do NOT put dependent tasks in the same array.
-
-**Single (1 agent)**:
-\`\`\`json
-{ "tasks": [{ "agent": "agent-name", "task": "Detailed task..." }] }
-\`\`\`
-
-**Parallel (N agents at once)**:
-\`\`\`json
-{ "tasks": [{ "agent": "agent-a", "task": "..." }, { "agent": "agent-b", "task": "..." }] }
-\`\`\`
-
-- Max subagents per tool call: ${maxParallelTasks}`;
+- Technical batch capacity: ${maxParallelTasks}. This does not increase the task-wide agent budget.`;
       const delegationStackText = ancestorAgentStack.length > 0
         ? ancestorAgentStack.join(" -> ")
         : "(root)";
       const delegationGuardGuidance = `### Delegation guards
 
+- ${allowance}
 - Current depth: ${currentDepth}; max depth: ${maxDepth}
 - Cycle prevention: ${preventCycles ? "enabled" : "disabled"}
 - Current delegation stack: ${delegationStackText}
@@ -1797,8 +1887,7 @@ keeping their full previous context:
 - \`agent\` (in \`subagents\`) is an agent TYPE; \`subagent\` (in \`resume_subagents\`)
   is the unique name of an already-run subagent instance.
 - All resumes in one call run in parallel.
-- You may include subagent names in the task text you give YOUR OWN subagents,
-  so they can resume those subagents themselves.
+- Optional \`max_agents_allowed\` changes a worker's lifetime cap, including itself. Omit it to keep the current allowance. Past launches and assigned slots still count; increases reserve extra slots from its original launcher.
 - Names survive restarts; you can resume them in a later session of this conversation.`;
       return {
         systemPrompt: `${event.systemPrompt}\n\n## Available Subagents
@@ -1820,6 +1909,19 @@ ${agentList}\n\n${subagentsGuidance}\n\n${delegationGuardGuidance}${resumeGuidan
       label: "Subagents",
       description: configuredToolPrompts[SUBAGENT_TOOL_NAME] ?? getSubagentsToolDescription(),
       parameters: SubagentParams,
+      prepareArguments(args) {
+        // Only crash recovery may supply old tasks without the new required field.
+        // New model calls still have to choose an allowance explicitly.
+        if (!args || !Array.isArray((args as any).tasks)) return args;
+        const tasks = (args as any).tasks;
+        if (!tasks.every((task: any) => task && typeof task.agent === "string" && typeof task.task === "string")) return args;
+        if (!pendingResumePlans.some((plan) => sameTasks(plan.tasks, tasks))) return args;
+        return { ...args as object, tasks: tasks.map((task: any) => {
+          const { max_subagents_allowed: _exclusive, max_agents_in_branch: _previous, ...rest } = task;
+          const size = getTaskBranchSize(task);
+          return { ...rest, max_agents_allowed: size === undefined ? 1 : size };
+        }) };
+      },
 
       async execute(toolCallId, params, signal, onUpdate, ctx) {
         const toolResult = await (async () => {
@@ -1847,6 +1949,15 @@ ${agentList}\n\n${subagentsGuidance}\n\n${delegationGuardGuidance}${resumeGuidan
               isError: true,
             };
           }
+
+          for (const [index, task] of tasks.entries()) {
+            if (!isBranchBudgetAmount(task.max_agents_allowed)) {
+              throw new SubagentBudgetError(`tasks[${index}].max_agents_allowed is required. Use a positive safe integer, including the assigned agent. Use 1 for a direct worker.`);
+            }
+          }
+          if (tasks.length > maxParallelTasks) throw new SubagentBudgetError(`Too many tasks: ${tasks.length}. Batch capacity is ${maxParallelTasks}. No slots were reserved.`);
+          if (signal?.aborted) throw new SubagentBudgetError("Launch canceled. No slots were reserved.");
+          const launchGeneration = lifecycleGeneration;
 
           const executionMode = tasks.length === 1 ? "single" : "parallel";
           const topLevelBaseId = nextActiveSubagentId;
@@ -1928,9 +2039,30 @@ ${agentList}\n\n${subagentsGuidance}\n\n${delegationGuardGuidance}${resumeGuidan
 
           const resumePlanIndex = pendingResumePlans.findIndex((plan) => sameTasks(plan.tasks, tasks));
           const resumePlan = resumePlanIndex >= 0 ? pendingResumePlans[resumePlanIndex] : null;
-          if (resumePlanIndex >= 0) {
-            pendingResumePlans.splice(resumePlanIndex, 1);
+          if (launchGeneration !== lifecycleGeneration || signal?.aborted) throw new SubagentBudgetError("Launch canceled or session changed. No slots were reserved.");
+          const budgets: Array<SubagentBudget | undefined> = tasks.map(() => undefined);
+          const runnable = tasks.map((task, index) => ({ task, index }))
+            .filter(({ task, index }) => !cyclicTaskIndexes.has(index) && agents.some((agent) => agent.name === task.agent));
+          if (resumePlan && resumePlan.tasks.every((task) => getTaskBranchSize(task) === undefined)) {
+            // Pre-budget sessions can resume their existing workers, but cannot
+            // acquire fresh descendant allowances through recovery.
+            for (const { index } of runnable) {
+              budgets[index] = resumePlan.details?.results[index]?.budget ?? createBudget(
+                path.join(resumePlan.details?.results[index]?.sessionDir ?? getSessionDirForTask(resumePlan.previousToolCallId, index), "legacy-budget"),
+                0,
+              );
+            }
+          } else if (runnable.length) {
+            const reserved = reserveSubagentBudgets(
+              ensureBudget(),
+              resumePlan?.previousToolCallId ?? toolCallId,
+              runnable.map(({ task }) => ({ agent: task.agent, task: task.task, max_agents_allowed: task.max_agents_allowed })),
+              currentDepth === 0 ? "main" : "subagent",
+            );
+            runnable.forEach(({ index }, position) => { budgets[index] = reserved[position]; });
           }
+
+          if (resumePlanIndex >= 0) pendingResumePlans.splice(resumePlanIndex, 1);
 
           // Assign random durable human names unique across the whole tree. Resumed
           // runs keep the names already recorded in the previous results.
@@ -1951,6 +2083,7 @@ ${agentList}\n\n${subagentsGuidance}\n\n${delegationGuardGuidance}${resumeGuidan
                     return {
                       agent: task.agent,
                       task: task.task,
+                      budget: budgets[index],
                       model:
                         formatModelFlag(getParentModelForSubagent(ctx)) ?? agentConfig?.model,
                       tools: agentConfig?.tools,
@@ -1969,6 +2102,7 @@ ${agentList}\n\n${subagentsGuidance}\n\n${delegationGuardGuidance}${resumeGuidan
             }
           }
 
+          if (launchGeneration !== lifecycleGeneration || signal?.aborted) throw new SubagentBudgetError("Launch canceled after reservation. Reserved slots remain assigned to these branches.");
           if (tasks.length === 1) {
             const [task] = tasks;
             return executeSingle(
@@ -1987,6 +2121,7 @@ ${agentList}\n\n${subagentsGuidance}\n\n${delegationGuardGuidance}${resumeGuidan
               formatModelFlag(getParentModelForSubagent(ctx)),
               topLevelBaseId,
               names[0],
+              budgets[0],
             );
           }
 
@@ -2002,9 +2137,16 @@ ${agentList}\n\n${subagentsGuidance}\n\n${delegationGuardGuidance}${resumeGuidan
             !!resumePlan,
             formatModelFlag(getParentModelForSubagent(ctx)),
             topLevelBaseId,
-            { names },
+            { names, budgets },
           );
         } catch (err) {
+          if (err instanceof SubagentBudgetError) {
+            return {
+              content: [{ type: "text" as const, text: err.message }],
+              details: buildSubagentDetails("single", DEFAULT_DELEGATION_MODE, null, []),
+              isError: true,
+            };
+          }
           const msg = err instanceof Error ? err.message : String(err);
           const stack = err instanceof Error && err.stack ? `\n\n${err.stack}` : "";
           return {
@@ -2030,12 +2172,9 @@ ${agentList}\n\n${subagentsGuidance}\n\n${delegationGuardGuidance}${resumeGuidan
       name: RESUME_SUBAGENTS_TOOL_NAME,
       label: "Resume subagents",
       description: configuredToolPrompts[RESUME_SUBAGENTS_TOOL_NAME] ?? [
-        "Resume previously run subagents by name with a new task, keeping their full context.",
-        "",
-        "Every subagent run returns a unique human name (e.g. John). Pass those names",
-        "as `subagent` to continue them. All resumes in one call run IN PARALLEL.",
-        "",
-        'Example: { resumes: [{ subagent: "John", task: "Also update the tests." }] }',
+        "Continue agents by their returned names, keeping their previous context.",
+        "Optional max_agents_allowed replaces the lifetime cap, including the resumed agent. Past launches and assigned slots still count. Increases reserve extra slots from the original launcher; omitting it keeps the current allowance.",
+        "Pass { resumes: [{ subagent, task }] }. Resumes in one call run in parallel; wait between dependent tasks.",
       ].join("\n"),
       parameters: ResumeSubagentsParams,
       prepareArguments: prepareResumeArguments,
@@ -2043,6 +2182,7 @@ ${agentList}\n\n${subagentsGuidance}\n\n${delegationGuardGuidance}${resumeGuidan
       async execute(toolCallId, params, signal, onUpdate, ctx) {
         const toolResult = await (async () => {
         const markedNames: string[] = [];
+        const resumeGeneration = lifecycleGeneration;
         try {
           recordToolCallStart(toolCallId);
           updateLatestBroadcastTargets(undefined);
@@ -2103,6 +2243,8 @@ ${agentList}\n\n${subagentsGuidance}\n\n${delegationGuardGuidance}${resumeGuidan
               name: string;
               model?: string;
               tools?: string[];
+              budget: SubagentBudget;
+              max_agents_allowed?: number;
             }> = [];
             const hasSessionFiles = (dir: string): boolean => {
               try {
@@ -2115,6 +2257,11 @@ ${agentList}\n\n${subagentsGuidance}\n\n${delegationGuardGuidance}${resumeGuidan
               const resolution = await resolveResumeTarget(currentNamesFile, resume.name, currentOwnerId);
               if ("error" in resolution) {
                 errors.push(resolution.error);
+                continue;
+              }
+              const definition = discovery.agents.find((agent) => agent.name === resolution.record.agent);
+              if (definition && !isAgentEnabledAtLayer(definition, currentDepth + 1, maxDepth)) {
+                errors.push(`Cannot resume subagent "${resume.name}": agent "${definition.name}" is disabled at layer ${currentDepth + 1}.`);
                 continue;
               }
               if (resolution.isFork) {
@@ -2138,6 +2285,8 @@ ${agentList}\n\n${subagentsGuidance}\n\n${delegationGuardGuidance}${resumeGuidan
                 name: resume.name,
                 model: resolution.record.model,
                 tools: resolution.record.tools,
+                budget: resolution.record.budget ?? createBudget(path.join(resolution.record.sessionDir, "legacy-budget"), 0),
+                max_agents_allowed: resume.max_agents_allowed,
               });
             }
             if (errors.length > 0) {
@@ -2162,6 +2311,14 @@ ${agentList}\n\n${subagentsGuidance}\n\n${delegationGuardGuidance}${resumeGuidan
               return fail(markerErrors.join("\n"));
             }
 
+            if (resumeGeneration !== lifecycleGeneration || signal?.aborted) {
+              return fail("Resume canceled or session changed. No budgets were changed.");
+            }
+            const overrides = targets.flatMap((target) => target.max_agents_allowed === undefined
+              ? [] : [{ budget: target.budget, max_agents_allowed: target.max_agents_allowed }]);
+            if (overrides.length) {
+              overrideResumeBudgets(ensureBudget(), overrides, currentDepth === 0 ? "main" : "subagent");
+            }
             for (const target of targets) {
               await updateNameRecord(currentNamesFile, target.name, { lastResumePrompt: target.task });
             }
@@ -2209,7 +2366,7 @@ ${agentList}\n\n${subagentsGuidance}\n\n${delegationGuardGuidance}${resumeGuidan
               true,
               formatModelFlag(getParentModelForSubagent(ctx)),
               topLevelBaseId,
-              { names: targets.map((target) => target.name), rawPrompts: true },
+              { names: targets.map((target) => target.name), budgets: targets.map((target) => target.budget), rawPrompts: true },
             );
           } finally {
             releaseLocalGuards();
@@ -2218,7 +2375,7 @@ ${agentList}\n\n${subagentsGuidance}\n\n${delegationGuardGuidance}${resumeGuidan
           const msg = err instanceof Error ? err.message : String(err);
           const stack = err instanceof Error && err.stack ? `\n\n${err.stack}` : "";
           return {
-            content: [{ type: "text" as const, text: `[pi-subagent] Unexpected error: ${msg}${stack}` }],
+            content: [{ type: "text" as const, text: err instanceof SubagentBudgetError ? msg : `[pi-subagent] Unexpected error: ${msg}${stack}` }],
             details: buildSubagentDetails("parallel", DEFAULT_DELEGATION_MODE, null, []),
             isError: true,
           };
@@ -2424,6 +2581,7 @@ ${agentList}\n\n${subagentsGuidance}\n\n${delegationGuardGuidance}${resumeGuidan
     fallbackModel: string | undefined,
     topLevelBaseId: number,
     subagentName?: string,
+    budget?: SubagentBudget,
   ) {
     if (previousResult && isFinishedResult(previousResult)) {
       return {
@@ -2446,6 +2604,7 @@ ${agentList}\n\n${subagentsGuidance}\n\n${delegationGuardGuidance}${resumeGuidan
         agentName,
         task,
         subagentName,
+        budget: budget ?? previousResult?.budget,
         parentDepth: currentDepth,
         parentAgentStack: ancestorAgentStack,
         maxDepth,
@@ -2512,7 +2671,7 @@ ${agentList}\n\n${subagentsGuidance}\n\n${delegationGuardGuidance}${resumeGuidan
     resumeExistingSessions: boolean,
     fallbackModel: string | undefined,
     topLevelBaseId: number,
-    extras?: { names?: Array<string | undefined>; rawPrompts?: boolean },
+    extras?: { names?: Array<string | undefined>; rawPrompts?: boolean; budgets?: Array<SubagentBudget | undefined> },
   ) {
     const taskIds = new Map<number, number>();
     try {

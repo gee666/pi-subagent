@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { parseBoolean, RESUME_PROVIDER } from "./shared.js";
+import { isBudgetAmount } from "./budget.js";
 import {
   isResultError,
   isSubagentDetails,
@@ -15,9 +16,26 @@ export const SUBAGENT_SESSION_ROOT_ENV = "PI_SUBAGENT_SESSION_ROOT";
 
 type SessionEntry = ReturnType<ExtensionContext["sessionManager"]["getEntries"]>[number];
 
+export interface ResumableTask {
+  agent: string;
+  task: string;
+  max_agents_allowed?: number;
+  /** Read-only compatibility for the previous inclusive argument name. */
+  max_agents_in_branch?: number;
+  /** Read-only compatibility for recorded calls with exclusive allowances. */
+  max_subagents_allowed?: number;
+}
+
+export function getTaskBranchSize(task: ResumableTask): number | undefined {
+  if (task.max_agents_allowed !== undefined) return task.max_agents_allowed;
+  if (task.max_agents_in_branch !== undefined) return task.max_agents_in_branch;
+  if (task.max_subagents_allowed === undefined) return undefined;
+  return isBudgetAmount(task.max_subagents_allowed) ? task.max_subagents_allowed + 1 : NaN;
+}
+
 export interface ResumableSubagentCall {
   previousToolCallId: string;
-  tasks: Array<{ agent: string; task: string }>;
+  tasks: ResumableTask[];
   details?: SubagentDetails;
 }
 
@@ -77,15 +95,16 @@ function getSubagentToolCalls(message: any): Array<{ id: string; args: any }> {
   return calls;
 }
 
-function normalizeTasks(args: any): Array<{ agent: string; task: string }> | null {
+function normalizeTasks(args: any): ResumableTask[] | null {
   const rawTasks = args?.tasks;
   if (!Array.isArray(rawTasks) || rawTasks.length === 0) return null;
-  const tasks: Array<{ agent: string; task: string }> = [];
+  const tasks: ResumableTask[] = [];
   for (const task of rawTasks) {
     if (typeof task?.agent !== "string" || typeof task?.task !== "string") return null;
     tasks.push({
       agent: task.agent,
       task: task.task,
+      ...(getTaskBranchSize(task) !== undefined ? { max_agents_allowed: getTaskBranchSize(task) } : {}),
     });
   }
   return tasks;
@@ -190,7 +209,7 @@ function hasOnlyIgnorableTrailingEntries(entries: SessionEntry[], activityOrder:
 
 export function findLatestResumableSubagentCalls(ctx: ExtensionContext): ResumableSubagentCall[] {
   const entries = branchEntries(ctx);
-  const calls = new Map<string, { tasks: Array<{ agent: string; task: string }>; order: number }>();
+  const calls = new Map<string, { tasks: ResumableTask[]; order: number }>();
   const results = new Map<string, { details?: SubagentDetails; isError: boolean; order: number }>();
 
   entries.forEach((entry: any, order) => {
@@ -256,13 +275,14 @@ export function findLatestResumableSubagentCall(ctx: ExtensionContext): Resumabl
 }
 
 export function sameTasks(
-  a: Array<{ agent: string; task: string }>,
-  b: Array<{ agent: string; task: string }>,
+  a: ResumableTask[],
+  b: ResumableTask[],
 ): boolean {
   if (a.length !== b.length) return false;
   return a.every((task, index) => {
     const other = b[index];
-    return task.agent === other.agent && task.task === other.task;
+    return task.agent === other.agent && task.task === other.task &&
+      (getTaskBranchSize(task) ?? 1) === (getTaskBranchSize(other) ?? 1);
   });
 }
 

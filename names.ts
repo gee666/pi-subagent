@@ -151,6 +151,8 @@ export interface SubagentNameRecord {
   agent: string;
   /** Initial task the subagent was spawned with. */
   task: string;
+  /** Original branch budget. Resumes and private forks share it. */
+  budget?: import("./budget.js").SubagentBudget;
   /** Model pinned by the agent config at spawn time, if any. */
   model?: string;
   /** Tool restriction from the agent config at spawn time, if any. */
@@ -355,6 +357,7 @@ export function getAvailableSubagentNames(registry: NamesRegistry): string[] {
 }
 
 export interface AllocateNameRequest {
+  budget?: import("./budget.js").SubagentBudget;
   agent: string;
   task: string;
   sessionDir: string;
@@ -388,6 +391,7 @@ export async function allocateSubagentNames(
         agent: request.agent,
         task: request.task,
         ...(request.model !== undefined ? { model: request.model } : {}),
+        ...(request.budget !== undefined ? { budget: request.budget } : {}),
         ...(request.tools !== undefined ? { tools: request.tools } : {}),
         ownerSessionId,
         sessionDir: request.sessionDir,

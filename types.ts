@@ -38,6 +38,8 @@ export interface UsageStats {
 /** Durable aggregate usage stored on a parent subagent tool result. */
 export interface SubagentUsageSummary {
 	subagentCount: number;
+	/** Stable identities allow resumes to add usage without adding agents. */
+	subagentIds?: string[];
 	inputTokens: number;
 	outputTokens: number;
 	cacheReadTokens: number;
@@ -66,6 +68,8 @@ export interface SingleResult {
 	task: string;
 	/** Unique resumable human name within the delegation tree (e.g. "John"). */
 	name?: string;
+	/** Durable branch allowance, shared by this agent's resumes and session forks. */
+	budget?: import("./budget.js").SubagentBudget;
 	/** Epoch ms when this subagent run started (used for TUI timestamps). */
 	startedAt?: number;
 	/** Most recent semantic activity in this agent's entire live run. */
@@ -263,7 +267,9 @@ export function compactSingleResultForDurableDetails(result: SingleResult): Sing
     toolCalls: result.toolCalls ?? {},
     completedTurns: result.completedTurns ?? 0,
     finalOutput: result.finalOutput ?? getFinalOutput(result.messages ?? []),
-    subtreeUsageSummary: result.subtreeUsageSummary ?? buildUsageSummary([result]),
+    subtreeUsageSummary: result.subtreeUsageSummary
+      ? withSubagentIdentities(result.subtreeUsageSummary, [result])
+      : buildUsageSummary([result]),
     ...(result.name !== undefined ? { name: result.name } : {}),
     ...(result.startedAt !== undefined ? { startedAt: result.startedAt } : {}),
     ...(result.lastActionAt !== undefined ? { lastActionAt: result.lastActionAt } : {}),
@@ -271,6 +277,7 @@ export function compactSingleResultForDurableDetails(result: SingleResult): Sing
     ...(result.errorMessage !== undefined ? { errorMessage: result.errorMessage } : {}),
     ...(result.model !== undefined ? { model: result.model } : {}),
     ...(result.sessionDir !== undefined ? { sessionDir: result.sessionDir } : {}),
+    ...(result.budget !== undefined ? { budget: result.budget } : {}),
     ...(result.sessionId !== undefined ? { sessionId: result.sessionId } : {}),
   };
   // Full transcripts and live process state stay non-enumerable so parent
@@ -302,7 +309,11 @@ export function emptyUsageSummary(): SubagentUsageSummary {
 }
 
 export function addUsageSummary(total: SubagentUsageSummary, delta: SubagentUsageSummary): void {
-  total.subagentCount += delta.subagentCount;
+  const known = new Set(total.subagentIds ?? []);
+  const incoming = new Set(delta.subagentIds ?? []);
+  const overlap = [...incoming].filter((id) => known.has(id)).length;
+  total.subagentCount += Math.max(0, delta.subagentCount - overlap);
+  if (incoming.size) total.subagentIds = [...new Set([...known, ...incoming])];
   total.inputTokens += delta.inputTokens;
   total.outputTokens += delta.outputTokens;
   total.cacheReadTokens += delta.cacheReadTokens;
@@ -311,9 +322,36 @@ export function addUsageSummary(total: SubagentUsageSummary, delta: SubagentUsag
   total.turns += delta.turns;
 }
 
-export function usageSummaryFromUsage(usage: UsageStats | undefined): SubagentUsageSummary {
+export function subagentIdentity(result: SingleResult): string | undefined {
+  if (result.name) return `name:${result.name.toLowerCase()}`;
+  if (result.budget?.directory) return `budget:${result.budget.directory}`;
+  if (result.sessionDir) return `session:${result.sessionDir}`;
+  if (result.sessionId) return `session-id:${result.sessionId}`;
+  return undefined;
+}
+
+/** Add recoverable identities to older summaries without changing their usage. */
+export function withSubagentIdentities(summary: SubagentUsageSummary, results: SingleResult[]): SubagentUsageSummary {
+  const ids = new Set(summary.subagentIds ?? []);
+  const visit = (result: SingleResult) => {
+    const id = subagentIdentity(result);
+    if (id) ids.add(id);
+    for (const saved of [result.subtreeUsageSummary, result.priorDescendantUsageSummary]) {
+      for (const id of saved?.subagentIds ?? []) ids.add(id);
+    }
+    for (const nested of getNestedSubagentResults(result.messages ?? [])) {
+      for (const id of nested.details.usageSummary?.subagentIds ?? []) ids.add(id);
+      nested.details.results.forEach(visit);
+    }
+  };
+  results.forEach(visit);
+  return ids.size ? { ...summary, subagentIds: [...ids], subagentCount: Math.max(summary.subagentCount, ids.size) } : summary;
+}
+
+export function usageSummaryFromUsage(usage: UsageStats | undefined, identity?: string): SubagentUsageSummary {
   return {
     subagentCount: 1,
+    ...(identity ? { subagentIds: [identity] } : {}),
     inputTokens: usage?.input ?? 0,
     outputTokens: usage?.output ?? 0,
     cacheReadTokens: usage?.cacheRead ?? 0,
@@ -330,15 +368,17 @@ export function buildUsageSummary(results: SingleResult[]): SubagentUsageSummary
     // nested transcripts. Reuse the persisted subtree total instead of
     // silently dropping descendant accounting during a crash-resume rebuild.
     if (result.subtreeUsageSummary) {
-      addUsageSummary(total, result.subtreeUsageSummary);
+      addUsageSummary(total, withSubagentIdentities(result.subtreeUsageSummary, [result]));
       continue;
     }
-    addUsageSummary(total, usageSummaryFromUsage(result.usage));
+    addUsageSummary(total, usageSummaryFromUsage(result.usage, subagentIdentity(result)));
     if (result.priorDescendantUsageSummary) {
       addUsageSummary(total, result.priorDescendantUsageSummary);
     }
     for (const nested of getNestedSubagentResults(result.messages ?? [])) {
-      addUsageSummary(total, nested.details.usageSummary ?? buildUsageSummary(nested.details.results));
+      addUsageSummary(total, nested.details.usageSummary
+        ? withSubagentIdentities(nested.details.usageSummary, nested.details.results)
+        : buildUsageSummary(nested.details.results));
     }
   }
   return total;
@@ -460,7 +500,11 @@ export function prepareResumeArguments(args: unknown): unknown {
     typeof record.subagent === "string" &&
     typeof record.task === "string"
   ) {
-    return { resumes: [{ subagent: record.subagent, task: record.task }] };
+    return { resumes: [{
+      subagent: record.subagent,
+      task: record.task,
+      ...(record.max_agents_allowed !== undefined ? { max_agents_allowed: record.max_agents_allowed } : {}),
+    }] };
   }
   if (record.resumes && typeof record.resumes === "object" && !Array.isArray(record.resumes)) {
     return { ...record, resumes: [record.resumes] };

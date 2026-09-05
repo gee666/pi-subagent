@@ -357,6 +357,18 @@ describe("resume argument compatibility", () => {
     );
   });
 
+  test("preserves optional budget overrides in the resume shorthand", () => {
+    assert.deepEqual(
+      prepareResumeArguments({ subagent: "writer-01", task: "continue", max_agents_allowed: 4 }),
+      { resumes: [{ subagent: "writer-01", task: "continue", max_agents_allowed: 4 }] },
+    );
+    assert.deepEqual(
+      prepareResumeArguments({ subagent: "writer-01", task: "continue", max_agents_allowed: 0 }),
+      { resumes: [{ subagent: "writer-01", task: "continue", max_agents_allowed: 0 }] },
+      "invalid overrides must reach validation, not silently disappear",
+    );
+  });
+
   test("normalizes an object-valued resumes field", () => {
     assert.deepEqual(
       prepareResumeArguments({ resumes: { subagent: "writer-01", task: "continue" } }),

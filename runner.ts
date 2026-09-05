@@ -25,9 +25,11 @@ import {
   isResultSuccess,
   isSubagentDetails,
   isSubagentToolName,
+  subagentIdentity,
 } from "./types.js";
 import { SUBAGENT_SESSION_ROOT_ENV } from "./resume.js";
 import { SUBAGENT_NAMES_FILE_ENV } from "./names.js";
+import { budgetPrompt, SUBAGENT_BUDGET_DIR_ENV, type SubagentBudget } from "./budget.js";
 import {
   DEFAULT_MAX_PARALLEL_TASKS,
   DEFAULT_MAX_CONCURRENCY,
@@ -69,6 +71,7 @@ function priorDescendantUsage(result: SingleResult | undefined): SubagentUsageSu
   const own = result.usage ?? emptyUsage();
   const descendants = {
     subagentCount: Math.max(0, subtree.subagentCount - 1),
+    ...(subtree.subagentIds ? { subagentIds: subtree.subagentIds.filter((id) => id !== subagentIdentity(result)) } : {}),
     inputTokens: Math.max(0, subtree.inputTokens - own.input),
     outputTokens: Math.max(0, subtree.outputTokens - own.output),
     cacheReadTokens: Math.max(0, subtree.cacheReadTokens - own.cacheRead),
@@ -656,6 +659,8 @@ export interface RunAgentOptions {
   task: string;
   /** Unique resumable human name assigned to this subagent (e.g. "John"). */
   subagentName?: string;
+  /** Reserved branch allowance. Reused on retries and resumes. */
+  budget?: SubagentBudget;
   /** When true, send the task text to the child verbatim (no "Task:" / resume preamble). */
   rawPrompt?: boolean;
   /** Current delegation depth of the caller process. */
@@ -760,6 +765,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
     agentSource: agent.source,
     task,
     name: opts.subagentName ?? initialResult?.name,
+    budget: opts.budget ?? initialResult?.budget,
     startedAt: initialResult?.startedAt ?? Date.now(),
     lastActionAt: initialResult?.lastActionAt ?? Date.now(),
     exitCode: -1,
@@ -814,7 +820,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
   }
 
   try {
-    const { args: piArgs, prompt } = buildPiArgs(
+    const { args: piArgs, prompt: taskPrompt } = buildPiArgs(
       agent,
       promptTmpPath,
       task,
@@ -823,6 +829,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       fallbackModel,
       opts.rawPrompt === true,
     );
+    const prompt = result.budget ? `${taskPrompt}\n\n${budgetPrompt(result.budget)}` : taskPrompt;
     let wasAborted = false;
     const startupRetries = (() => {
       const raw = process.env[SUBAGENT_STARTUP_RETRIES_ENV];
@@ -859,6 +866,8 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
           [SUBAGENT_PREVENT_CYCLES_ENV]: preventCycles ? "1" : "0",
           ...(sessionRoot ? { [SUBAGENT_SESSION_ROOT_ENV]: sessionRoot } : {}),
           ...(opts.namesFile ? { [SUBAGENT_NAMES_FILE_ENV]: opts.namesFile } : {}),
+          // Never let an unbudgeted child inherit its parent's spendable slots.
+          [SUBAGENT_BUDGET_DIR_ENV]: result.budget?.directory ?? "",
           ...(fallbackModel ? { [SUBAGENT_FALLBACK_MODEL_ENV]: fallbackModel } : {}),
           // All other provider/auth/proxy/temp/home variables are inherited.
           // PI_OFFLINE is NOT forced here — see explanation near PI_OFFLINE_ENV.
@@ -1342,6 +1351,7 @@ export async function executeParallelSubprocess(
     rawPrompts?: boolean;
     /** Shared name-registry file passed to children via spawn env. */
     namesFile?: string;
+    budgets?: Array<SubagentBudget | undefined>;
   },
 ): Promise<{
   content: Array<{ type: "text"; text: string }>;
@@ -1444,6 +1454,7 @@ export async function executeParallelSubprocess(
           subagentName: extras?.names?.[index],
           rawPrompt: extras?.rawPrompts === true,
           namesFile: extras?.namesFile,
+          budget: extras?.budgets?.[index] ?? previousResult?.budget,
           parentDepth,
           parentAgentStack,
           maxDepth,
