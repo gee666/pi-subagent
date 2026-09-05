@@ -80,9 +80,18 @@ describe("subagent budgets", () => {
   test("shows the main agent only remaining allowances below 30", () => {
     const dir = workspace();
     try {
-      for (const count of [0, 29, 30, 50, 1000]) {
+      for (const count of [0, 1, 2, 29, 30, 50, 1000]) {
         const budget = createBudget(path.join(dir, String(count)), count);
         const mainPrompt = budgetPrompt(budget, "main");
+        if (count <= 1) {
+          const expected = count === 0
+            ? "You cannot launch subagents."
+            : "You may launch one subagent and resume it as often as needed.";
+          assert.equal(mainPrompt, expected);
+          assert.equal(budgetPrompt(budget), expected);
+          continue;
+        }
+        assert.match(budgetPrompt(budget), /Set max_agents_allowed on each task/);
         const limitPattern = new RegExp(`launch at most ${count} more`);
         if (count < 30) assert.match(mainPrompt, limitPattern);
         else assert.doesNotMatch(mainPrompt, limitPattern);
@@ -131,7 +140,7 @@ describe("subagent budgets", () => {
       assert.deepEqual(reserveSubagentBudgets(restored, "first", [task(3)]), [child]);
       assert.equal(readBudget(root).remaining, 0);
       assert.equal(readBudget(child).remaining, 1);
-      assert.match(budgetPrompt(child), /You may launch at most 1 more subagent/);
+      assert.equal(budgetPrompt(child), "You may launch one subagent and resume it as often as needed.");
       createBudget(root.directory, 999);
       assert.equal(readBudget(root).limit, 3);
       assert.throws(() => reserveSubagentBudgets(root, "first", [task(1)]), /different budget/);

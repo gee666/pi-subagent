@@ -225,13 +225,16 @@ describe("current parent model inheritance", () => {
 });
 
 describe("subagent usage guidance", () => {
-  test("requires savings, a task-wide budget, and explicit nested allowances", () => {
+  test("allows review and savings, explains blocking, and requires explicit allowances", () => {
     const description = getSubagentsToolDescription();
+    assert.match(description, /for independent review/);
+    assert.match(description, /Calls block until all tasks finish; put parallel tasks in one array/);
     assert.match(description, /parallel work will save substantial time/);
     assert.match(description, /crowd out your context and force compaction/);
     assert.match(description, /Every new agent costs money/);
     assert.match(description, /Set max_agents_allowed on every task/);
     assert.match(description, /include the assigned agent and everyone below it/);
+    assert.match(description, /2 for a worker that launches its own reviewer/);
     assert.match(description, /Respect any tighter user limit/);
     assert.match(description, /exactly the number of slots reserved/);
     assert.doesNotMatch(description, /max_subagents_allowed|max_agents_in_branch|1 slot plus/);
@@ -249,6 +252,8 @@ describe("subagent usage guidance", () => {
     for (const name of ["code-writer", "code-architect", "code-reviwer"]) {
       const specialist = parseAgentFile(path.join(process.cwd(), "agents", `${name}.md`), "builtin");
       assert.ok(specialist);
+      assert.match(specialist.systemPrompt, /independent review/);
+      assert.doesNotMatch(specialist.systemPrompt, /only when independent review/);
       assert.match(specialist.systemPrompt, /outweighs startup and handoff costs/);
       assert.match(specialist.systemPrompt, /Launch new subagents/);
       assert.doesNotMatch(specialist.systemPrompt, /ask your caller/i);
@@ -264,7 +269,7 @@ describe("subagent usage guidance", () => {
     assert.doesNotMatch(lead.systemPrompt, /ask your caller|ask for it/i);
     assert.match(lead.systemPrompt, /not a fresh budget/);
     assert.match(lead.systemPrompt, /Another coordinator needs its own demonstrated context saving/);
-    assert.match(lead.systemPrompt, /Launch new workers only/);
+    assert.match(lead.systemPrompt, /Launch new workers for independent review/);
     assert.doesNotMatch(lead.systemPrompt, /substantial follow-up|Fix small integration issues yourself|repeated review rounds|Do small tasks/);
   });
 });

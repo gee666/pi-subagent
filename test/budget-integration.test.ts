@@ -170,7 +170,7 @@ describe("budget tool integration", () => {
       assert.equal(readBudget(a.budget).remaining, 2);
       assert.equal(readBudget(b.budget).remaining, 1);
       for (const record of calls(log)) {
-        assert.match(record.prompt, /You may launch at most [12] more subagents?/);
+        assert.match(record.prompt, /You may launch (?:at most 2 more subagents|one subagent and resume it as often as needed)/);
         assert.match(record.prompt, /exactly the number of slots reserved/);
         assert.ok([a.budget.directory, b.budget.directory].includes(record.budget));
       }
@@ -194,7 +194,8 @@ describe("budget tool integration", () => {
       const resumed = await root.call("resume_subagents", "resume", { resumes: [{ subagent: a.name, task: "continue" }] });
       assert.notEqual(resumed.isError, true, JSON.stringify(resumed.content));
       assert.deepEqual(resumed.details.results[0].budget, a.budget);
-      assert.match(calls(log).at(-1).prompt, /You may launch at most 0 more subagents/);
+      assert.match(calls(log).at(-1).prompt, /You cannot launch subagents\./);
+      assert.doesNotMatch(calls(log).at(-1).prompt, /Set max_agents_allowed on each task/);
       assert.equal(readBudget(rootBudget).remaining, 0);
 
       // A different owner gets a session fork, not a fresh descendant allowance.

@@ -155,8 +155,10 @@ function showRemainingBudget(remaining: number, audience: BudgetAudience): boole
 
 export function budgetPrompt(budget: SubagentBudget, audience: BudgetAudience = "subagent"): string {
   const { remaining } = readBudget(budget);
+  if (remaining === 0) return "You cannot launch subagents.";
+  if (remaining === 1) return "You may launch one subagent and resume it as often as needed.";
   const limit = showRemainingBudget(remaining, audience)
-    ? `You may launch at most ${remaining} more ${remaining === 1 ? "subagent" : "subagents"}, including all nested launches.`
+    ? `You may launch at most ${remaining} more subagents, including all nested launches.`
     : "The total subagent allowance is enforced automatically.";
   return `${limit} Set max_agents_allowed on each task to include the assigned subagent and everyone it may launch. The number you choose is exactly the number of slots reserved. Use 1 for a direct worker. Unused slots stay reserved for that worker's future resumes. Resuming an existing subagent uses no slot. Its allowance stays unchanged unless you explicitly override it; an override never resets slots already spent. If no slots remain, do not launch new subagents.`;
 }
