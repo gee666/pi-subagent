@@ -4,16 +4,20 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "strict": true,
-    "noImplicitAny": false,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "skipLibCheck": true,
     "types": ["node"],
     "noEmit": true
   },
   "include": [
     "*.ts",
-    "*.d.ts",
-    "test/**/*.ts",
-    "tests/**/*.ts"
+    "extension/**/*.ts",
+    "runner/**/*.ts",
+    "storage/**/*.ts",
+    "types/**/*.ts",
+    "ui/**/*.ts",
+    "test/**/*.ts"
   ],
   "exclude": ["node_modules"]
 }

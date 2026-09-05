@@ -19,10 +19,16 @@
     "overlay.ts",
     "tree.ts",
     "types.ts",
-    "shims.d.ts",
     "agents/*.md",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "extension/",
+    "runner/",
+    "storage/",
+    "types/",
+    "ui/",
+    "docs/",
+    "create-subagent/"
   ],
   "pi": {
     "extensions": [
@@ -48,31 +54,40 @@
   },
   "license": "MIT",
   "scripts": {
-    "test": "node --import tsx/esm --test tests/*.test.ts test/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "test": "node --import tsx/esm --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write \"*.ts\" \"{extension,runner,storage,types,ui,test}/**/*.ts\" \"scripts/*.mjs\" package.json tsconfig.json .prettierrc.json",
+    "format:check": "prettier --check \"*.ts\" \"{extension,runner,storage,types,ui,test}/**/*.ts\" \"scripts/*.mjs\" package.json tsconfig.json .prettierrc.json",
+    "check:size": "node scripts/check-size.mjs",
+    "check": "npm run typecheck && npm run format:check && npm run check:size && npm test"
   },
   "devDependencies": {
+    "@earendil-works/pi-agent-core": "^0.85.1",
+    "@earendil-works/pi-ai": "^0.85.1",
+    "@earendil-works/pi-coding-agent": "^0.85.1",
+    "@earendil-works/pi-tui": "^0.85.1",
     "@types/node": "^25.2.3",
-    "tsx": "^4.21.0",
+    "prettier": "^3.9.6",
+    "tsx": "^4.23.13",
     "typescript": "^5.9.3"
   },
   "peerDependencies": {
-    "@mariozechner/pi-agent-core": ">=0.81.0",
-    "@mariozechner/pi-ai": ">=0.81.0",
-    "@mariozechner/pi-coding-agent": ">=0.81.0",
-    "@mariozechner/pi-tui": ">=0.81.0"
+    "@earendil-works/pi-agent-core": ">=0.85.1",
+    "@earendil-works/pi-ai": ">=0.85.1",
+    "@earendil-works/pi-coding-agent": ">=0.85.1",
+    "@earendil-works/pi-tui": ">=0.85.1"
   },
   "peerDependenciesMeta": {
-    "@mariozechner/pi-agent-core": {
+    "@earendil-works/pi-agent-core": {
       "optional": true
     },
-    "@mariozechner/pi-coding-agent": {
+    "@earendil-works/pi-coding-agent": {
       "optional": true
     },
-    "@mariozechner/pi-tui": {
+    "@earendil-works/pi-tui": {
       "optional": true
     },
-    "@mariozechner/pi-ai": {
+    "@earendil-works/pi-ai": {
       "optional": true
     }
   },

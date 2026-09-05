@@ -1,37 +1,22 @@
 import { strict as assert } from "node:assert";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
-import { describe, it, beforeEach, afterEach } from "node:test";
-
+import { describe, it } from "node:test";
+import { namesFixture } from "./fixtures/names.js";
 import {
   allocateSubagentNames,
   buildForkSessionDir,
   clearResumeActive,
   commitFork,
-  findAncestorNamesFile,
-  findPersistedNamesIdentity,
-  forkSessionInto,
   getNamesFilePath,
   markResumeActive,
   readNamesRegistry,
   resolveResumeTarget,
   updateNameRecord,
-  SUBAGENT_NAMES_CUSTOM_TYPE,
 } from "../names.js";
 import { AGENT_NAMES } from "../agent-names.js";
 
-let tmpDir: string;
-let namesFile: string;
-
-beforeEach(() => {
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-names-test-"));
-  namesFile = path.join(tmpDir, "subagent-names.json");
-});
-
-afterEach(() => {
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-});
+const fixture = namesFixture();
 
 describe("agent name pool", () => {
   it("contains exactly 1000 case-insensitively unique given names", () => {
@@ -59,47 +44,45 @@ describe("getNamesFilePath", () => {
 
 describe("allocateSubagentNames", () => {
   it("allocates distinct human names independent of agent type", async () => {
-    const names = await allocateSubagentNames(namesFile, "owner-1", [
+    const names = await allocateSubagentNames(fixture.namesFile, "owner-1", [
       { agent: "code-writer", task: "a", sessionDir: "/s/0" },
       { agent: "code-writer", task: "b", sessionDir: "/s/1" },
       { agent: "code-reviewer", task: "c", sessionDir: "/s/2" },
     ]);
     assert.equal(new Set(names).size, 3);
-    assert.ok(names.every((name) => (AGENT_NAMES as readonly string[]).includes(name)));
+    assert.ok(names.every((name) => AGENT_NAMES.some((candidate) => candidate === name)));
   });
 
   it("persists allocations across separate calls (restart survival)", async () => {
-    const [first] = await allocateSubagentNames(namesFile, "owner-1", [
+    const [first] = await allocateSubagentNames(fixture.namesFile, "owner-1", [
       { agent: "code-writer", task: "a", sessionDir: "/s/0" },
     ]);
-    const second = await allocateSubagentNames(namesFile, "owner-2", [
+    const second = await allocateSubagentNames(fixture.namesFile, "owner-2", [
       { agent: "code-writer", task: "b", sessionDir: "/s/1" },
     ]);
     assert.notEqual(second[0], first);
 
-    const registry = readNamesRegistry(namesFile);
+    const registry = readNamesRegistry(fixture.namesFile);
     assert.equal(registry.agents[first].ownerSessionId, "owner-1");
     assert.equal(registry.agents[second[0]].ownerSessionId, "owner-2");
     assert.equal(registry.agents[first].sessionDir, "/s/0");
   });
 
   it("never reuses a name even if legacy counters were tampered with", async () => {
-    const [first] = await allocateSubagentNames(namesFile, "o", [
+    const [first] = await allocateSubagentNames(fixture.namesFile, "o", [
       { agent: "w", task: "a", sessionDir: "/s/0" },
     ]);
-    const registry = readNamesRegistry(namesFile);
+    const registry = readNamesRegistry(fixture.namesFile);
     registry.counters["w"] = 0; // simulate corruption
-    fs.writeFileSync(namesFile, JSON.stringify(registry));
-    const names = await allocateSubagentNames(namesFile, "o", [
-      { agent: "w", task: "b", sessionDir: "/s/1" },
-    ]);
+    fs.writeFileSync(fixture.namesFile, JSON.stringify(registry));
+    const names = await allocateSubagentNames(fixture.namesFile, "o", [{ agent: "w", task: "b", sessionDir: "/s/1" }]);
     assert.notEqual(names[0], first);
   });
 
   it("is safe under concurrent allocation", async () => {
     const batches = await Promise.all(
       Array.from({ length: 8 }, (_, i) =>
-        allocateSubagentNames(namesFile, `owner-${i}`, [
+        allocateSubagentNames(fixture.namesFile, `owner-${i}`, [
           { agent: "writer", task: `t${i}`, sessionDir: `/s/${i}` },
         ]),
       ),
@@ -111,264 +94,141 @@ describe("allocateSubagentNames", () => {
 
 describe("resolveResumeTarget", () => {
   it("returns an error for unknown names, listing known ones", async () => {
-    const [name] = await allocateSubagentNames(namesFile, "owner", [
+    const [name] = await allocateSubagentNames(fixture.namesFile, "owner", [
       { agent: "writer", task: "t", sessionDir: "/s/0" },
     ]);
-    const result = await resolveResumeTarget(namesFile, "nope-01", "owner");
+    const result = await resolveResumeTarget(fixture.namesFile, "nope-01", "owner");
     assert.ok("error" in result);
-    assert.match((result as any).error, /Unknown subagent name "nope-01"/);
-    assert.match((result as any).error, new RegExp(name));
+    assert.match(result.error, /Unknown subagent name "nope-01"/);
+    assert.match(result.error, new RegExp(name));
   });
 
   it("owner resumes continue the original session dir", async () => {
-    const [name] = await allocateSubagentNames(namesFile, "owner", [
+    const [name] = await allocateSubagentNames(fixture.namesFile, "owner", [
       { agent: "writer", task: "t", sessionDir: "/s/0" },
     ]);
-    const result = await resolveResumeTarget(namesFile, name, "owner");
+    const result = await resolveResumeTarget(fixture.namesFile, name, "owner");
     assert.ok(!("error" in result));
-    const target = result as Exclude<typeof result, { error: string }>;
+    assert.ok(!("error" in result));
+    const target = result;
     assert.equal(target.sessionDir, "/s/0");
     assert.equal(target.isFork, false);
     assert.equal(target.forkCreated, false);
   });
 
   it("non-owner resumes create exactly one fork and reuse it afterwards", async () => {
-    const [name] = await allocateSubagentNames(namesFile, "owner", [
+    const [name] = await allocateSubagentNames(fixture.namesFile, "owner", [
       { agent: "writer", task: "t", sessionDir: "/s/0" },
     ]);
 
-    const first = await resolveResumeTarget(namesFile, name, "child-A");
+    const first = await resolveResumeTarget(fixture.namesFile, name, "child-A");
     assert.ok(!("error" in first));
-    const firstTarget = first as Exclude<typeof first, { error: string }>;
+    assert.ok(!("error" in first));
+    const firstTarget = first;
     assert.equal(firstTarget.isFork, true);
     assert.equal(firstTarget.forkCreated, true);
-    assert.equal(firstTarget.sessionDir, buildForkSessionDir(namesFile, name, "child-A"));
-    await commitFork(namesFile, name, "child-A", firstTarget.sessionDir);
+    assert.equal(firstTarget.sessionDir, buildForkSessionDir(fixture.namesFile, name, "child-A"));
+    await commitFork(fixture.namesFile, name, "child-A", firstTarget.sessionDir);
 
     // Second resume by the same child: same fork, no new fork created.
-    const second = await resolveResumeTarget(namesFile, name, "child-A");
-    const secondTarget = second as Exclude<typeof second, { error: string }>;
+    const second = await resolveResumeTarget(fixture.namesFile, name, "child-A");
+    assert.ok(!("error" in second));
+    const secondTarget = second;
     assert.equal(secondTarget.forkCreated, false);
     assert.equal(secondTarget.sessionDir, firstTarget.sessionDir);
 
     // A different child gets its own independent fork.
-    const other = await resolveResumeTarget(namesFile, name, "child-B");
-    const otherTarget = other as Exclude<typeof other, { error: string }>;
+    const other = await resolveResumeTarget(fixture.namesFile, name, "child-B");
+    assert.ok(!("error" in other));
+    const otherTarget = other;
     assert.equal(otherTarget.forkCreated, true);
     assert.notEqual(otherTarget.sessionDir, firstTarget.sessionDir);
 
     // The owner still resumes the untouched original session.
-    const owner = await resolveResumeTarget(namesFile, name, "owner");
-    const ownerTarget = owner as Exclude<typeof owner, { error: string }>;
+    const owner = await resolveResumeTarget(fixture.namesFile, name, "owner");
+    assert.ok(!("error" in owner));
+    const ownerTarget = owner;
     assert.equal(ownerTarget.isFork, false);
     assert.equal(ownerTarget.sessionDir, "/s/0");
   });
 
   it("fork bookkeeping survives a registry reload (restart)", async () => {
-    const [name] = await allocateSubagentNames(namesFile, "owner", [
+    const [name] = await allocateSubagentNames(fixture.namesFile, "owner", [
       { agent: "writer", task: "t", sessionDir: "/s/0" },
     ]);
-    const resolved = await resolveResumeTarget(namesFile, name, "child-A");
-    const target = resolved as Exclude<typeof resolved, { error: string }>;
-    await commitFork(namesFile, name, "child-A", target.sessionDir);
-    const registry = readNamesRegistry(namesFile);
+    const resolved = await resolveResumeTarget(fixture.namesFile, name, "child-A");
+    assert.ok(!("error" in resolved));
+    const target = resolved;
+    await commitFork(fixture.namesFile, name, "child-A", target.sessionDir);
+    const registry = readNamesRegistry(fixture.namesFile);
     assert.ok(registry.agents[name].forks["child-A"]);
     assert.equal(
       registry.agents[name].forks["child-A"].sessionDir,
-      buildForkSessionDir(namesFile, name, "child-A"),
+      buildForkSessionDir(fixture.namesFile, name, "child-A"),
     );
   });
 });
 
 describe("updateNameRecord", () => {
   it("patches sessionDir and lastResumePrompt", async () => {
-    const [name] = await allocateSubagentNames(namesFile, "owner", [
+    const [name] = await allocateSubagentNames(fixture.namesFile, "owner", [
       { agent: "writer", task: "t", sessionDir: "/s/0" },
     ]);
-    await updateNameRecord(namesFile, name, { sessionDir: "/s/new", lastResumePrompt: "go on" });
-    const registry = readNamesRegistry(namesFile);
+    await updateNameRecord(fixture.namesFile, name, { sessionDir: "/s/new", lastResumePrompt: "go on" });
+    const registry = readNamesRegistry(fixture.namesFile);
     assert.equal(registry.agents[name].sessionDir, "/s/new");
     assert.equal(registry.agents[name].lastResumePrompt, "go on");
   });
 
   it("ignores unknown names without throwing", async () => {
-    await updateNameRecord(namesFile, "ghost-01", { sessionDir: "/x" });
-    const registry = readNamesRegistry(namesFile);
+    await updateNameRecord(fixture.namesFile, "ghost-01", { sessionDir: "/x" });
+    const registry = readNamesRegistry(fixture.namesFile);
     assert.deepEqual(registry.agents, {});
-  });
-});
-
-describe("forkSessionInto", () => {
-  it("copies the newest session file and rewrites the session header id", async () => {
-    const sourceDir = path.join(tmpDir, "source");
-    fs.mkdirSync(sourceDir, { recursive: true });
-    const header = { type: "session", id: "orig-id", timestamp: 1 };
-    const message = { type: "message", message: { role: "user", content: "hi" } };
-    fs.writeFileSync(
-      path.join(sourceDir, "session-a.jsonl"),
-      `${JSON.stringify(header)}\n${JSON.stringify(message)}\n`,
-    );
-
-    const forkDir = path.join(tmpDir, "fork");
-    assert.equal(forkSessionInto(sourceDir, forkDir), true);
-
-    const copied = fs.readFileSync(path.join(forkDir, "session-a.jsonl"), "utf8").split("\n");
-    const copiedHeader = JSON.parse(copied[0]);
-    assert.notEqual(copiedHeader.id, "orig-id");
-    assert.match(copiedHeader.id, /^orig-id-fork-/);
-    assert.deepEqual(JSON.parse(copied[1]), message);
-  });
-
-  it("rewrites persisted names-identity entries so the fork gets its own ownerId", () => {
-    const sourceDir = path.join(tmpDir, "source-id");
-    fs.mkdirSync(sourceDir, { recursive: true });
-    const header = { type: "session", id: "child-id", timestamp: 1 };
-    const identity = {
-      type: "custom",
-      customType: SUBAGENT_NAMES_CUSTOM_TYPE,
-      data: { namesFile: "/tree/names.json", ownerId: "child-owner" },
-    };
-    fs.writeFileSync(
-      path.join(sourceDir, "session-b.jsonl"),
-      `${JSON.stringify(header)}\n${JSON.stringify(identity)}\n`,
-    );
-
-    const forkDir = path.join(tmpDir, "fork-id");
-    assert.equal(forkSessionInto(sourceDir, forkDir), true);
-    const copied = fs.readFileSync(path.join(forkDir, "session-b.jsonl"), "utf8").split("\n");
-    const copiedIdentity = JSON.parse(copied[1]);
-    assert.equal(copiedIdentity.data.namesFile, "/tree/names.json"); // same tree registry
-    assert.notEqual(copiedIdentity.data.ownerId, "child-owner"); // fresh fork identity
-    assert.match(copiedIdentity.data.ownerId, /^child-owner-fork-/);
-  });
-
-  it("returns false when the source has no session files", () => {
-    const emptyDir = path.join(tmpDir, "empty");
-    fs.mkdirSync(emptyDir, { recursive: true });
-    assert.equal(forkSessionInto(emptyDir, path.join(tmpDir, "fork2")), false);
   });
 });
 
 describe("readNamesRegistry", () => {
   it("returns an empty registry for missing files", () => {
-    assert.deepEqual(readNamesRegistry(path.join(tmpDir, "missing.json")).agents, {});
+    assert.deepEqual(readNamesRegistry(path.join(fixture.tmpDir, "missing.json")).agents, {});
   });
 
   it("backs up corrupt registries before starting fresh", () => {
-    const corrupt = path.join(tmpDir, "corrupt.json");
+    const corrupt = path.join(fixture.tmpDir, "corrupt.json");
     fs.writeFileSync(corrupt, "{not json");
     assert.deepEqual(readNamesRegistry(corrupt).agents, {});
-    const backups = fs.readdirSync(tmpDir).filter((f) => f.startsWith("corrupt.json.corrupt-"));
+    const backups = fs.readdirSync(fixture.tmpDir).filter((f) => f.startsWith("corrupt.json.corrupt-"));
     assert.equal(backups.length, 1);
-  });
-});
-
-describe("findPersistedNamesIdentity", () => {
-  it("returns the latest valid identity entry", () => {
-    const entries = [
-      { type: "message", message: {} },
-      { type: "custom", customType: SUBAGENT_NAMES_CUSTOM_TYPE, data: { namesFile: "/a.json", ownerId: "one" } },
-      { type: "custom", customType: "other-extension", data: { namesFile: "/x.json", ownerId: "x" } },
-      { type: "custom", customType: SUBAGENT_NAMES_CUSTOM_TYPE, data: { namesFile: "/b.json", ownerId: "two" } },
-    ];
-    assert.deepEqual(findPersistedNamesIdentity(entries), { namesFile: "/b.json", ownerId: "two" });
-  });
-
-  it("prefers the latest entry whose registry actually has named agents", async () => {
-    // Simulates a session damaged by a buggy run: a later identity entry
-    // points at an empty registry while an earlier one has the real names.
-    const goodFile = path.join(tmpDir, "good", "subagent-names.json");
-    fs.mkdirSync(path.dirname(goodFile), { recursive: true });
-    await allocateSubagentNames(goodFile, "owner", [
-      { agent: "writer", task: "t", sessionDir: "/s/0" },
-    ]);
-    const emptyFile = path.join(tmpDir, "empty", "subagent-names.json");
-    fs.mkdirSync(path.dirname(emptyFile), { recursive: true });
-    fs.writeFileSync(emptyFile, JSON.stringify({ version: 1, counters: {}, agents: {} }));
-
-    const entries = [
-      { type: "custom", customType: SUBAGENT_NAMES_CUSTOM_TYPE, data: { namesFile: goodFile, ownerId: "good" } },
-      { type: "custom", customType: SUBAGENT_NAMES_CUSTOM_TYPE, data: { namesFile: emptyFile, ownerId: "bad" } },
-    ];
-    assert.deepEqual(findPersistedNamesIdentity(entries), { namesFile: goodFile, ownerId: "good" });
-  });
-
-  it("ignores malformed entries and non-arrays", () => {
-    assert.equal(findPersistedNamesIdentity(undefined), undefined);
-    assert.equal(
-      findPersistedNamesIdentity([{ type: "custom", customType: SUBAGENT_NAMES_CUSTOM_TYPE, data: { ownerId: 5 } }]),
-      undefined,
-    );
-  });
-});
-
-describe("findAncestorNamesFile", () => {
-  it("finds the registry of an ancestor session via the parentSession chain", () => {
-    // Simulate: original session "root-id" created a registry; the session was
-    // then resumed/branched twice, producing new ids without registries.
-    const sessionRoot = path.join(tmpDir, "subagents");
-    const rootRegistry = path.join(sessionRoot, "root-id", "subagent-names.json");
-    fs.mkdirSync(path.dirname(rootRegistry), { recursive: true });
-    fs.writeFileSync(rootRegistry, JSON.stringify({ version: 1, counters: {}, agents: {} }));
-
-    const sessionsDir = path.join(tmpDir, "sessions");
-    fs.mkdirSync(sessionsDir, { recursive: true });
-    const rootFile = path.join(sessionsDir, "root.jsonl");
-    fs.writeFileSync(rootFile, `${JSON.stringify({ type: "session", id: "root-id" })}\n`);
-    const midFile = path.join(sessionsDir, "mid.jsonl");
-    fs.writeFileSync(midFile, `${JSON.stringify({ type: "session", id: "mid-id", parentSession: rootFile })}\n`);
-
-    const found = findAncestorNamesFile(sessionRoot, "leaf-id", {
-      type: "session",
-      id: "leaf-id",
-      parentSession: midFile,
-    });
-    assert.deepEqual(found, { namesFile: rootRegistry, ownerId: "root-id" });
-  });
-
-  it("returns the current session's registry when it exists", () => {
-    const sessionRoot = path.join(tmpDir, "subagents2");
-    const ownRegistry = path.join(sessionRoot, "self-id", "subagent-names.json");
-    fs.mkdirSync(path.dirname(ownRegistry), { recursive: true });
-    fs.writeFileSync(ownRegistry, "{}");
-    const found = findAncestorNamesFile(sessionRoot, "self-id", { type: "session", id: "self-id" });
-    assert.deepEqual(found, { namesFile: ownRegistry, ownerId: "self-id" });
-  });
-
-  it("returns undefined when no ancestor has a registry", () => {
-    const found = findAncestorNamesFile(path.join(tmpDir, "none"), "x", { type: "session", id: "x" });
-    assert.equal(found, undefined);
   });
 });
 
 describe("resume markers", () => {
   it("blocks a second resume of the same target by another live process", async () => {
-    const [name] = await allocateSubagentNames(namesFile, "owner", [
+    const [name] = await allocateSubagentNames(fixture.namesFile, "owner", [
       { agent: "writer", task: "t", sessionDir: "/s/0" },
     ]);
-    const first = await markResumeActive(namesFile, name, "owner");
+    const first = await markResumeActive(fixture.namesFile, name, "owner");
     assert.ok("ok" in first);
 
     // Simulate a different, live process holding the marker.
-    const registry = readNamesRegistry(namesFile);
+    const registry = readNamesRegistry(fixture.namesFile);
     registry.agents[name].activeResumes = { owner: { pid: process.pid + 1_000_000, at: Date.now() } };
-    fs.writeFileSync(namesFile, JSON.stringify(registry));
+    fs.writeFileSync(fixture.namesFile, JSON.stringify(registry));
     // pid + 1,000,000 is (almost certainly) dead, so the stale marker is overwritten.
-    const second = await markResumeActive(namesFile, name, "owner");
+    const second = await markResumeActive(fixture.namesFile, name, "owner");
     assert.ok("ok" in second);
 
-    await clearResumeActive(namesFile, name, "owner");
-    const after = readNamesRegistry(namesFile);
+    await clearResumeActive(fixture.namesFile, name, "owner");
+    const after = readNamesRegistry(fixture.namesFile);
     assert.equal(after.agents[name].activeResumes, undefined);
   });
 
   it("same-pid markers are treated as stale leftovers", async () => {
-    const [name] = await allocateSubagentNames(namesFile, "owner", [
+    const [name] = await allocateSubagentNames(fixture.namesFile, "owner", [
       { agent: "writer", task: "t", sessionDir: "/s/0" },
     ]);
-    await markResumeActive(namesFile, name, "owner");
+    await markResumeActive(fixture.namesFile, name, "owner");
     // Same process marking again succeeds (in-memory guard handles real races).
-    const again = await markResumeActive(namesFile, name, "owner");
+    const again = await markResumeActive(fixture.namesFile, name, "owner");
     assert.ok("ok" in again);
   });
 });

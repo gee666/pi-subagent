@@ -10,144 +10,42 @@
  */
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { createFauxCore, fauxAssistantMessage } from "@mariozechner/pi-ai";
-import subagentExtension from "../index.js";
-import {
-  buildSubagentDetails,
-  emptyUsage,
-  SUBAGENT_TOOL_NAME,
-  type SingleResult,
-} from "../types.js";
+import { createFauxCore, fauxAssistantMessage } from "@earendil-works/pi-ai";
+import type {
+  Api,
+  AssistantMessageEvent,
+  AssistantMessageEventStream,
+  Context,
+  Model,
+  Provider,
+  SimpleStreamOptions,
+} from "@earendil-works/pi-ai";
+import { SUBAGENT_TOOL_NAME } from "../types.js";
 import { RESUME_MODEL_ID, RESUME_PROVIDER } from "../shared.js";
+import {
+  createExtensionHarness,
+  hostDouble,
+  model,
+  resumeBranch as unfinishedBranch,
+  resumeTasks as tasks,
+} from "./helpers/extension.js";
 
-const tasks = [
-  { agent: "worker", task: "do work" },
-  { agent: "reviewer", task: "review work" },
-];
-
-function makeResult(overrides: Partial<SingleResult> = {}): SingleResult {
-  return {
-    agent: "worker",
-    agentSource: "user",
-    task: "do work",
-    exitCode: 130,
-    messages: [],
-    stderr: "aborted",
-    usage: emptyUsage(),
-    toolCalls: {},
-    completedTurns: 0,
-    turnInProgress: false,
-    liveLog: [],
-    stopReason: "aborted",
-    errorMessage: "Subagent was aborted.",
-    ...overrides,
-  };
+function setup() {
+  const harness = createExtensionHarness();
+  return { ...harness, config: harness.provider(RESUME_PROVIDER) };
 }
 
-function messageEntry(message: any, id: string): any {
-  return { type: "message", id, parentId: null, timestamp: new Date().toISOString(), message };
-}
-
-function unfinishedBranch(): any[] {
-  return [
-    messageEntry(
-      {
-        role: "assistant",
-        content: [{ type: "toolCall", id: "call-1", name: "subagent", arguments: { tasks } }],
-        stopReason: "toolUse",
-        timestamp: Date.now(),
-      },
-      "assistant-call-1",
-    ),
-    messageEntry(
-      {
-        role: "toolResult",
-        toolName: "subagent",
-        toolCallId: "call-1",
-        content: [{ type: "text", text: "aborted" }],
-        details: buildSubagentDetails("parallel", "spawn", null, [
-          makeResult(),
-          makeResult({ agent: "reviewer", task: "review work" }),
-        ]),
-        isError: true,
-        timestamp: Date.now(),
-      },
-      "result-call-1",
-    ),
-  ];
-}
-
-interface Captured {
-  config: any;
-  emit: (event: string, evt: any, ctx: any) => Promise<void>;
-  makeCtx: (entries: any[]) => any;
-}
-
-function setup(): Captured {
-  const handlers = new Map<string, Function[]>();
-  let config: any;
-  const pi: any = {
-    registerFlag() {},
-    registerProvider(providerOrName: any, cfg?: any) {
-      config = cfg ?? providerOrName;
-    },
-    registerTool() {},
-    registerCommand() {},
-    getFlag: () => undefined,
-    getActiveTools: () => ["subagent"],
-    setActiveTools() {},
-    async setModel() {
-      return true;
-    },
-    sendUserMessage() {},
-    on(event: string, handler: Function) {
-      const list = handlers.get(event) ?? [];
-      list.push(handler);
-      handlers.set(event, list);
-    },
-  };
-
-  subagentExtension(pi);
-
-  const makeCtx = (entries: any[]): any => ({
-    cwd: process.cwd(),
-    hasUI: true,
-    isIdle: () => true,
-    model: { provider: "anthropic", id: "claude-sonnet-4-6", api: "anthropic-messages" },
-    modelRegistry: {
-      find: (provider: string, id: string) => ({ provider, id, api: "openai-responses" }),
-      getApiKeyAndHeaders: async () => ({ ok: true }),
-    },
-    sessionManager: {
-      getLeafId: () => entries.at(-1)?.id ?? null,
-      getBranch: () => entries,
-      getEntries: () => entries,
-      getSessionId: () => "session-1",
-      getSessionDir: () => process.cwd(),
-    },
-    ui: { notify() {}, confirm: async () => true, select: async () => undefined, input: async () => undefined, setStatus() {} },
-  });
-
-  return {
-    config,
-    makeCtx,
-    emit: async (event, evt, ctx) => {
-      for (const handler of handlers.get(event) ?? []) await handler(evt, ctx);
-    },
-  };
-}
-
-async function drain(stream: any): Promise<any[]> {
-  const events: any[] = [];
+async function drain(stream: AssistantMessageEventStream): Promise<AssistantMessageEvent[]> {
+  const events: AssistantMessageEvent[] = [];
   for await (const event of stream) events.push(event);
   return events;
 }
 
-function userPrompt(text: string) {
-  return { messages: [{ role: "user", content: [{ type: "text", text }] }] };
+function userPrompt(text: string): Context {
+  return { messages: [{ role: "user", content: [{ type: "text", text }], timestamp: Date.now() }] };
 }
 
-const resumeModel = { provider: RESUME_PROVIDER, id: RESUME_MODEL_ID, api: "openai-responses" };
+const resumeModel = model(RESUME_PROVIDER, RESUME_MODEL_ID, "openai-responses");
 
 describe("synthetic resume provider streamSimple", () => {
   test("registers a complete public Provider with the resume model", () => {
@@ -156,7 +54,7 @@ describe("synthetic resume provider streamSimple", () => {
     assert.equal(typeof h.config?.stream, "function");
     assert.equal(typeof h.config?.streamSimple, "function");
     assert.ok(
-      h.config.getModels().some((m: any) => m.id === RESUME_MODEL_ID),
+      h.config.getModels().some((m) => m.id === RESUME_MODEL_ID),
       "expected the synthetic resume model to be registered",
     );
   });
@@ -190,19 +88,13 @@ describe("synthetic resume provider streamSimple", () => {
     // No latestSessionCtx / plans, and the prompt does not match a resume
     // trigger, so the provider has nothing to inject and no model to forward to.
     const stream = h.config.streamSimple(resumeModel, userPrompt("hello there"), {});
-    assert.equal(typeof stream?.then, "undefined", "Provider.streamSimple must return a stream, not a Promise");
+    assert.equal("then" in stream, false, "Provider.streamSimple must return a stream, not a Promise");
     const events = await drain(stream);
 
     const error = events.find((e) => e.type === "error");
     assert.ok(error, "expected an error event");
-    assert.match(
-      String(error.error?.errorMessage ?? ""),
-      /Subagent resume failed/,
-    );
-    assert.ok(
-      !events.some((e) => e.type === "toolcall_end"),
-      "no tool call should be injected without a plan",
-    );
+    assert.match(String(error.error?.errorMessage ?? ""), /Subagent resume failed/);
+    assert.ok(!events.some((e) => e.type === "toolcall_end"), "no tool call should be injected without a plan");
   });
 
   test("session replacement cannot leak armed resume plans into a new extension instance", async () => {
@@ -222,14 +114,12 @@ describe("synthetic resume provider streamSimple", () => {
     const h = setup();
     const ctx = h.makeCtx(unfinishedBranch());
     const fallbackModel = {
-      provider: "custom-provider",
-      id: "custom-model",
-      api: "my-custom-api",
+      ...model("custom-provider", "custom-model", "my-custom-api"),
       baseUrl: "https://static.invalid",
     };
     ctx.model = fallbackModel;
 
-    let received: any;
+    let received: { model: Model<Api>; context: Context; options?: SimpleStreamOptions } | undefined;
     const fallbackCore = createFauxCore({
       api: "my-custom-api",
       provider: "custom-provider",
@@ -238,13 +128,14 @@ describe("synthetic resume provider streamSimple", () => {
     fallbackCore.setResponses([() => fauxAssistantMessage("fallback ok")]);
     ctx.modelRegistry.find = (provider: string, id: string) =>
       provider === RESUME_PROVIDER ? resumeModel : { ...fallbackModel, provider, id };
-    ctx.modelRegistry.getProvider = () => ({
-      id: "custom-provider",
-      streamSimple(model: any, context: any, options: any) {
-        received = { model, context, options };
-        return fallbackCore.streamSimple(model, context, options);
-      },
-    });
+    ctx.modelRegistry.getProvider = () =>
+      hostDouble<Provider>({
+        id: "custom-provider",
+        streamSimple(model, context, options) {
+          received = { model, context, options };
+          return fallbackCore.streamSimple(model, context, options);
+        },
+      });
     ctx.modelRegistry.getProviderAuth = async () => ({
       auth: { baseUrl: "https://dynamic.example" },
       env: { REGION: "test" },
@@ -258,12 +149,15 @@ describe("synthetic resume provider streamSimple", () => {
 
     await h.emit("session_start", { reason: "resume" }, ctx);
     await drain(h.config.streamSimple(resumeModel, userPrompt("Resuming 2 subagents..."), {}));
-    const events = await drain(h.config.streamSimple(resumeModel, userPrompt("continue"), {
-      apiKey: "pi-subagent-resume-noop-key",
-      headers: { "x-real": "override", authorization: null, "x-hook": "kept" },
-    }));
+    const events = await drain(
+      h.config.streamSimple(resumeModel, userPrompt("continue"), {
+        apiKey: "pi-subagent-resume-noop-key",
+        headers: { "x-real": "override", authorization: null, "x-hook": "kept" },
+      }),
+    );
 
     assert.ok(events.some((event) => event.type === "text_delta"));
+    assert.ok(received?.options);
     assert.equal(received.model.api, "my-custom-api");
     assert.equal(received.model.baseUrl, "https://dynamic.example");
     assert.equal(received.options.apiKey, "real-key");

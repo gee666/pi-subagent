@@ -18,12 +18,15 @@ describe("pi-subagents config", () => {
       const nested = path.join(root, "packages", "app");
       fs.mkdirSync(path.dirname(configPath), { recursive: true });
       fs.mkdirSync(nested, { recursive: true });
-      fs.writeFileSync(configPath, JSON.stringify({
-        "tool-prompts": {
-          subagents: "project subagents prompt",
-          resume_subagents: "project resume prompt",
-        },
-      }));
+      fs.writeFileSync(
+        configPath,
+        JSON.stringify({
+          "tool-prompts": {
+            subagents: "project subagents prompt",
+            resume_subagents: "project resume prompt",
+          },
+        }),
+      );
 
       assert.equal(findProjectConfig(nested), configPath);
       const prompts = loadPiSubagentsConfig(nested, true).toolPrompts;
@@ -40,9 +43,12 @@ describe("pi-subagents config", () => {
     try {
       const configPath = path.join(root, ".pi", "pi-subagents.json");
       fs.mkdirSync(path.dirname(configPath), { recursive: true });
-      fs.writeFileSync(configPath, JSON.stringify({
-        "tool-prompts": { [uniqueTool]: "must not load" },
-      }));
+      fs.writeFileSync(
+        configPath,
+        JSON.stringify({
+          "tool-prompts": { [uniqueTool]: "must not load" },
+        }),
+      );
 
       assert.equal(loadPiSubagentsConfig(root, false).toolPrompts[uniqueTool], undefined);
     } finally {
@@ -71,7 +77,10 @@ describe("built-in agent discovery", () => {
       process.env[SUBAGENT_HIDE_BUILTIN_AGENTS_ENV] = "true";
       const hidden = discoverAgents(root, "both").agents;
       assert.ok(hidden.some((agent) => agent.name === "custom-agent"));
-      assert.equal(hidden.some((agent) => agent.source === "builtin"), false);
+      assert.equal(
+        hidden.some((agent) => agent.source === "builtin"),
+        false,
+      );
     } finally {
       if (previous === undefined) delete process.env[SUBAGENT_HIDE_BUILTIN_AGENTS_ENV];
       else process.env[SUBAGENT_HIDE_BUILTIN_AGENTS_ENV] = previous;
@@ -91,9 +100,7 @@ describe("built-in agent discovery", () => {
         "---\nname: code-writer\ndescription: project writer\n---\nProject prompt.\n",
       );
 
-      const matches = discoverAgents(root, "both").agents.filter(
-        (agent) => agent.name === "code-writer",
-      );
+      const matches = discoverAgents(root, "both").agents.filter((agent) => agent.name === "code-writer");
       assert.equal(matches.length, 1);
       assert.equal(matches[0].source, "project");
       assert.equal(matches[0].description, "project writer");

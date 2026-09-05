@@ -1,20 +1,17 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
-import {
-  filterAdvertisedAgents,
-  isAgentEnabledAtLayer,
-  parseAgentFile,
-  type AgentConfig,
-} from "../agents.js";
-import {
-  getSubagentsToolDescription,
-  selectParentModelForSubagent,
-} from "../index.js";
+import { filterAdvertisedAgents, isAgentEnabledAtLayer, parseAgentFile, type AgentConfig } from "../agents.js";
+import { getSubagentsToolDescription, selectParentModelForSubagent } from "../index.js";
 import { resolveSubagentModel } from "../runner.js";
 import { RESUME_PROVIDER } from "../shared.js";
+
+function workspace(prefix: string): string {
+  const root = path.join(process.cwd(), "tmp");
+  fs.mkdirSync(root, { recursive: true });
+  return fs.mkdtempSync(path.join(root, prefix));
+}
 
 function agent(overrides: Partial<AgentConfig> = {}): AgentConfig {
   return {
@@ -29,18 +26,21 @@ function agent(overrides: Partial<AgentConfig> = {}): AgentConfig {
 
 describe("agent layer settings", () => {
   test("parses enabled/disabled and defaults absent settings to enabled", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-layer-test-"));
+    const dir = workspace("pi-subagent-layer-test-");
     try {
       const configuredPath = path.join(dir, "configured.md");
-      fs.writeFileSync(configuredPath, [
-        "---",
-        "name: configured",
-        "description: configured agent",
-        "first-layer: disabled",
-        "last-layer: enabled",
-        "---",
-        "prompt",
-      ].join("\n"));
+      fs.writeFileSync(
+        configuredPath,
+        [
+          "---",
+          "name: configured",
+          "description: configured agent",
+          "first-layer: disabled",
+          "last-layer: enabled",
+          "---",
+          "prompt",
+        ].join("\n"),
+      );
       const configured = parseAgentFile(configuredPath, "user");
       assert.equal(configured?.firstLayer, false);
       assert.equal(configured?.lastLayer, true);
@@ -57,26 +57,33 @@ describe("agent layer settings", () => {
 
   test("bundled team-lead is available only to the main agent", () => {
     const teamLead = parseAgentFile(path.join(process.cwd(), "agents", "team-lead.md"), "builtin");
-    assert.equal(teamLead?.firstLayer, "only");
-    assert.equal(isAgentEnabledAtLayer(teamLead!, 1, 3), true);
-    assert.equal(isAgentEnabledAtLayer(teamLead!, 2, 3), false);
-    assert.equal(isAgentEnabledAtLayer(teamLead!, 3, 3), false);
-    assert.equal(isAgentEnabledAtLayer(teamLead!, 1, 1), true);
-    assert.deepEqual(filterAdvertisedAgents([teamLead!], 2, 3, [], false), []);
+    assert.ok(teamLead);
+    assert.equal(teamLead.firstLayer, "only");
+    assert.equal(isAgentEnabledAtLayer(teamLead, 1, 3), true);
+    assert.equal(isAgentEnabledAtLayer(teamLead, 2, 3), false);
+    assert.equal(isAgentEnabledAtLayer(teamLead, 3, 3), false);
+    assert.equal(isAgentEnabledAtLayer(teamLead, 1, 1), true);
+    assert.deepEqual(filterAdvertisedAgents([teamLead], 2, 3, [], false), []);
   });
 
   test("parses second-layer and signed nth-layer selectors", () => {
-    const root = path.join(process.cwd(), "tmp");
-    fs.mkdirSync(root, { recursive: true });
-    const dir = fs.mkdtempSync(path.join(root, "layer-selectors-"));
+    const dir = workspace("layer-selectors-");
     try {
       const file = path.join(dir, "agent.md");
-      fs.writeFileSync(file, [
-        "---", "name: selected", "description: selected layers",
-        "second-layer: disabled", "nth-layer(1,2,5, -1, -1, -5): only",
-        "---", "prompt",
-      ].join("\n"));
-      const parsed = parseAgentFile(file, "user")!;
+      fs.writeFileSync(
+        file,
+        [
+          "---",
+          "name: selected",
+          "description: selected layers",
+          "second-layer: disabled",
+          "nth-layer(1,2,5, -1, -1, -5): only",
+          "---",
+          "prompt",
+        ].join("\n"),
+      );
+      const parsed = parseAgentFile(file, "user");
+      assert.ok(parsed);
       assert.equal(parsed.secondLayer, false);
       assert.deepEqual(parsed.layerRules, [{ layers: [1, 2, 5, -1, -5], setting: "only" }]);
       assert.deepEqual(
@@ -90,13 +97,22 @@ describe("agent layer settings", () => {
 
   test("combines only rules and lets disabled win regardless of rule order", () => {
     const selected = agent({ firstLayer: "only", lastLayer: "only", secondLayer: true });
-    assert.deepEqual([1, 2, 3, 4].map((depth) => isAgentEnabledAtLayer(selected, depth, 4)), [true, false, false, true]);
+    assert.deepEqual(
+      [1, 2, 3, 4].map((depth) => isAgentEnabledAtLayer(selected, depth, 4)),
+      [true, false, false, true],
+    );
     assert.equal(isAgentEnabledAtLayer(agent({ secondLayer: "only" }), 2, 3), true);
     assert.equal(isAgentEnabledAtLayer(agent({ secondLayer: "only" }), 1, 3), false);
     assert.equal(isAgentEnabledAtLayer(agent({ firstLayer: "only", lastLayer: false }), 1, 1), false);
     for (const layerRules of [
-      [{ layers: [2], setting: "only" as const }, { layers: [-2], setting: false }],
-      [{ layers: [-2], setting: false }, { layers: [2], setting: "only" as const }],
+      [
+        { layers: [2], setting: "only" as const },
+        { layers: [-2], setting: false },
+      ],
+      [
+        { layers: [-2], setting: false },
+        { layers: [2], setting: "only" as const },
+      ],
     ]) {
       assert.equal(isAgentEnabledAtLayer(agent({ layerRules }), 2, 3), false);
     }
@@ -116,22 +132,31 @@ describe("agent layer settings", () => {
   });
 
   test("warns and ignores malformed selectors and unsupported settings", () => {
-    const root = path.join(process.cwd(), "tmp");
-    fs.mkdirSync(root, { recursive: true });
-    const dir = fs.mkdtempSync(path.join(root, "invalid-layers-"));
+    const dir = workspace("invalid-layers-");
     const warnings: string[] = [];
     const previousWarn = console.warn;
     console.warn = (message) => warnings.push(String(message));
     try {
       const file = path.join(dir, "agent.md");
-      fs.writeFileSync(file, [
-        "---", "name: invalid", "description: invalid layers",
-        "nth-layer(0): only", "nth-layer(1.5): only", "nth-layer(1,): only",
-        "nth-layer(): only", "nth-layer(9007199254740992): only",
-        "second-layer: unsupported", "nth-layer(2): unsupported",
-        "---", "prompt",
-      ].join("\n"));
-      const parsed = parseAgentFile(file, "user")!;
+      fs.writeFileSync(
+        file,
+        [
+          "---",
+          "name: invalid",
+          "description: invalid layers",
+          "nth-layer(0): only",
+          "nth-layer(1.5): only",
+          "nth-layer(1,): only",
+          "nth-layer(): only",
+          "nth-layer(9007199254740992): only",
+          "second-layer: unsupported",
+          "nth-layer(2): unsupported",
+          "---",
+          "prompt",
+        ].join("\n"),
+      );
+      const parsed = parseAgentFile(file, "user");
+      assert.ok(parsed);
       assert.equal(parsed.secondLayer, true);
       assert.deepEqual(parsed.layerRules, [{ layers: [2], setting: true }]);
       assert.equal(warnings.length, 7);
@@ -155,20 +180,10 @@ describe("agent layer settings", () => {
   });
 
   test("does not advertise agents already in the delegation stack", () => {
-    const agents = [
-      agent({ name: "code-architect" }),
-      agent({ name: "code-reviwer" }),
-      agent({ name: "code-writer" }),
-    ];
+    const agents = [agent({ name: "code-architect" }), agent({ name: "code-reviwer" }), agent({ name: "code-writer" })];
 
     assert.deepEqual(
-      filterAdvertisedAgents(
-        agents,
-        2,
-        3,
-        ["code-architect", "code-reviwer"],
-        true,
-      ).map((candidate) => candidate.name),
+      filterAdvertisedAgents(agents, 2, 3, ["code-architect", "code-reviwer"], true).map((candidate) => candidate.name),
       ["code-writer"],
     );
   });
@@ -176,8 +191,7 @@ describe("agent layer settings", () => {
   test("keeps stacked agents visible when cycle prevention is disabled", () => {
     const agents = [agent({ name: "code-architect" }), agent({ name: "code-writer" })];
     assert.deepEqual(
-      filterAdvertisedAgents(agents, 2, 3, ["code-architect"], false)
-        .map((candidate) => candidate.name),
+      filterAdvertisedAgents(agents, 2, 3, ["code-architect"], false).map((candidate) => candidate.name),
       ["code-architect", "code-writer"],
     );
   });
@@ -185,10 +199,7 @@ describe("agent layer settings", () => {
 
 describe("current parent model inheritance", () => {
   test("current parent model overrides agent frontmatter", () => {
-    assert.equal(
-      resolveSubagentModel("anthropic/pinned", "openai/gpt-5.6-sol"),
-      "openai/gpt-5.6-sol",
-    );
+    assert.equal(resolveSubagentModel("anthropic/pinned", "openai/gpt-5.6-sol"), "openai/gpt-5.6-sol");
   });
 
   test("agent model remains a compatibility fallback without live parent context", () => {
@@ -198,29 +209,20 @@ describe("current parent model inheritance", () => {
   test("uses the current model for a normal tool call without looking backward", () => {
     const current = { provider: "openai", id: "gpt-5.6-sol" };
     const older = { provider: "anthropic", id: "claude-old" };
-    assert.equal(
-      selectParentModelForSubagent(current, older, older, older),
-      current,
-    );
+    assert.equal(selectParentModelForSubagent(current, older, older, older), current);
   });
 
   test("recovers the preceding real model for our synthetic resume call", () => {
     const synthetic = { provider: RESUME_PROVIDER, id: "synthetic-tool-call" };
     const captured = { provider: "openai", id: "gpt-5.6-sol" };
     const historical = { provider: "anthropic", id: "claude-old" };
-    assert.equal(
-      selectParentModelForSubagent(synthetic, captured, historical, undefined),
-      captured,
-    );
+    assert.equal(selectParentModelForSubagent(synthetic, captured, historical, undefined), captured);
   });
 
   test("scans historical real models only when the current model is synthetic", () => {
     const synthetic = { provider: RESUME_PROVIDER, id: "synthetic-tool-call" };
     const historical = { provider: "anthropic", id: "claude-sonnet" };
-    assert.equal(
-      selectParentModelForSubagent(synthetic, undefined, historical, undefined),
-      historical,
-    );
+    assert.equal(selectParentModelForSubagent(synthetic, undefined, historical, undefined), historical);
   });
 });
 
@@ -270,6 +272,9 @@ describe("subagent usage guidance", () => {
     assert.match(lead.systemPrompt, /not a fresh budget/);
     assert.match(lead.systemPrompt, /Another coordinator needs its own demonstrated context saving/);
     assert.match(lead.systemPrompt, /Launch new workers for independent review/);
-    assert.doesNotMatch(lead.systemPrompt, /substantial follow-up|Fix small integration issues yourself|repeated review rounds|Do small tasks/);
+    assert.doesNotMatch(
+      lead.systemPrompt,
+      /substantial follow-up|Fix small integration issues yourself|repeated review rounds|Do small tasks/,
+    );
   });
 });

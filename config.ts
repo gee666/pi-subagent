@@ -1,4 +1,4 @@
-import { getAgentDir } from "@mariozechner/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -22,7 +22,9 @@ function readToolPrompts(filePath: string): Record<string, string> {
     const toolPrompts = (parsed as Record<string, unknown>)["tool-prompts"];
     if (toolPrompts === undefined) return {};
     if (!toolPrompts || typeof toolPrompts !== "object" || Array.isArray(toolPrompts)) {
-      console.warn(`[pi-subagent] Ignoring invalid tool-prompts in "${filePath}". Expected an object of tool-name to prompt strings.`);
+      console.warn(
+        `[pi-subagent] Ignoring invalid tool-prompts in "${filePath}". Expected an object of tool-name to prompt strings.`,
+      );
       return {};
     }
 
@@ -31,7 +33,9 @@ function readToolPrompts(filePath: string): Record<string, string> {
       if (typeof prompt === "string" && prompt.trim().length > 0) {
         result[toolName] = prompt;
       } else {
-        console.warn(`[pi-subagent] Ignoring invalid prompt for tool "${toolName}" in "${filePath}". Expected a non-empty string.`);
+        console.warn(
+          `[pi-subagent] Ignoring invalid prompt for tool "${toolName}" in "${filePath}". Expected a non-empty string.`,
+        );
       }
     }
     return result;
@@ -60,10 +64,7 @@ export function findProjectConfig(cwd: string): string | null {
  *   $PI_CODING_AGENT_DIR/pi-subagents.json (normally ~/.pi/agent/pi-subagents.json)
  *   nearest project .pi/pi-subagents.json (trusted projects only)
  */
-export function loadPiSubagentsConfig(
-  cwd?: string,
-  includeProject = false,
-): PiSubagentsConfig {
+export function loadPiSubagentsConfig(cwd?: string, includeProject = false): PiSubagentsConfig {
   const paths = [
     path.join(os.homedir(), ".pi", PI_SUBAGENTS_CONFIG_FILE),
     path.join(getAgentDir(), PI_SUBAGENTS_CONFIG_FILE),

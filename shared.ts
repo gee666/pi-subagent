@@ -21,21 +21,21 @@ export const RESUME_MODEL_ID = "synthetic-tool-call";
 // ---------------------------------------------------------------------------
 
 export function parseBoolean(raw: unknown): boolean | null {
-	if (typeof raw === "boolean") return raw;
-	if (typeof raw !== "string") return null;
-	const normalized = raw.trim().toLowerCase();
-	if (["1", "true", "yes", "on"].includes(normalized)) return true;
-	if (["0", "false", "no", "off"].includes(normalized)) return false;
-	return null;
+  if (typeof raw === "boolean") return raw;
+  if (typeof raw !== "string") return null;
+  const normalized = raw.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return null;
 }
 
 /** Parse a string into a non-negative safe integer, or null on failure. */
 export function parseNonNegativeInt(raw: unknown): number | null {
-	if (typeof raw !== "string") return null;
-	const trimmed = raw.trim();
-	if (!/^\d+$/.test(trimmed)) return null;
-	const parsed = Number(trimmed);
-	return Number.isSafeInteger(parsed) ? parsed : null;
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const parsed = Number(trimmed);
+  return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -44,7 +44,7 @@ export function parseNonNegativeInt(raw: unknown): number | null {
 
 /** Returns true when `value` is a plain (non-array, non-null) object. */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**
@@ -58,16 +58,16 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * - The original `target` and `source` objects are never mutated.
  */
 export function deepMerge(target: object, source: object): object {
-	const output: Record<string, unknown> = { ...(target as Record<string, unknown>) };
-	for (const [key, srcVal] of Object.entries(source as Record<string, unknown>)) {
-		const tgtVal = (output as Record<string, unknown>)[key];
-		if (isPlainObject(srcVal) && isPlainObject(tgtVal)) {
-			output[key] = deepMerge(tgtVal, srcVal);
-		} else {
-			output[key] = srcVal;
-		}
-	}
-	return output;
+  const output: Record<string, unknown> = { ...(target as Record<string, unknown>) };
+  for (const [key, srcVal] of Object.entries(source as Record<string, unknown>)) {
+    const tgtVal = (output as Record<string, unknown>)[key];
+    if (isPlainObject(srcVal) && isPlainObject(tgtVal)) {
+      output[key] = deepMerge(tgtVal, srcVal);
+    } else {
+      output[key] = srcVal;
+    }
+  }
+  return output;
 }
 
 // ---------------------------------------------------------------------------
@@ -77,21 +77,21 @@ export function deepMerge(target: object, source: object): object {
  * Order of results matches order of input regardless of completion order.
  */
 export async function mapConcurrent<TIn, TOut>(
-	items: TIn[],
-	concurrency: number,
-	fn: (item: TIn, index: number) => Promise<TOut>,
+  items: TIn[],
+  concurrency: number,
+  fn: (item: TIn, index: number) => Promise<TOut>,
 ): Promise<TOut[]> {
-	if (items.length === 0) return [];
-	const limit = Math.max(1, Math.min(concurrency, items.length));
-	const results: TOut[] = new Array(items.length);
-	let nextIndex = 0;
-	const worker = async () => {
-		while (true) {
-			const i = nextIndex++;
-			if (i >= items.length) return;
-			results[i] = await fn(items[i], i);
-		}
-	};
-	await Promise.all(Array.from({ length: limit }, () => worker()));
-	return results;
+  if (items.length === 0) return [];
+  const limit = Math.max(1, Math.min(concurrency, items.length));
+  const results: TOut[] = new Array(items.length);
+  let nextIndex = 0;
+  const worker = async () => {
+    while (true) {
+      const i = nextIndex++;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i], i);
+    }
+  };
+  await Promise.all(Array.from({ length: limit }, () => worker()));
+  return results;
 }

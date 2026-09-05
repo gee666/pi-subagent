@@ -1,7 +1,8 @@
 import * as path from "node:path";
-import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { parseBoolean, RESUME_PROVIDER } from "./shared.js";
 import { isBudgetAmount } from "./budget.js";
+import { isRecord, sanitizePathComponent } from "./storage/values.js";
 import {
   isResultError,
   isSubagentDetails,
@@ -59,8 +60,8 @@ export function buildSubagentSessionDir(
   toolCallId: string,
   index: number,
 ): string {
-  const safeParent = parentSessionId.replace(/[^a-zA-Z0-9_.-]+/g, "_");
-  const safeTool = toolCallId.replace(/[^a-zA-Z0-9_.-]+/g, "_");
+  const safeParent = sanitizePathComponent(parentSessionId);
+  const safeTool = sanitizePathComponent(toolCallId);
   return path.join(root, safeParent, safeTool, String(index));
 }
 
@@ -68,10 +69,10 @@ export function branchEntries(ctx: ExtensionContext): SessionEntry[] {
   const leafId = ctx.sessionManager.getLeafId?.();
   if (leafId) {
     const branch = ctx.sessionManager.getBranch?.(leafId);
-    if (Array.isArray(branch)) return branch as SessionEntry[];
+    if (Array.isArray(branch)) return branch;
   }
   const entries = ctx.sessionManager.getEntries?.();
-  return Array.isArray(entries) ? entries as SessionEntry[] : [];
+  return Array.isArray(entries) ? entries : [];
 }
 
 // NOTE: crash-resume (the synthetic provider re-issuing unfinished subagent
@@ -80,32 +81,30 @@ export function branchEntries(ctx: ExtensionContext): SessionEntry[] {
 // require re-resolving names through the registry mid-injection, and the named
 // subagents can simply be resumed again by the model with another
 // resume_subagents call once the session continues.
-function getSubagentToolCalls(message: any): Array<{ id: string; args: any }> {
-  if (!message || message.role !== "assistant" || !Array.isArray(message.content)) return [];
-  const calls: Array<{ id: string; args: any }> = [];
+function getSubagentToolCalls(message: unknown): Array<{ id: string; args: unknown }> {
+  if (!isRecord(message) || message.role !== "assistant" || !Array.isArray(message.content)) return [];
+  const calls: Array<{ id: string; args: unknown }> = [];
   for (const part of message.content) {
-    if (part?.type !== "toolCall" || !isSubagentLaunchToolName(part.name)) continue;
-    const id = typeof part.id === "string"
-      ? part.id
-      : typeof part.toolCallId === "string"
-        ? part.toolCallId
-        : undefined;
+    if (!isRecord(part) || part.type !== "toolCall" || !isSubagentLaunchToolName(part.name)) continue;
+    const id =
+      typeof part.id === "string" ? part.id : typeof part.toolCallId === "string" ? part.toolCallId : undefined;
     if (id) calls.push({ id, args: part.arguments });
   }
   return calls;
 }
 
-function normalizeTasks(args: any): ResumableTask[] | null {
-  const rawTasks = args?.tasks;
+function normalizeTasks(args: unknown): ResumableTask[] | null {
+  const rawTasks = isRecord(args) ? args.tasks : undefined;
   if (!Array.isArray(rawTasks) || rawTasks.length === 0) return null;
   const tasks: ResumableTask[] = [];
   for (const task of rawTasks) {
-    if (typeof task?.agent !== "string" || typeof task?.task !== "string") return null;
-    tasks.push({
-      agent: task.agent,
-      task: task.task,
-      ...(getTaskBranchSize(task) !== undefined ? { max_agents_allowed: getTaskBranchSize(task) } : {}),
-    });
+    if (!isRecord(task) || typeof task.agent !== "string" || typeof task.task !== "string") return null;
+    const normalized: ResumableTask = { agent: task.agent, task: task.task };
+    for (const field of ["max_agents_allowed", "max_agents_in_branch", "max_subagents_allowed"] as const) {
+      if (task[field] !== undefined) normalized[field] = typeof task[field] === "number" ? task[field] : NaN;
+    }
+    const size = getTaskBranchSize(normalized);
+    tasks.push({ agent: task.agent, task: task.task, ...(size !== undefined ? { max_agents_allowed: size } : {}) });
   }
   return tasks;
 }
@@ -116,27 +115,31 @@ function hasUnfinishedResults(details: SubagentDetails | undefined, expectedTask
   return details.results.slice(0, expectedTaskCount).some((result) => result.exitCode === -1 || isResultError(result));
 }
 
-function getMessageText(message: any): string {
-  const content = message?.content;
+function getMessageText(message: unknown): string {
+  const content = isRecord(message) ? message.content : undefined;
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content
-    .map((part) => (part?.type === "text" && typeof part.text === "string" ? part.text : ""))
+    .map((part) => (isRecord(part) && part.type === "text" && typeof part.text === "string" ? part.text : ""))
     .join("");
 }
 
-function messageHasNonEmptyText(message: any): boolean {
+function messageHasNonEmptyText(message: unknown): boolean {
   return getMessageText(message).trim().length > 0;
 }
 
-function messageHasToolCall(message: any): boolean {
-  return Array.isArray(message?.content) && message.content.some((part: any) => part?.type === "toolCall");
+function messageHasToolCall(message: unknown): boolean {
+  return (
+    isRecord(message) &&
+    Array.isArray(message.content) &&
+    message.content.some((part) => isRecord(part) && part.type === "toolCall")
+  );
 }
 
-function isIgnorableTrailingAbortMessage(entry: any): boolean {
-  if (entry?.type !== "message") return true;
+function isIgnorableTrailingAbortMessage(entry: unknown): boolean {
+  if (!isRecord(entry) || entry.type !== "message") return true;
   const message = entry.message;
-  if (!message) return true;
+  if (!isRecord(message)) return true;
 
   // Pi may append a final aborted/error assistant message after it has already
   // closed an interrupted tool with a synthetic toolResult. That message is not
@@ -154,15 +157,15 @@ function isIgnorableTrailingAbortMessage(entry: any): boolean {
   return false;
 }
 
-function isResumePromptEntry(entry: any): boolean {
-  if (entry?.type !== "message") return false;
+function isResumePromptEntry(entry: unknown): boolean {
+  if (!isRecord(entry) || entry.type !== "message") return false;
   const message = entry.message;
-  if (message?.role !== "user") return false;
+  if (!isRecord(message) || message.role !== "user") return false;
   return /^Resuming \d+ subagents\.\.\.$/.test(getMessageText(message).trim());
 }
 
-function isSyntheticResumeModelChange(entry: any): boolean {
-  return entry?.type === "model_change" && entry.provider === RESUME_PROVIDER;
+function isSyntheticResumeModelChange(entry: unknown): boolean {
+  return isRecord(entry) && entry.type === "model_change" && entry.provider === RESUME_PROVIDER;
 }
 
 function isFailedResumeAttemptTail(entries: SessionEntry[], start: number): boolean {
@@ -173,7 +176,7 @@ function isFailedResumeAttemptTail(entries: SessionEntry[], start: number): bool
   let sawFailure = false;
 
   for (let i = start; i < entries.length; i++) {
-    const entry: any = entries[i];
+    const entry = entries[i];
 
     if (isSyntheticResumeModelChange(entry)) {
       sawSyntheticModel = true;
@@ -212,7 +215,7 @@ export function findLatestResumableSubagentCalls(ctx: ExtensionContext): Resumab
   const calls = new Map<string, { tasks: ResumableTask[]; order: number }>();
   const results = new Map<string, { details?: SubagentDetails; isError: boolean; order: number }>();
 
-  entries.forEach((entry: any, order) => {
+  entries.forEach((entry, order) => {
     if (entry?.type !== "message") return;
     const msg = entry.message;
     for (const call of getSubagentToolCalls(msg)) {
@@ -274,15 +277,15 @@ export function findLatestResumableSubagentCall(ctx: ExtensionContext): Resumabl
   return findLatestResumableSubagentCalls(ctx).at(-1) ?? null;
 }
 
-export function sameTasks(
-  a: ResumableTask[],
-  b: ResumableTask[],
-): boolean {
+export function sameTasks(a: ResumableTask[], b: ResumableTask[]): boolean {
   if (a.length !== b.length) return false;
   return a.every((task, index) => {
     const other = b[index];
-    return task.agent === other.agent && task.task === other.task &&
-      (getTaskBranchSize(task) ?? 1) === (getTaskBranchSize(other) ?? 1);
+    return (
+      task.agent === other.agent &&
+      task.task === other.task &&
+      (getTaskBranchSize(task) ?? 1) === (getTaskBranchSize(other) ?? 1)
+    );
   });
 }
 

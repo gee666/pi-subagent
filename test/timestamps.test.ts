@@ -1,12 +1,7 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
-import {
-  buildTopLevelNodes,
-  formatClockTime,
-  formatLiveLogEntry,
-  renderTreeLines,
-} from "../tree.js";
+import { buildTopLevelNodes, formatClockTime, formatLiveLogEntry, renderTreeLines } from "../tree.js";
 import type { SingleResult, SubagentDetails } from "../types.js";
 import { emptyUsage } from "../types.js";
 
@@ -88,15 +83,19 @@ describe("recursive last action", () => {
     const parent = makeResult({
       name: "John",
       lastActionAt: parentAction,
-      messages: [{
-        role: "assistant",
-        content: [{
-          type: "toolCall",
-          name: "subagents",
-          toolCallId: "nested",
-          arguments: { tasks: [{ agent: "writer", task: "child work" }] },
-        }],
-      }] as any,
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              name: "subagents",
+              toolCallId: "nested",
+              arguments: { tasks: [{ agent: "writer", task: "child work" }] },
+            },
+          ],
+        },
+      ],
       liveNestedSubagents: { nested: childDetails },
     });
     const [node] = buildTopLevelNodes(makeDetails([parent]));
