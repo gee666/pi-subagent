@@ -69,7 +69,7 @@ Write clear, concise technical documentation.
 
 The body is appended to Pi's system prompt. Project definitions override user/environment definitions, which override bundled definitions of the same name. Custom definitions replace the bundled instructions too.
 
-See [configuration](docs/configuration.md) for frontmatter, layer restrictions, prompt overrides, and environment settings. The optional [create-subagent skill](create-subagent/SKILL.md) teaches Pi to write definitions.
+See [configuration](docs/configuration.md) for frontmatter, layer restrictions, prompt overrides, and environment settings.
 
 ## Interactive controls
 
