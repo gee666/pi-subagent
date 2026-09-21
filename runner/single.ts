@@ -11,6 +11,7 @@ import { buildPiArgs } from "./arguments.js";
 import { writePromptToTempFile, cleanupTempDir, sessionDirExists } from "./files.js";
 import { appendBoundedStderr, priorDescendantUsage, endedWithSyntheticResumeFailure } from "./result.js";
 import { runAttempt } from "./attempt.js";
+import { selectSmartDecision } from "./smart-decision.js";
 export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleResult> {
   const {
     agents,
@@ -111,6 +112,22 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
   }
 
   try {
+    const selection = await selectSmartDecision(
+      opts.smartDecision,
+      { systemPrompt: agent.systemPrompt, task },
+      opts.signal,
+    );
+    if (opts.signal?.aborted) {
+      result.exitCode = 130;
+      result.stopReason = "aborted";
+      result.errorMessage = "Subagent was aborted.";
+      emitUpdate();
+      return result;
+    }
+    if (selection) {
+      result.model = `${selection.provider}/${selection.model}`;
+      emitUpdate();
+    }
     const { args: piArgs, prompt: taskPrompt } = buildPiArgs(
       agent,
       promptTmpPath,
@@ -119,6 +136,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       shouldContinueSession,
       fallbackModel,
       opts.rawPrompt === true,
+      selection,
     );
     const prompt =
       result.budget && readBudget(result.budget).limit > 0
@@ -197,6 +215,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
     result.stopReason = result.stopReason ?? "error";
     result.errorMessage = result.errorMessage ?? msg;
     if (!result.stderr.trim()) result.stderr = msg;
+    emitUpdate();
     return result;
   } finally {
     cleanupTempDir(promptTmpDir);

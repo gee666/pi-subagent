@@ -55,8 +55,8 @@ describe("agent layer settings", () => {
     }
   });
 
-  test("bundled team-lead is available only to the main agent", () => {
-    const teamLead = parseAgentFile(path.join(process.cwd(), "agents", "team-lead.md"), "builtin");
+  test("bundled team-of-subagents is available only to the main agent", () => {
+    const teamLead = parseAgentFile(path.join(process.cwd(), "agents", "team-of-subagents.md"), "builtin");
     assert.ok(teamLead);
     assert.equal(teamLead.firstLayer, "only");
     assert.equal(isAgentEnabledAtLayer(teamLead, 1, 3), true);
@@ -264,14 +264,14 @@ describe("subagent usage guidance", () => {
     }
   });
 
-  test("team-lead requires a bounded scope and shares the root budget", () => {
-    const lead = parseAgentFile(path.join(process.cwd(), "agents", "team-lead.md"), "builtin");
+  test("team-of-subagents requires a bounded scope and coordinates independent slices", () => {
+    const lead = parseAgentFile(path.join(process.cwd(), "agents", "team-of-subagents.md"), "builtin");
     assert.ok(lead);
-    assert.match(lead.description, /Use (?:extremely )?rarely/);
+    assert.match(lead.description, /Use (?:(?:extremely|very) )?rarely/);
     assert.doesNotMatch(lead.systemPrompt, /ask your caller|ask for it/i);
-    assert.match(lead.systemPrompt, /not a fresh budget/);
-    assert.match(lead.systemPrompt, /Another coordinator needs its own demonstrated context saving/);
-    assert.match(lead.systemPrompt, /Launch new workers for independent review/);
+    assert.match(lead.systemPrompt, /Define a bounded scope and expected output/);
+    assert.match(lead.systemPrompt, /Run independent slices together/);
+    assert.match(lead.systemPrompt, /Avoid overlapping edits/);
     assert.doesNotMatch(
       lead.systemPrompt,
       /substantial follow-up|Fix small integration issues yourself|repeated review rounds|Do small tasks/,

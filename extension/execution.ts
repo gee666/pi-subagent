@@ -64,6 +64,7 @@ export async function executeSingle(
       resumeSession: resumeExistingSession,
       initialResult: previousResult,
       fallbackModel,
+      smartDecision: state.smartDecision,
       onHandle: (handle) => {
         activeId = topLevelBaseId;
         state.activeSubagents.set(activeId, { agent: agentName, task, handle, name: subagentName });
@@ -148,7 +149,7 @@ export async function executeParallel(
           updateLatestBroadcastTargets(state, undefined);
         }
       },
-      { ...extras, namesFile: state.currentNamesFile || undefined },
+      { ...extras, namesFile: state.currentNamesFile || undefined, smartDecision: state.smartDecision },
     );
   } finally {
     for (const id of taskIds.values()) state.activeSubagents.delete(id);

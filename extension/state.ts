@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig } from "../agents.js";
 import type { SubagentBudget } from "../budget.js";
-import { loadPiSubagentsConfig } from "../config.js";
+import { loadPiSubagentsConfig, type PiSubagentsConfig } from "../config.js";
 import type { ResumableSubagentCall } from "../resume.js";
 import type { RunningSubagentHandle } from "../runner.js";
 import { DEFAULT_MAX_PARALLEL_TASKS, parseNonNegativeInt, SUBAGENT_MAX_PARALLEL_TASKS_ENV } from "../shared.js";
@@ -14,6 +14,7 @@ import { resolveDelegationDepthConfig, type DelegationDepthConfig } from "./poli
 export interface ExtensionState extends DelegationDepthConfig {
   pi: ExtensionAPI;
   configuredToolPrompts: Record<string, string>;
+  smartDecision?: PiSubagentsConfig["smartDecision"];
   refreshRegisteredToolPrompts?: (cwd: string, includeProject: boolean) => void;
   resumeModelRegistry?: ResumeModelRegistry;
   lastRestorableModel?: ResumeModel;

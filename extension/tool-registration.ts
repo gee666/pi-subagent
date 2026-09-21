@@ -10,7 +10,9 @@ export function registerToolsWithConfig(
   includeProject = false,
   force = false,
 ): void {
-  const nextToolPrompts = loadPiSubagentsConfig(cwd, includeProject).toolPrompts;
+  const config = loadPiSubagentsConfig(cwd, includeProject);
+  state.smartDecision = config.smartDecision;
+  const nextToolPrompts = config.toolPrompts;
   if (!force && sameToolPrompts(state.configuredToolPrompts, nextToolPrompts)) return;
   state.configuredToolPrompts = nextToolPrompts;
   registerSubagentsTool(state);

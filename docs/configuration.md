@@ -54,6 +54,40 @@ Use `pi-subagents.json` to replace either tool's full model-facing description. 
 
 Missing descriptions retain their defaults. Overrides change written guidance, not schemas, budget checks, or runtime limits. Keep instructions to estimate worker counts and avoid unnecessary delegation.
 
+## Smart-decision assistance
+
+Optionally let TypeSafe's Jev choose a model for each subagent task. Add this section to `.pi/pi-subagents.json` in a trusted project, or to either user configuration file listed above:
+
+```json
+{
+  "smart-decision": {
+    "enabled": true,
+    "fallback": true,
+    "model": "jev",
+    "api_key": "YOUR_TYPESAFE_API_KEY",
+    "use_models": [
+      {
+        "openai-codex/gpt-6-astra/high": "Frontier model for the most complicated tasks. Expensive and slow; use for difficult planning, architecture, and non-trivial problems.",
+        "openai/gpt-4.1-mini/off": "Fast, inexpensive model for small, well-defined edits and straightforward tasks."
+      }
+    ]
+  }
+}
+```
+
+Replace the example choices with models available in your Pi installation. Each key has the form `provider/model/thinking-level`; model IDs may contain slashes. Thinking levels are `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`. Each value is a non-empty description of when to use that choice. You can put choices in one object or separate objects in `use_models`, up to 255 entries. Duplicate keys keep the first description.
+
+- `enabled` must be `true`. Missing settings, disabled settings, or an empty model list leave existing behavior unchanged and make no Jev requests.
+- `model` selects the decision model, not the worker model. `jev` maps to TypeSafe's `jev-latest`; explicit TypeSafe model IDs also work.
+- `api_key` is your TypeSafe API key. Worker providers still need their own Pi credentials.
+- `fallback` defaults to `true`. If selection fails, a short warning is written and the worker uses the original launch settings. Set it to `false` to return a tool error without launching the affected worker. This covers network errors, the 10-second request timeout, API errors, invalid answers, and invalid enabled configuration. Cancellation cancels the task instead of falling back.
+
+Each fresh launch and actual resume sends the agent definition's system prompt, the assigned task, and the candidate descriptions to `https://api.typesafe.ai/v1/systemone`. Jev must select a configured candidate. Its provider, model, and thinking level override the parent model and agent frontmatter for that run. The parent's explicit `--provider` and `--api-key` are not forwarded when a Jev choice is applied. Startup retries reuse the choice. Finished results reused without launching a process make no request.
+
+Configuration uses the same trust checks and file order as tool descriptions. A later `smart-decision` section replaces the entire earlier section, rather than merging credentials or choices. Reload Pi after editing settings. Nested workers load configuration through the same rules.
+
+Enabling this sends prompt contents to TypeSafe and incurs separate API charges. Do not commit API keys to source control. The key is not included in worker arguments or saved tool results. Jev usage is not included in worker token totals.
+
 ## Limits and discovery
 
 | Setting | Default | Meaning |
@@ -94,7 +128,7 @@ Normally Pi restarts through `process.execPath process.argv[1]`. No package-mana
 
 ## Forwarded CLI arguments
 
-Children inherit the parent's CLI settings except arguments managed by the extension. Every new launch explicitly selects the parent's active model, so `/model` changes affect subsequent launches.
+Children inherit the parent's CLI settings except arguments managed by the extension. Without smart-decision selection, every new launch explicitly selects the parent's active model, so `/model` changes affect subsequent launches.
 
 Forwarded unchanged:
 

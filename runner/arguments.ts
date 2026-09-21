@@ -218,18 +218,26 @@ export function buildPiArgs(
   resumeSession: boolean,
   fallbackModelOverride?: string,
   rawPrompt = false,
+  selection?: { provider: string; model: string; thinking: string },
 ): { args: string[]; prompt: string } {
-  const args: string[] = ["--mode", "rpc", ..._inheritedCliArgs.extensionArgs, ..._inheritedCliArgs.alwaysProxy];
+  // A Jev-selected provider must not inherit a conflicting provider or its CLI credential.
+  const proxyArgs = selection
+    ? _inheritedCliArgs.alwaysProxy.filter(
+        (arg, index, args) =>
+          !["--provider", "--api-key"].includes(arg) && !["--provider", "--api-key"].includes(args[index - 1]),
+      )
+    : _inheritedCliArgs.alwaysProxy;
+  const args: string[] = ["--mode", "rpc", ..._inheritedCliArgs.extensionArgs, ...proxyArgs];
 
   if (sessionDir) args.push("--session-dir", sessionDir);
   if (resumeSession) args.push("--continue");
 
-  // Always use the model active in the parent at launch time. This matters
-  // when /model changed after the parent process originally started.
-  const model = resolveSubagentModel(agent.model, fallbackModelOverride);
+  // Without smart selection, preserve the live parent's model precedence.
+  const model = selection?.model ?? resolveSubagentModel(agent.model, fallbackModelOverride);
+  if (selection) args.push("--provider", selection.provider);
   if (model) args.push("--model", model);
 
-  const thinking = agent.thinking ?? _inheritedCliArgs.fallbackThinking;
+  const thinking = selection?.thinking ?? agent.thinking ?? _inheritedCliArgs.fallbackThinking;
   if (thinking) args.push("--thinking", thinking);
 
   // agent.tools is set only when the agent file specifies tools (length > 0)

@@ -3,13 +3,16 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
+import { parseSmartDecisionConfig, type SmartDecisionConfig } from "./runner/smart-decision.js";
+
 export const PI_SUBAGENTS_CONFIG_FILE = "pi-subagents.json";
 
 export interface PiSubagentsConfig {
   toolPrompts: Record<string, string>;
+  smartDecision?: SmartDecisionConfig;
 }
 
-function readToolPrompts(filePath: string): Record<string, string> {
+function readConfig(filePath: string): Record<string, unknown> {
   if (!fs.existsSync(filePath)) return {};
 
   try {
@@ -19,31 +22,35 @@ function readToolPrompts(filePath: string): Record<string, string> {
       return {};
     }
 
-    const toolPrompts = (parsed as Record<string, unknown>)["tool-prompts"];
-    if (toolPrompts === undefined) return {};
-    if (!toolPrompts || typeof toolPrompts !== "object" || Array.isArray(toolPrompts)) {
-      console.warn(
-        `[pi-subagent] Ignoring invalid tool-prompts in "${filePath}". Expected an object of tool-name to prompt strings.`,
-      );
-      return {};
-    }
-
-    const result: Record<string, string> = {};
-    for (const [toolName, prompt] of Object.entries(toolPrompts)) {
-      if (typeof prompt === "string" && prompt.trim().length > 0) {
-        result[toolName] = prompt;
-      } else {
-        console.warn(
-          `[pi-subagent] Ignoring invalid prompt for tool "${toolName}" in "${filePath}". Expected a non-empty string.`,
-        );
-      }
-    }
-    return result;
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.warn(`[pi-subagent] Failed to read config "${filePath}": ${message}`);
+    return parsed as Record<string, unknown>;
+  } catch {
+    // JSON parser errors can contain source text, including the API key.
+    console.warn(`[pi-subagent] Failed to read config "${filePath}".`);
     return {};
   }
+}
+
+function readToolPrompts(config: Record<string, unknown>, filePath: string): Record<string, string> {
+  const toolPrompts = config["tool-prompts"];
+  if (toolPrompts === undefined) return {};
+  if (!toolPrompts || typeof toolPrompts !== "object" || Array.isArray(toolPrompts)) {
+    console.warn(
+      `[pi-subagent] Ignoring invalid tool-prompts in "${filePath}". Expected an object of tool-name to prompt strings.`,
+    );
+    return {};
+  }
+
+  const result: Record<string, string> = {};
+  for (const [toolName, prompt] of Object.entries(toolPrompts)) {
+    if (typeof prompt === "string" && prompt.trim().length > 0) {
+      result[toolName] = prompt;
+    } else {
+      console.warn(
+        `[pi-subagent] Ignoring invalid prompt for tool "${toolName}" in "${filePath}". Expected a non-empty string.`,
+      );
+    }
+  }
+  return result;
 }
 
 /** Find the nearest project-local .pi/pi-subagents.json while walking up from cwd. */
@@ -59,7 +66,7 @@ export function findProjectConfig(cwd: string): string | null {
 }
 
 /**
- * Load tool prompt overrides from lowest to highest priority:
+ * Load configuration from lowest to highest priority:
  *   ~/.pi/pi-subagents.json
  *   $PI_CODING_AGENT_DIR/pi-subagents.json (normally ~/.pi/agent/pi-subagents.json)
  *   nearest project .pi/pi-subagents.json (trusted projects only)
@@ -75,8 +82,13 @@ export function loadPiSubagentsConfig(cwd?: string, includeProject = false): PiS
   }
 
   const toolPrompts: Record<string, string> = {};
+  let smartDecision: SmartDecisionConfig | undefined;
   for (const filePath of new Set(paths)) {
-    Object.assign(toolPrompts, readToolPrompts(filePath));
+    const config = readConfig(filePath);
+    Object.assign(toolPrompts, readToolPrompts(config, filePath));
+    if (Object.hasOwn(config, "smart-decision")) {
+      smartDecision = parseSmartDecisionConfig(config["smart-decision"]);
+    }
   }
-  return { toolPrompts };
+  return { toolPrompts, ...(smartDecision ? { smartDecision } : {}) };
 }

@@ -9,7 +9,7 @@ import {
   SUBAGENT_MAX_CONCURRENCY_ENV,
   mapConcurrent,
 } from "../shared.js";
-import type { DetailsFactory, OnUpdateCallback, RunningSubagentHandle } from "./options.js";
+import type { DetailsFactory, OnUpdateCallback, RunningSubagentHandle, RunAgentOptions } from "./options.js";
 import { configuredNonNegativeInt } from "./constants.js";
 import { sessionDirExists } from "./files.js";
 import { runAgentSubprocess } from "./single.js";
@@ -39,6 +39,7 @@ export async function executeParallelSubprocess(
     /** Shared name-registry file passed to children via spawn env. */
     namesFile?: string;
     budgets?: Array<SubagentBudget | undefined>;
+    smartDecision?: RunAgentOptions["smartDecision"];
   },
 ): Promise<{
   content: Array<{ type: "text"; text: string }>;
@@ -139,6 +140,7 @@ export async function executeParallelSubprocess(
           resumeSession: shouldResumeThisSession && !!sessionDir,
           initialResult: previousResult,
           fallbackModel,
+          smartDecision: extras?.smartDecision,
           onHandle: (handle) => onHandleForTask?.(index, t, handle),
           onUpdate: (partial) => {
             if (partial.details?.results[0]) {
