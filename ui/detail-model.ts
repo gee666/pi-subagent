@@ -16,6 +16,9 @@ export interface DetailBlock {
   index: number;
   prompt: string;
   at?: number;
+  /** Actual settings recorded for this task or resume, not the parent's model. */
+  model?: string;
+  thinkingLevel?: string;
   events: DetailEvent[];
 }
 
@@ -32,6 +35,7 @@ export interface SubagentDetail {
   name: string;
   agent: string;
   model?: string;
+  thinkingLevel?: string;
   tools?: string[];
   createdAt?: number;
   sessionDir: string;

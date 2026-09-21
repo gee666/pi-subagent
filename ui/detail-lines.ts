@@ -93,11 +93,11 @@ export function renderTurnOverviewLines(
   const meta = [
     `Turn ${blockIndex + 1} of ${detail.blocks.length}: ${turnTitle}`,
     block.at ? formatClockTime(block.at) : "",
-    detail.model ?? "",
   ]
     .filter(Boolean)
     .join(" • ");
   out.wrap(meta, "", "dim");
+  out.wrap(`Model: ${block.model ?? "unknown"} • Thinking: ${block.thinkingLevel ?? "unknown"}`, "", "dim");
   out.wrap(`session total: ${usageLine(detail.usage)}`, "", "dim");
   for (const note of detail.notes) out.wrap(note, "", "warning");
 

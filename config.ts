@@ -30,6 +30,77 @@ function readConfig(filePath: string): Record<string, unknown> {
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+let tempFileCounter = 0;
+
+/** Add the explicit default without allowing a failed write to change runtime behavior. */
+function persistSmartDecisionFallback(config: Record<string, unknown>, filePath: string): void {
+  const smartDecision = config["smart-decision"];
+  if (!isRecord(smartDecision) || Object.hasOwn(smartDecision, "fallback")) return;
+
+  smartDecision.fallback = true;
+  let tempPath: string | undefined;
+  let ownsTemp = false;
+  try {
+    // Replace the target rather than a symlink that points to it.
+    const targetPath = fs.realpathSync(filePath);
+    // Re-read immediately before writing so unrelated edits made since the initial load survive.
+    // Retrying also makes concurrent nested-worker migrations converge without clobbering one another.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const source = fs.readFileSync(targetPath, "utf8");
+      const latest = JSON.parse(source) as unknown;
+      if (!isRecord(latest)) return;
+      const latestSmartDecision = latest["smart-decision"];
+      if (!isRecord(latestSmartDecision)) return;
+      if (Object.hasOwn(latestSmartDecision, "fallback")) {
+        smartDecision.fallback = latestSmartDecision.fallback;
+        return;
+      }
+
+      latestSmartDecision.fallback = true;
+      const mode = fs.statSync(targetPath).mode & 0o7777;
+      const candidatePath = path.join(
+        path.dirname(targetPath),
+        `.${path.basename(targetPath)}.${process.pid}.${tempFileCounter++}.tmp`,
+      );
+      const fd = fs.openSync(candidatePath, "wx", mode);
+      tempPath = candidatePath;
+      ownsTemp = true;
+      try {
+        fs.writeFileSync(fd, `${JSON.stringify(latest, null, 2)}\n`, "utf8");
+        fs.fchmodSync(fd, mode);
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
+
+      if (fs.readFileSync(targetPath, "utf8") !== source) {
+        fs.unlinkSync(tempPath);
+        tempPath = undefined;
+        ownsTemp = false;
+        continue;
+      }
+      fs.renameSync(tempPath, targetPath);
+      tempPath = undefined;
+      ownsTemp = false;
+      return;
+    }
+    throw new Error("config changed during fallback migration");
+  } catch {
+    if (ownsTemp && tempPath) {
+      try {
+        fs.unlinkSync(tempPath);
+      } catch {
+        // Best-effort cleanup. Do not expose filesystem errors or configuration contents.
+      }
+    }
+    console.warn("[pi-subagent] Failed to save the default smart-decision fallback.");
+  }
+}
+
 function readToolPrompts(config: Record<string, unknown>, filePath: string): Record<string, string> {
   const toolPrompts = config["tool-prompts"];
   if (toolPrompts === undefined) return {};
@@ -85,6 +156,7 @@ export function loadPiSubagentsConfig(cwd?: string, includeProject = false): PiS
   let smartDecision: SmartDecisionConfig | undefined;
   for (const filePath of new Set(paths)) {
     const config = readConfig(filePath);
+    persistSmartDecisionFallback(config, filePath);
     Object.assign(toolPrompts, readToolPrompts(config, filePath));
     if (Object.hasOwn(config, "smart-decision")) {
       smartDecision = parseSmartDecisionConfig(config["smart-decision"]);

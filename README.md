@@ -75,7 +75,7 @@ See [configuration](docs/configuration.md) for frontmatter, layer restrictions, 
 
 Collapsed results show each child's name, task, status, and most recent activity anywhere in its subtree. `Ctrl+O` expands the newest call from memory without reading historical transcripts.
 
-`/subagent-expand <name>` opens a saved worker transcript. With no name, it opens a searchable picker. Name completion is fuzzy.
+`/subagent-expand <name>` opens a saved worker transcript. With no name, it opens a searchable picker. Name completion is fuzzy. Each task or resume shows its actual provider/model and thinking level from the worker's session, not the parent's settings. Missing historical metadata appears as `unknown`.
 
 | Key | Action |
 | --- | --- |

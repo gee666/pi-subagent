@@ -1,4 +1,4 @@
-import { sessionFilesIn, readSessionMessages } from "./session.js";
+import { sessionFilesIn, readSessionEntries } from "./session.js";
 export { sessionFilesIn, readSessionMessages } from "./session.js";
 import * as os from "node:os";
 import type { NamesRegistry, SubagentNameRecord } from "../names.js";
@@ -92,23 +92,41 @@ export interface ParsedTranscript {
   blocks: DetailBlock[];
   usage: DetailUsage;
   toolCallCount: number;
+  model?: string;
+  thinkingLevel?: string;
 }
 
 export function parseTranscriptMessages(messages: unknown[]): ParsedTranscript {
   const blocks: DetailBlock[] = [];
   const usage: DetailUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
   let toolCallCount = 0;
+  let model: string | undefined;
+  let thinkingLevel: string | undefined;
   const pendingTools = new Map<string, Extract<DetailEvent, { type: "tool" }>>();
+  const observedModels = new Set<DetailBlock>();
 
   const currentBlock = (): DetailBlock => {
     if (blocks.length === 0) {
-      blocks.push({ kind: "task", index: 0, prompt: "", events: [] });
+      blocks.push({ kind: "task", index: 0, prompt: "", model, thinkingLevel, events: [] });
     }
     return blocks[blocks.length - 1];
   };
 
   for (const entry of messages) {
     const wrapper = asRecord(entry);
+    if (wrapper.type === "model_change") {
+      if (typeof wrapper.modelId === "string" && wrapper.modelId && wrapper.modelId !== "synthetic-tool-call") {
+        model =
+          typeof wrapper.provider === "string" && wrapper.provider
+            ? `${wrapper.provider}/${wrapper.modelId}`
+            : wrapper.modelId;
+      }
+      continue;
+    }
+    if (wrapper.type === "thinking_level_change") {
+      if (typeof wrapper.thinkingLevel === "string" && wrapper.thinkingLevel) thinkingLevel = wrapper.thinkingLevel;
+      continue;
+    }
     const message = asRecord(wrapper.message);
     const at = parseTimestamp(wrapper.timestamp ?? message.timestamp);
     const role = message.role;
@@ -121,6 +139,8 @@ export function parseTranscriptMessages(messages: unknown[]): ParsedTranscript {
         index,
         prompt,
         at,
+        model,
+        thinkingLevel,
         events: [],
       });
       continue;
@@ -138,6 +158,19 @@ export function parseTranscriptMessages(messages: unknown[]): ParsedTranscript {
       usage.cost += typeof cost === "number" ? cost : Number(asRecord(cost).total) || 0;
 
       const block = currentBlock();
+      // Legacy transcripts may have messages but no model-change entries.
+      if (typeof message.model === "string" && message.model && message.model !== "synthetic-tool-call") {
+        const actualModel =
+          typeof message.provider === "string" && message.provider
+            ? `${message.provider}/${message.model}`
+            : message.model;
+        if (!observedModels.has(block)) {
+          block.model = actualModel;
+          block.thinkingLevel = thinkingLevel;
+          observedModels.add(block);
+        }
+        model = actualModel;
+      }
       for (const rawPart of Array.isArray(message.content) ? message.content : []) {
         const part = asRecord(rawPart);
         if (part.type === "thinking" && typeof part.thinking === "string") {
@@ -188,7 +221,7 @@ export function parseTranscriptMessages(messages: unknown[]): ParsedTranscript {
     }
   }
 
-  return { blocks, usage, toolCallCount };
+  return { blocks, usage, toolCallCount, model, thinkingLevel };
 }
 
 export function buildSubagentDetail(record: SubagentNameRecord, options: { sessionDir?: string } = {}): SubagentDetail {
@@ -200,11 +233,15 @@ export function buildSubagentDetail(record: SubagentNameRecord, options: { sessi
   let blocks: DetailBlock[] = [];
   let usage: DetailUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
   let toolCallCount = 0;
+  let model: string | undefined;
+  let thinkingLevel: string | undefined;
 
   if (!sessionFile) {
     notes.push(`No session transcript found in ${shortenPath(sessionDir)}`);
   } else {
-    const parsed = parseTranscriptMessages(readSessionMessages(sessionFile));
+    const parsed = parseTranscriptMessages(readSessionEntries(sessionFile));
+    model = parsed.model;
+    thinkingLevel = parsed.thinkingLevel;
     blocks = parsed.blocks;
     usage = parsed.usage;
     toolCallCount = parsed.toolCallCount;
@@ -214,7 +251,7 @@ export function buildSubagentDetail(record: SubagentNameRecord, options: { sessi
   }
 
   if (blocks.length === 0 && record.task) {
-    blocks = [{ kind: "task", index: 0, prompt: record.task, at: record.createdAt, events: [] }];
+    blocks = [{ kind: "task", index: 0, prompt: record.task, at: record.createdAt, model, thinkingLevel, events: [] }];
   }
   if (blocks.length > 0 && !blocks[0].prompt && record.task) {
     blocks[0].prompt = record.task;
@@ -223,7 +260,8 @@ export function buildSubagentDetail(record: SubagentNameRecord, options: { sessi
   return {
     name: record.name,
     agent: record.agent,
-    model: record.model,
+    model,
+    thinkingLevel,
     tools: record.tools,
     createdAt: record.createdAt,
     sessionDir,

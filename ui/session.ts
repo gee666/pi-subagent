@@ -18,8 +18,8 @@ export function sessionFilesIn(sessionDir: string): string[] {
   }
 }
 
-export function readSessionMessages(file: string): unknown[] {
-  const messages: unknown[] = [];
+export function readSessionEntries(file: string): Record<string, unknown>[] {
+  const messages: Record<string, unknown>[] = [];
   let raw: string;
   try {
     raw = fs.readFileSync(file, "utf8");
@@ -34,7 +34,11 @@ export function readSessionMessages(file: string): unknown[] {
     } catch {
       continue;
     }
-    if (entry?.type === "message" && entry.message) messages.push(entry);
+    messages.push(entry);
   }
   return messages;
+}
+
+export function readSessionMessages(file: string): unknown[] {
+  return readSessionEntries(file).filter((entry) => entry.type === "message" && entry.message);
 }
