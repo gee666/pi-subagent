@@ -10,12 +10,12 @@
  */
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { createFauxCore, fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { createFauxCore, fauxAssistantMessage, normalizeContext } from "@earendil-works/pi-ai";
 import type {
   Api,
   AssistantMessageEvent,
   AssistantMessageEventStream,
-  Context,
+  TranscriptContext,
   Model,
   Provider,
   SimpleStreamOptions,
@@ -41,8 +41,8 @@ async function drain(stream: AssistantMessageEventStream): Promise<AssistantMess
   return events;
 }
 
-function userPrompt(text: string): Context {
-  return { messages: [{ role: "user", content: [{ type: "text", text }], timestamp: Date.now() }] };
+function userPrompt(text: string): TranscriptContext {
+  return normalizeContext({ messages: [{ role: "user", content: [{ type: "text", text }], timestamp: Date.now() }] });
 }
 
 const resumeModel = model(RESUME_PROVIDER, RESUME_MODEL_ID, "openai-responses");
@@ -119,7 +119,7 @@ describe("synthetic resume provider streamSimple", () => {
     };
     ctx.model = fallbackModel;
 
-    let received: { model: Model<Api>; context: Context; options?: SimpleStreamOptions } | undefined;
+    let received: { model: Model<Api>; context: TranscriptContext; options?: SimpleStreamOptions } | undefined;
     const fallbackCore = createFauxCore({
       api: "my-custom-api",
       provider: "custom-provider",

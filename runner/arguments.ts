@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentConfig } from "../agents.js";
 import { SUBAGENT_FALLBACK_MODEL_ENV } from "./constants.js";
+import { childExtensionArgs, excludedExtensions } from "./extension-policy.js";
 function resolveExtensionArg(value: string): string {
   if (!value) return value;
   if (value.startsWith("npm:") || value.startsWith("git:")) return value;
@@ -202,6 +203,12 @@ function parseInheritedCliArgs(argv: string[]): InheritedCliArgs {
 /** Cached once — process.argv is immutable at runtime */
 const _inheritedCliArgs = parseInheritedCliArgs(process.argv);
 
+export async function resolveChildExtensionArgs(cwd: string, projectTrusted?: boolean): Promise<string[] | undefined> {
+  const excludes = excludedExtensions();
+  if (excludes.length === 0) return undefined;
+  return childExtensionArgs(_inheritedCliArgs.extensionArgs, cwd, projectTrusted, excludes);
+}
+
 export function resolveSubagentModel(agentModel?: string, currentParentModel?: string): string | undefined {
   // The active parent model is authoritative. Agent frontmatter is retained as
   // a compatibility fallback only for callers that cannot supply live context.
@@ -219,6 +226,7 @@ export function buildPiArgs(
   fallbackModelOverride?: string,
   rawPrompt = false,
   selection?: { provider: string; model: string; thinking: string },
+  extensionArgsOverride?: string[],
 ): { args: string[]; prompt: string } {
   // A Jev-selected provider must not inherit a conflicting provider or its CLI credential.
   const proxyArgs = selection
@@ -227,7 +235,15 @@ export function buildPiArgs(
           !["--provider", "--api-key"].includes(arg) && !["--provider", "--api-key"].includes(args[index - 1]),
       )
     : _inheritedCliArgs.alwaysProxy;
-  const args: string[] = ["--mode", "rpc", ..._inheritedCliArgs.extensionArgs, ...proxyArgs];
+  const args: string[] = [
+    "--mode",
+    "rpc",
+    ...(extensionArgsOverride ? [] : _inheritedCliArgs.extensionArgs),
+    ...proxyArgs,
+  ];
+  // Keep the resolved trust decision after forwarded startup flags. Extension filtering
+  // must never interpret another flag's value (such as a prompt or credential) as a flag.
+  if (extensionArgsOverride) args.push(...extensionArgsOverride);
 
   if (sessionDir) args.push("--session-dir", sessionDir);
   if (resumeSession) args.push("--continue");

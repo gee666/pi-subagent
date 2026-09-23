@@ -7,7 +7,7 @@ import {
   STARTUP_RETRY_BASE_BACKOFF_MS,
 } from "./constants.js";
 import type { RunAgentOptions } from "./options.js";
-import { buildPiArgs } from "./arguments.js";
+import { buildPiArgs, resolveChildExtensionArgs } from "./arguments.js";
 import { writePromptToTempFile, cleanupTempDir, sessionDirExists } from "./files.js";
 import { appendBoundedStderr, priorDescendantUsage, endedWithSyntheticResumeFailure } from "./result.js";
 import { runAttempt } from "./attempt.js";
@@ -112,6 +112,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
   }
 
   try {
+    const extensionArgs = await resolveChildExtensionArgs(opts.cwd, opts.projectTrusted);
     const selection = await selectSmartDecision(
       opts.smartDecision,
       { systemPrompt: agent.systemPrompt, task },
@@ -137,6 +138,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       fallbackModel,
       opts.rawPrompt === true,
       selection,
+      extensionArgs,
     );
     const prompt =
       result.budget && readBudget(result.budget).limit > 0

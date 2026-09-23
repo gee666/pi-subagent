@@ -46,6 +46,7 @@ export async function executeSingle(
   try {
     result = await runAgentSubprocess({
       cwd: defaultCwd,
+      projectTrusted: state.latestSessionCtx?.cwd === defaultCwd && state.latestSessionCtx.isProjectTrusted(),
       agents,
       agentName,
       task,
@@ -149,7 +150,12 @@ export async function executeParallel(
           updateLatestBroadcastTargets(state, undefined);
         }
       },
-      { ...extras, namesFile: state.currentNamesFile || undefined, smartDecision: state.smartDecision },
+      {
+        ...extras,
+        namesFile: state.currentNamesFile || undefined,
+        smartDecision: state.smartDecision,
+        projectTrusted: state.latestSessionCtx?.cwd === defaultCwd && state.latestSessionCtx.isProjectTrusted(),
+      },
     );
   } finally {
     for (const id of taskIds.values()) state.activeSubagents.delete(id);

@@ -1,6 +1,7 @@
 import { SessionManager, type ExtensionContext, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage, ToolResultMessage, UserMessage } from "@earendil-works/pi-ai";
 import { buildSubagentDetails, emptyUsage, type SingleResult } from "../../types.js";
+import { serializedDetails } from "../helpers/json.js";
 
 type FixtureMessage =
   | Pick<AssistantMessage, "role" | "content" | "stopReason" | "timestamp" | "errorMessage">
@@ -84,7 +85,7 @@ export function subagentToolResult(
       toolName: "subagent",
       toolCallId,
       content: [{ type: "text", text: "aborted" }],
-      details,
+      details: serializedDetails(details),
       isError,
       timestamp: Date.now(),
     },

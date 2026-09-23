@@ -40,6 +40,7 @@ export async function executeParallelSubprocess(
     namesFile?: string;
     budgets?: Array<SubagentBudget | undefined>;
     smartDecision?: RunAgentOptions["smartDecision"];
+    projectTrusted?: boolean;
   },
 ): Promise<{
   content: Array<{ type: "text"; text: string }>;
@@ -123,6 +124,7 @@ export async function executeParallelSubprocess(
       try {
         result = await runAgentSubprocess({
           cwd: defaultCwd,
+          projectTrusted: extras?.projectTrusted,
           agents,
           agentName: t.agent,
           task: t.task,

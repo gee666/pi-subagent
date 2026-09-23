@@ -127,7 +127,11 @@ export function registerResumeProvider(state: ExtensionState): void {
         if (plans.length > 0 && phase === "tool" && triggerMatches) {
           resume.phase = "final";
           const toolCalls = plans.map((plan, index) =>
-            fauxToolCall(SUBAGENT_TOOL_NAME, { tasks: plan.tasks }, { id: `resume_subagent_${Date.now()}_${index}` }),
+            fauxToolCall(
+              SUBAGENT_TOOL_NAME,
+              { tasks: plan.tasks.map((task) => ({ ...task })) },
+              { id: `resume_subagent_${Date.now()}_${index}` },
+            ),
           );
           resumeCore.setResponses([() => fauxAssistantMessage(toolCalls, { stopReason: "toolUse" })]);
           const stream = resumeCore.streamSimple(model, context, options);

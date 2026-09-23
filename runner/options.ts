@@ -17,6 +17,8 @@ export type RunningSubagentStartedCallback = (handle: RunningSubagentHandle) => 
 export interface RunAgentOptions {
   /** Working directory inherited by every subagent process. */
   cwd: string;
+  /** Effective trust for this cwd; absent SDK callers fail closed. */
+  projectTrusted?: boolean;
   /** All available agent configs. */
   agents: AgentConfig[];
   /** Name of the agent to run. */

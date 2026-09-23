@@ -13,6 +13,7 @@ import type {
 import subagentExtension from "../../index.js";
 import { buildSubagentDetails, isSubagentDetails, type SubagentDetails } from "../../types.js";
 import { makeResult } from "./results.js";
+import { serializedDetails } from "./json.js";
 
 /** A partial host double, not a full host implementation. Unexpected API access fails immediately. */
 export function hostDouble<T extends object>(members: Partial<T>): T {
@@ -73,7 +74,7 @@ export function resumeBranch(finished = false): SessionEntry[] {
         toolName: "subagent",
         toolCallId: "call-1",
         content: [{ type: "text", text: finished ? "done" : "aborted" }],
-        details: buildSubagentDetails("parallel", "spawn", null, results),
+        details: serializedDetails(buildSubagentDetails("parallel", "spawn", null, results)),
         isError: !finished,
         timestamp: Date.now(),
       },
@@ -94,7 +95,17 @@ const defaults = {
     type: "before_agent_start",
     prompt: "",
     systemPrompt: "base",
-    systemPromptOptions: { cwd: process.cwd() },
+    systemPromptOptions: {
+      cwd: process.cwd(),
+      selectedTools: [],
+      toolSnippets: {},
+      toolGuidelines: {},
+      promptGuidelines: [],
+      appendSystemPrompt: "",
+      sections: {},
+      contextFiles: [],
+      skills: [],
+    },
   },
 } satisfies {
   [K in "session_start" | "session_shutdown" | "session_tree" | "message_end" | "before_agent_start"]: EventOf<K>;

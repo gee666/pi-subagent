@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { subagentDisabled } from "./runner/extension-policy.js";
 import { registerSessionEvents } from "./extension/events.js";
 import { registerSubagentExpandCommand } from "./extension/expand-command.js";
 import { registerPromptHook } from "./extension/prompt-hook.js";
@@ -12,6 +13,7 @@ export { getSubagentsToolDescription } from "./extension/prompts.js";
 export { collectCombinedUsageStatusLine, collectLiveUsageSummary } from "./extension/usage.js";
 
 export default function (pi: ExtensionAPI): void {
+  if (subagentDisabled()) return;
   pi.registerFlag("subagent-max-depth", {
     description: "Maximum allowed subagent delegation depth (default: 3).",
     type: "string",
