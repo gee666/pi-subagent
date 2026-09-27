@@ -111,9 +111,9 @@ Collapsed results show each child's name, task, status, and most recent activity
 | T | Current turn's tool list |
 | Up / Down, Enter | Select and open a tool or nested child |
 | C | Children across all turns |
-| Esc | Return to the parent view |
+| Esc | Back one level: tool detail, tools/children, parent subagent, then the searchable list. From the list or a directly named subagent, close. |
 | /, n, N | Search, next match, previous match |
-| q | Close |
+| q | Close from any transcript view |
 
 While workers run, steering input can be broadcast to selected names, including nested paths such as `John > Maria`. Only inputs marked as streaming `steer` open the routing prompt. Idle prompts and queued follow-ups remain with the parent.
 

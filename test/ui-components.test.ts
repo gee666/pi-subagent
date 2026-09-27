@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { SubagentPager, SubagentPicker, filterPickerItems } from "../overlay.js";
+import { SubagentExpandView } from "../ui/expand-view.js";
 import type { SubagentDetail } from "../detail.js";
 
 const theme = {
@@ -49,6 +50,87 @@ test("picker ranks names first without duplicate entries and accepts a selection
   picker.handleInput("John");
   picker.handleInput("\r");
   assert.equal(picked, "John");
+});
+
+test("expand view backs through nested children to the filtered list, while q closes", () => {
+  const nested = (name: string, child?: string): SubagentDetail => ({
+    ...detail,
+    name,
+    agent: "writer",
+    blocks: [
+      {
+        kind: "task",
+        index: 0,
+        prompt: `${name} task`,
+        events: child
+          ? [
+              {
+                type: "children",
+                toolName: "subagents",
+                children: [{ name: child, agent: "writer", task: "work", status: "success" }],
+              },
+            ]
+          : [],
+      },
+    ],
+  });
+  const details = [nested("Olga", "Maria"), nested("Maria", "Nina"), nested("Nina")];
+  let closes = 0;
+  const view = new SubagentExpandView({
+    items: [
+      { name: "Olga", agent: "writer" },
+      { name: "Other", agent: "writer" },
+    ],
+    resolveDetail: (name) => details.find((item) => item.name === name),
+    theme,
+    getRows: () => 30,
+    requestRender: () => {},
+    onClose: () => {
+      closes++;
+    },
+  });
+  const screen = () => view.render(100).join("\n");
+  view.handleInput("Olg");
+  assert.match(screen(), /Expand subagent \(1\/2\)/);
+  view.handleInput("\r");
+  assert.match(screen(), /Olga \(writer\).*turn 1\/1/);
+  view.handleInput("C");
+  view.handleInput("\r"); // Maria
+  view.handleInput("C");
+  view.handleInput("\r"); // Nina
+  assert.match(screen(), /Nina \(writer\).*turn 1\/1/);
+  view.handleInput("\u001b"); // Maria
+  assert.match(screen(), /Maria \(writer\).*turn 1\/1/);
+  view.handleInput("\u001b"); // Olga
+  assert.match(screen(), /Olga \(writer\).*turn 1\/1/);
+  view.handleInput("\u001b"); // filtered picker
+  assert.match(screen(), /Expand subagent \(1\/2\)/);
+  assert.match(screen(), /Search:.*Olg/);
+  assert.equal(closes, 0);
+  view.handleInput("\r");
+  view.handleInput("C");
+  view.handleInput("\r"); // q closes even from Maria, without returning to Olga or the list
+  view.handleInput("q");
+  assert.equal(closes, 1);
+});
+
+test("direct expansion closes on root Esc and picker Esc cancels", () => {
+  for (const direct of [true, false]) {
+    let closes = 0;
+    const view = new SubagentExpandView({
+      items: [{ name: "Olga", agent: "writer" }],
+      detail: direct ? { ...detail, name: "Olga" } : undefined,
+      resolveDetail: () => undefined,
+      theme,
+      getRows: () => 30,
+      requestRender: () => {},
+      onClose: () => {
+        closes++;
+      },
+    });
+    view.handleInput("\u001b");
+    assert.equal(closes, 1);
+  }
 });
 
 test("pager invalidation rebuilds lines with the current theme", () => {

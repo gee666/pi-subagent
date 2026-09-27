@@ -23,6 +23,7 @@ export interface PagerOptions {
   theme: DetailTheme;
   requestRender: () => void;
   onClose: () => void;
+  onBack?: () => void;
 }
 
 export class PagerView {
@@ -190,8 +191,8 @@ export class PagerView {
     if (this.status) return `${this.status}   n/N next/previous • / new search`;
     const position = `${this.scroll + 1}-${Math.min(this.lines.length, this.scroll + this.viewport)}/${this.lines.length}`;
     if (this.mode === "turn") {
-      const back = this.parentStack.length > 0 ? "Esc parent" : "Esc close";
-      return `${position}   ←/→ turn • T tools • C children • / search • ${back}`;
+      const back = this.parentStack.length > 0 ? "Esc parent" : this.options.onBack ? "Esc list" : "Esc close";
+      return `${position}   ←/→ turn • T tools • C children • / search • ${back} • q close`;
     }
     if (this.mode === "tools")
       return `${position}   ↑/↓ row • Enter inspect/expand child • / search • Esc back • q close`;

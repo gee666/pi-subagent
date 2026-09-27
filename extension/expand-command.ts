@@ -1,6 +1,7 @@
 import { buildSubagentDetail, findNameRecord, type SubagentDetail } from "../detail.js";
 import { readNamesRegistry, type NamesRegistry, type SubagentNameRecord } from "../names.js";
-import { SubagentPager, SubagentPicker, filterPickerItems, type PickerItem } from "../overlay.js";
+import { filterPickerItems, type PickerItem } from "../overlay.js";
+import { SubagentExpandView } from "../ui/expand-view.js";
 import type { SessionContext } from "./contracts.js";
 import type { ExtensionState } from "./state.js";
 
@@ -66,63 +67,43 @@ export function registerSubagentExpandCommand(state: ExtensionState): void {
         return;
       }
 
-      let record = name ? findNameRecord(registry, name) : undefined;
-      if (!record) {
-        if (name) {
-          const suggestions = filterPickerItems(
-            sortedRecords.map((item) => ({ name: item.name, agent: item.agent, task: item.task })),
-            name,
-          )
-            .slice(0, 10)
-            .map((item) => item.name);
-          ctx.ui.notify(
-            `Unknown subagent "${name}".${suggestions.length > 0 ? ` Did you mean: ${suggestions.join(", ")}?` : ""}`,
-            "error",
-          );
-          return;
-        }
-        // A delegation tree can hold hundreds of names, so the chooser is a
-        // searchable overlay rather than a flat select list.
-        const picked = await ctx.ui.custom(
-          (tui, theme, _keybindings, done: (value: string | undefined) => void) =>
-            new SubagentPicker({
-              items: sortedRecords.map((item) => ({ name: item.name, agent: item.agent, task: item.task })),
-              getRows: () => tui?.terminal?.rows ?? 30,
-              theme,
-              requestRender: () => tui?.requestRender?.(),
-              onPick: (value) => done(value),
-            }),
-          {
-            overlay: true,
-            overlayOptions: { anchor: "center", width: "80%", maxHeight: "90%", margin: 1 },
-          },
+      const record = name ? findNameRecord(registry, name) : undefined;
+      if (!record && name) {
+        const suggestions = filterPickerItems(
+          sortedRecords.map((item) => ({ name: item.name, agent: item.agent, task: item.task })),
+          name,
+        )
+          .slice(0, 10)
+          .map((item) => item.name);
+        ctx.ui.notify(
+          `Unknown subagent "${name}".${suggestions.length > 0 ? ` Did you mean: ${suggestions.join(", ")}?` : ""}`,
+          "error",
         );
-        if (!picked) return;
-        record = findNameRecord(registry, picked);
-        if (!record) return;
-      }
-
-      let detail: SubagentDetail;
-      try {
-        detail = buildSubagentDetail(record, { sessionDir: resolveDetailSessionDir(state, record) });
-      } catch (err) {
-        ctx.ui.notify(`Failed to read subagent session: ${err instanceof Error ? err.message : String(err)}`, "error");
         return;
       }
 
+      const resolveDetail = (selectedName: string): SubagentDetail | undefined => {
+        const selected = findNameRecord(registry, selectedName);
+        if (!selected) return undefined;
+        try {
+          return buildSubagentDetail(selected, { sessionDir: resolveDetailSessionDir(state, selected) });
+        } catch (err) {
+          ctx.ui.notify(
+            `Failed to read subagent session: ${err instanceof Error ? err.message : String(err)}`,
+            "error",
+          );
+          return undefined;
+        }
+      };
+      const detail = record ? resolveDetail(record.name) : undefined;
+      if (record && !detail) return;
+
       await ctx.ui.custom(
         (tui, theme, _keybindings, done: (value: void) => void) =>
-          new SubagentPager({
+          new SubagentExpandView({
+            items: sortedRecords.map((item) => ({ name: item.name, agent: item.agent, task: item.task })),
             detail,
-            resolveDetail: (childName) => {
-              const childRecord = findNameRecord(registry, childName);
-              if (!childRecord) return undefined;
-              try {
-                return buildSubagentDetail(childRecord, { sessionDir: resolveDetailSessionDir(state, childRecord) });
-              } catch {
-                return undefined;
-              }
-            },
+            resolveDetail,
             getRows: () => tui?.terminal?.rows ?? 30,
             theme,
             requestRender: () => tui?.requestRender?.(),

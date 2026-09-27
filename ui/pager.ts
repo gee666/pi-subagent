@@ -28,7 +28,7 @@ export class SubagentPager extends PagerView {
         this.childIndex = 0;
         this.resetView();
       } else {
-        this.options.onClose();
+        (this.options.onBack ?? this.options.onClose)();
       }
       this.options.requestRender();
       return;

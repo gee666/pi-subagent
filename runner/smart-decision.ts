@@ -2,6 +2,7 @@ type Selection = { provider: string; model: string; thinking: string };
 
 export interface SmartDecisionConfig {
   readonly fallback: boolean;
+  readonly timeoutSeconds: number;
   readonly invalid?: boolean;
   readonly model: string;
   readonly apiKey: string;
@@ -59,6 +60,7 @@ export function parseSmartDecisionConfig(value: unknown): SmartDecisionConfig | 
   const invalid = (): SmartDecisionConfig => ({
     fallback: value.fallback !== false,
     invalid: true,
+    timeoutSeconds: 1200,
     model: "",
     apiKey: "",
     providerUrl: DEFAULT_PROVIDER_URL,
@@ -67,6 +69,14 @@ export function parseSmartDecisionConfig(value: unknown): SmartDecisionConfig | 
   if (!nonempty(value.model) || !nonempty(value.api_key) || !Array.isArray(value.use_models)) return invalid();
   const providerUrl = parseProviderUrl(value.provider_url);
   if (!providerUrl) return invalid();
+  const timeoutSeconds = value.timeout_seconds === undefined ? 1200 : value.timeout_seconds;
+  if (
+    typeof timeoutSeconds !== "number" ||
+    !Number.isFinite(timeoutSeconds) ||
+    timeoutSeconds < 0.001 ||
+    timeoutSeconds > 2_147_483.647
+  )
+    return invalid();
   const candidates: (Selection & { key: string; description: string })[] = [];
   const seen = new Set<string>();
   let count = 0;
@@ -86,6 +96,7 @@ export function parseSmartDecisionConfig(value: unknown): SmartDecisionConfig | 
   const model = value.model.trim();
   return {
     fallback: value.fallback !== false,
+    timeoutSeconds,
     model: model === "jev" ? "jev-latest" : model,
     apiKey: value.api_key.trim(),
     providerUrl,
@@ -109,7 +120,7 @@ export async function selectSmartDecision(
   });
   controller.signal.addEventListener("abort", rejectAborted, { once: true });
   signal?.addEventListener("abort", cancel, { once: true });
-  const timer = setTimeout(cancel, 10_000);
+  const timer = setTimeout(cancel, config.timeoutSeconds * 1000);
 
   try {
     if (config.invalid || !config.candidates.length) throw new Error("Invalid smart-decision settings");

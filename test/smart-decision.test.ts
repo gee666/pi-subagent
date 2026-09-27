@@ -127,7 +127,7 @@ test("the timeout bounds stalled requests and response bodies in both fallback m
   const warnings = t.mock.method(console, "warn", () => {});
   const fetch = t.mock.method(globalThis, "fetch", async () => new Promise<Response>(() => {}));
   const pending = selectSmartDecision(config, state);
-  t.mock.timers.tick(10_000);
+  t.mock.timers.tick(1_200_000);
   assert.equal(await pending, undefined);
   assert.equal(warnings.mock.callCount(), 1);
   fetch.mock.mockImplementation(async () => {
@@ -138,6 +138,6 @@ test("the timeout bounds stalled requests and response bodies in both fallback m
   const strict = selectSmartDecision({ ...config, fallback: false }, state);
   const rejected = assert.rejects(strict, /Fallback is disabled/);
   await Promise.resolve();
-  t.mock.timers.tick(10_000);
+  t.mock.timers.tick(1_200_000);
   await rejected;
 });

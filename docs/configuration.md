@@ -63,6 +63,7 @@ Optionally let TypeSafe's Jev choose a model for each subagent task. Add this se
   "smart-decision": {
     "enabled": true,
     "fallback": true,
+    "timeout_seconds": 1200,
     "model": "jev",
     "provider_url": "https://api.typesafe.ai",
     "api_key": "YOUR_TYPESAFE_API_KEY",
@@ -80,9 +81,10 @@ Replace the example choices with models available in your Pi installation. Each 
 
 - `enabled` must be `true`. Missing settings, disabled settings, or an empty model list leave existing behavior unchanged and make no Jev requests.
 - `model` selects the decision model, not the worker model. `jev` maps to TypeSafe's `jev-latest`; explicit TypeSafe model IDs also work.
+- `timeout_seconds` defaults to `1200` seconds and bounds the whole Jev request, including reading the response body. Set a number from `0.001` to `2147483.647` seconds. Invalid values follow the `fallback` policy.
 - `provider_url` is the provider base URL, defaulting to `https://api.typesafe.ai`. For a local compatible server, use `http://localhost:8765`. The extension appends `/v1/systemone`; trailing slashes are ignored. Use an HTTP or HTTPS URL without credentials, query parameters, or a fragment.
 - `api_key` is your TypeSafe API key. Worker providers still need their own Pi credentials.
-- `fallback` defaults to `true`. When a loaded `smart-decision` object omits it, the extension adds `"fallback": true` and saves that configuration file at runtime. Existing values, including `false`, are left untouched. Untrusted project files are never changed. If saving fails, a warning is emitted and the runtime default still applies. If selection fails, a short warning is written and the worker uses the original launch settings. Set it to `false` to return a tool error without launching the affected worker. This covers network errors, the 10-second request timeout, API errors, invalid answers, and invalid enabled configuration. Cancellation cancels the task instead of falling back.
+- `fallback` defaults to `true`. When a loaded `smart-decision` object omits it, the extension adds `"fallback": true` and saves that configuration file at runtime. Existing values, including `false`, are left untouched. Untrusted project files are never changed. If saving fails, a warning is emitted and the runtime default still applies. If selection fails, a short warning is written and the worker uses the original launch settings. Set it to `false` to return a tool error without launching the affected worker. This covers network errors, the configured request timeout, API errors, invalid answers, and invalid enabled configuration. Cancellation cancels the task instead of falling back.
 
 Each fresh launch and actual resume sends the agent definition's system prompt, the assigned task, and the candidate descriptions to `<provider_url>/v1/systemone`. Jev must select a configured candidate. When a task refers to a separate task-description or handoff file whose contents were not supplied, Jev is instructed to assume higher complexity and prefer a more capable model or higher reasoning level. It does not read that file. Mentioning a source filename alone does not trigger this guidance. Its provider, model, and thinking level override the parent model and agent frontmatter for that run. The parent's explicit `--provider` and `--api-key` are not forwarded when a Jev choice is applied. Startup retries reuse the choice. Finished results reused without launching a process make no request.
 
