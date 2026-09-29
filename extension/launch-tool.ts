@@ -1,5 +1,6 @@
 import { createIntelligenceSchemas, validatePreparedArguments } from "./schemas.js";
 import { selectIntelligence } from "../intelligence.js";
+import { resolveLaunchModelSettings } from "../runner/arguments.js";
 import * as path from "node:path";
 import { discoverAgents } from "../agents.js";
 import {
@@ -218,10 +219,11 @@ export function registerSubagentsTool(state: ExtensionState) {
                       agent: task.agent,
                       task: task.task,
                       budget: budgets[index],
-                      model: preset
-                        ? `${preset.provider}/${preset.model}`
-                        : (formatModelFlag(getParentModelForSubagent(state, ctx)) ?? agentConfig?.model),
-                      intelligence: preset?.name,
+                      ...resolveLaunchModelSettings(
+                        agentConfig ?? {},
+                        formatModelFlag(getParentModelForSubagent(state, ctx)),
+                        preset,
+                      ),
                       tools: agentConfig?.tools,
                       sessionDir:
                         resumePlan?.details?.results[index]?.sessionDir ??

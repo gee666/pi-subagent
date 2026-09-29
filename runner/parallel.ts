@@ -41,6 +41,7 @@ export async function executeParallelSubprocess(
     namesFile?: string;
     budgets?: Array<SubagentBudget | undefined>;
     intelligencePresets?: RunAgentOptions["intelligencePresets"];
+    resumeSettings?: Array<NonNullable<RunAgentOptions["resumeSettings"]>>;
     projectTrusted?: boolean;
   },
 ): Promise<{
@@ -69,7 +70,9 @@ export async function executeParallelSubprocess(
     if (previous && isResultSuccess(previous)) return previous;
     let intelligence: string | undefined;
     try {
-      intelligence = selectIntelligence(extras?.intelligencePresets, t.intelligence)?.name;
+      intelligence = extras?.resumeSettings
+        ? extras.resumeSettings[index].intelligence
+        : selectIntelligence(extras?.intelligencePresets, t.intelligence)?.name;
     } catch {
       // Let the single runner report invalid selections as aligned task failures.
     }
@@ -155,6 +158,7 @@ export async function executeParallelSubprocess(
           fallbackModel,
           intelligence: t.intelligence,
           intelligencePresets: extras?.intelligencePresets,
+          resumeSettings: extras?.resumeSettings?.[index],
           onHandle: (handle) => onHandleForTask?.(index, t, handle),
           onUpdate: (partial) => {
             if (partial.details?.results[0]) {

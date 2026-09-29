@@ -62,7 +62,9 @@ export interface RunAgentOptions {
   initialResult?: SingleResult;
   /** Fallback model to use when the agent config does not pin one. */
   fallbackModel?: string;
-  /** Caller-selected preset for this launch or resume. Omission keeps existing defaults. */
+  /** Original settings for a named resume. Even an empty object bypasses current presets/defaults. */
+  resumeSettings?: import("../storage/name-records.js").SubagentModelSettings;
+  /** Caller-selected preset for a launch. Omission keeps existing defaults. */
   intelligence?: string;
   /** Valid presets loaded from trusted configuration. */
   intelligencePresets?: IntelligencePreset[];

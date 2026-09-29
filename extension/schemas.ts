@@ -77,26 +77,19 @@ export function createIntelligenceSchemas(presets: IntelligencePreset[] = []) {
       {
         enum: presets.map((preset) => preset.name),
         description: [
-          "Required named model/provider/reasoning preset. Choose a configured preset for every launch and resume.",
+          "Required named model/provider/reasoning preset. Choose a configured preset for every launch.",
+          "Use the cheapest capable preset; juniors suit simple repetitive work, pricier models suit complex tasks.",
           ...presets.map((preset) => `${preset.name}${preset.description ? `: ${preset.description}` : ""}`),
         ].join("\n"),
       },
     ),
   };
   const task = Type.Object({ ...TaskItem.properties, ...intelligence }, { additionalProperties: false });
-  const resume = Type.Object({ ...ResumeItem.properties, ...intelligence }, { additionalProperties: false });
   const subagents = Type.Object(
     { tasks: Type.Array(task, { minItems: 1, description: SubagentParams.properties.tasks.description }) },
     { additionalProperties: false },
   );
-  const resumes = Type.Object(
-    {
-      resumes: Type.Union([Type.Array(resume, { minItems: 1 }), resume], {
-        description: ResumeSubagentsParams.properties.resumes.description,
-      }),
-    },
-    { additionalProperties: false },
-  );
+  const resumes = ResumeSubagentsParams;
   return presets.length >= 2 && intelligenceEnabled(presets)
     ? { subagents, resumes }
     : {
@@ -105,18 +98,16 @@ export function createIntelligenceSchemas(presets: IntelligencePreset[] = []) {
       };
 }
 
-export function normalizeResumes(
-  raw: unknown,
-): Array<{ name: string; task: string; intelligence?: string; max_subagents_allowed?: number }> {
+export function normalizeResumes(raw: unknown): Array<{ name: string; task: string; max_subagents_allowed?: number }> {
   const items = Array.isArray(raw) ? raw : raw && typeof raw === "object" ? [raw] : [];
-  const normalized: Array<{ name: string; task: string; intelligence?: string; max_subagents_allowed?: number }> = [];
+  const normalized: Array<{ name: string; task: string; max_subagents_allowed?: number }> = [];
   for (const item of items) {
     if (!isRecord(item)) continue;
     const name =
       typeof item.subagent === "string" ? item.subagent : typeof item.name === "string" ? item.name : undefined;
     const task = typeof item.task === "string" ? item.task : typeof item.prompt === "string" ? item.prompt : undefined;
-    if (item.intelligence !== undefined && typeof item.intelligence !== "string") {
-      throw new Error("Resume intelligence must be a configured preset name.");
+    if (Object.hasOwn(item, "intelligence")) {
+      throw new Error("Resume does not accept intelligence; it retains the original run settings.");
     }
     if (item.max_subagents_allowed !== undefined && !isBranchBudgetAmount(item.max_subagents_allowed)) {
       throw new SubagentBudgetError(
@@ -127,16 +118,15 @@ export function normalizeResumes(
       normalized.push({
         name,
         task,
-        ...(item.intelligence !== undefined ? { intelligence: item.intelligence } : {}),
         ...(item.max_subagents_allowed !== undefined ? { max_subagents_allowed: item.max_subagents_allowed } : {}),
       });
   }
   return normalized;
 }
 
-/** Normalize provider nulls to omission. Exposed choices still fail required-field validation. */
+/** Normalize launch provider nulls to omission. Named resumes never accept intelligence. */
 export function prepareIntelligenceArguments(args: unknown, key: "tasks" | "resumes"): unknown {
-  if (!isRecord(args) || !Object.hasOwn(args, key)) return args;
+  if (key === "resumes" || !isRecord(args) || !Object.hasOwn(args, key)) return args;
   const omitNull = (item: unknown): unknown => {
     if (!isRecord(item) || item.intelligence !== null) return item;
     const { intelligence: _intelligence, ...rest } = item;

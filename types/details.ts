@@ -80,6 +80,7 @@ export function compactSingleResultForDurableDetails(result: SingleResult): Sing
     ...(result.stopReason !== undefined ? { stopReason: result.stopReason } : {}),
     ...(result.errorMessage !== undefined ? { errorMessage: result.errorMessage } : {}),
     ...(result.model !== undefined ? { model: result.model } : {}),
+    ...(result.thinking !== undefined ? { thinking: result.thinking } : {}),
     ...(result.sessionDir !== undefined ? { sessionDir: result.sessionDir } : {}),
     ...(result.budget !== undefined ? { budget: result.budget } : {}),
     ...(result.sessionId !== undefined ? { sessionId: result.sessionId } : {}),

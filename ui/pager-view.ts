@@ -1,4 +1,5 @@
 import { overlayFrame } from "./frame.js";
+import { displayIntelligence } from "../intelligence.js";
 import { stripTerminalSequences } from "@earendil-works/pi-tui";
 import {
   TOOL_LIST_HEADER_LINES,
@@ -183,7 +184,10 @@ export class PagerView {
           : this.mode === "children"
             ? "children"
             : `${turn} • tool ${this.selectedToolIndex() + 1}`;
-    return `${this.detail.name} (${this.detail.agent}) • ${suffix}`;
+    const agent = this.detail.intelligence
+      ? `${displayIntelligence(this.detail.intelligence)}/${this.detail.agent}`
+      : this.detail.agent;
+    return `${this.detail.name} (${agent}) • ${suffix}`;
   }
 
   protected footer(): string {

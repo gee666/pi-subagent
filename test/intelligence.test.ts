@@ -98,13 +98,12 @@ test("zero, sole, multiple, and disabled presets expose only actual caller choic
   ] as const) {
     process.env.PI_SUBAGENT_INTELLIGENCE = enabled;
     const schemas = createIntelligenceSchemas([...configured]);
-    for (const schema of Object.values(schemas)) {
-      assert.equal(JSON.stringify(schema).includes('"intelligence"'), exposed);
-    }
+    assert.equal(JSON.stringify(schemas.subagents).includes('"intelligence"'), exposed);
+    assert.equal(JSON.stringify(schemas.resumes).includes('"intelligence"'), false);
+    assert.deepEqual(validatePreparedArguments(schemas.resumes, { resumes: [resume] }), { resumes: [resume] });
     assert.equal(selectIntelligence([...configured], undefined)?.name, automatic);
     if (exposed) {
       assert.throws(() => validatePreparedArguments(schemas.subagents, { tasks: [task] }));
-      assert.throws(() => validatePreparedArguments(schemas.resumes, { resumes: [resume] }));
     } else {
       assert.deepEqual(validatePreparedArguments(schemas.subagents, { tasks: [task] }), { tasks: [task] });
       assert.deepEqual(validatePreparedArguments(schemas.resumes, { resumes: [resume] }), { resumes: [resume] });
@@ -124,18 +123,23 @@ test("zero, sole, multiple, and disabled presets expose only actual caller choic
   );
 });
 
-test("dynamic launch and resume schemas list names and descriptions and reject unknown choices", () => {
+test("only launch schemas list intelligence choices; resumes reject any choice", () => {
   const schemas = createIntelligenceSchemas(presets);
   const task = { agent: "worker", task: "work", max_subagents_allowed: 0, intelligence: "junior" };
-  const resume = { subagent: "John", task: "follow up", intelligence: "my arbitrary preset" };
+  const resume = { subagent: "John", task: "follow up" };
   const field = schemas.subagents.properties.tasks.items.properties.intelligence;
   assert.deepEqual(field.enum, ["junior", "my arbitrary preset"]);
   assert.match(field.description!, /junior: Small changes/);
   assert.match(field.description!, /Required/);
+  assert.ok(
+    field.description!.includes(
+      "Use the cheapest capable preset; juniors suit simple repetitive work, pricier models suit complex tasks.",
+    ),
+  );
   assert.ok(schemas.subagents.properties.tasks.items.required?.includes("intelligence"));
   for (const alternative of schemas.resumes.properties.resumes.anyOf) {
     const item = alternative.type === "array" ? alternative.items : alternative;
-    assert.ok(item.required?.includes("intelligence"));
+    assert.equal(Object.hasOwn(item.properties, "intelligence"), false);
   }
   assert.deepEqual(validatePreparedArguments(schemas.subagents, { tasks: [task] }), { tasks: [task] });
   for (const resumes of [resume, [resume]])
@@ -143,17 +147,21 @@ test("dynamic launch and resume schemas list names and descriptions and reject u
   assert.throws(() => validatePreparedArguments(schemas.subagents, { tasks: [{ ...task, intelligence: "missing" }] }));
   assert.throws(() => validatePreparedArguments(schemas.resumes, { resumes: { ...resume, intelligence: 7 } }));
   assert.throws(() => validatePreparedArguments(createIntelligenceSchemas().subagents, { tasks: [task] }));
-  assert.throws(() => validatePreparedArguments(createIntelligenceSchemas().resumes, { resumes: resume }));
+  assert.deepEqual(validatePreparedArguments(createIntelligenceSchemas().resumes, { resumes: resume }), {
+    resumes: resume,
+  });
   assert.deepEqual(normalizeResumes([resume])[0], {
     name: "John",
     task: "follow up",
-    intelligence: "my arbitrary preset",
   });
   assert.deepEqual(prepareResumeArguments(resume), { resumes: [resume] });
-  assert.throws(() => normalizeResumes([{ ...resume, intelligence: 7 }]), /preset name/);
+  for (const intelligence of ["junior", "missing", null, 7]) {
+    assert.throws(() => normalizeResumes([{ ...resume, intelligence }]), /does not accept intelligence/);
+    assert.throws(() => validatePreparedArguments(schemas.resumes, { resumes: { ...resume, intelligence } }));
+  }
 });
 
-test("exposed choices reject omission and null on every launch and resume, including mixed batches", () => {
+test("launches require choices; resumes allow omission and reject null, including mixed batches", () => {
   const schemas = createIntelligenceSchemas(presets);
   const task = { agent: "worker", task: "work", max_subagents_allowed: 0 };
   const resume = { subagent: "John", task: "follow up" };
@@ -170,7 +178,7 @@ test("exposed choices reject omission and null on every launch and resume, inclu
       assert.throws(() => validatePreparedArguments(schemas.subagents, prepareIntelligenceArguments(args, "tasks")));
       assert.deepEqual(args, snapshot);
     }
-    const invalidResume = { ...resume, ...missing };
+    const invalidResume = { ...resume, intelligence: null };
     for (const args of [
       invalidResume,
       { resumes: invalidResume },
@@ -179,18 +187,13 @@ test("exposed choices reject omission and null on every launch and resume, inclu
       { resumes: [invalidResume, { ...resume, intelligence: "junior" }] },
     ]) {
       const snapshot = structuredClone(args);
-      assert.throws(() =>
-        validatePreparedArguments(
-          schemas.resumes,
-          prepareIntelligenceArguments(prepareResumeArguments(args), "resumes"),
-        ),
-      );
+      assert.throws(() => validatePreparedArguments(schemas.resumes, prepareResumeArguments(args)));
       assert.deepEqual(args, snapshot);
     }
   }
 });
 
-test("hidden choices treat only null intelligence as omission, including resume shorthands and recovery", () => {
+test("hidden launch choices treat null as omission; resumes still reject it", () => {
   const task = { agent: "worker", task: "work", max_subagents_allowed: 0 };
   const resume = { subagent: "John", task: "follow up" };
   const input = { tasks: [{ ...task, intelligence: null }] };
@@ -210,13 +213,7 @@ test("hidden choices treat only null intelligence as omission, including resume 
       { resumes: { ...resume, intelligence: null } },
       { ...resume, intelligence: null },
     ]) {
-      assert.deepEqual(
-        validatePreparedArguments(
-          schemas.resumes,
-          prepareIntelligenceArguments(prepareResumeArguments(args), "resumes"),
-        ),
-        { resumes: [resume] },
-      );
+      assert.throws(() => validatePreparedArguments(schemas.resumes, prepareResumeArguments(args)));
     }
     for (const intelligence of ["unknown", 1, false, {}]) {
       assert.throws(() =>

@@ -22,6 +22,7 @@ export interface AllocateNameRequest {
   task: string;
   sessionDir: string;
   model?: string;
+  thinking?: string;
   intelligence?: string;
   tools?: string[];
 }
@@ -52,6 +53,7 @@ export async function allocateSubagentNames(
         agent: request.agent,
         task: request.task,
         ...(request.model !== undefined ? { model: request.model } : {}),
+        ...(request.thinking !== undefined ? { thinking: request.thinking } : {}),
         ...(request.intelligence !== undefined ? { intelligence: request.intelligence } : {}),
         ...(request.budget !== undefined ? { budget: request.budget } : {}),
         ...(request.tools !== undefined ? { tools: request.tools } : {}),
@@ -70,7 +72,9 @@ export async function allocateSubagentNames(
 export async function updateNameRecord(
   file: string,
   name: string,
-  patch: Partial<Pick<SubagentNameRecord, "sessionDir" | "task" | "lastResumePrompt">>,
+  patch: Partial<
+    Pick<SubagentNameRecord, "sessionDir" | "task" | "lastResumePrompt" | "model" | "thinking" | "intelligence">
+  >,
 ): Promise<void> {
   await updateNamesRegistry(file, (registry) => {
     const record = registry.agents[name];
@@ -78,6 +82,9 @@ export async function updateNameRecord(
     if (patch.sessionDir !== undefined) record.sessionDir = patch.sessionDir;
     if (patch.task !== undefined) record.task = patch.task;
     if (patch.lastResumePrompt !== undefined) record.lastResumePrompt = patch.lastResumePrompt;
+    if (patch.model !== undefined) record.model = patch.model;
+    if (patch.thinking !== undefined) record.thinking = patch.thinking;
+    if (patch.intelligence !== undefined) record.intelligence = patch.intelligence;
   });
 }
 

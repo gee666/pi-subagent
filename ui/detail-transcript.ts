@@ -90,6 +90,7 @@ export function findNameRecord(registry: NamesRegistry, name: string): SubagentN
 }
 
 export interface ParsedTranscript {
+  intelligence?: string;
   blocks: DetailBlock[];
   usage: DetailUsage;
   toolCallCount: number;
@@ -231,11 +232,13 @@ export function parseTranscriptMessages(messages: unknown[]): ParsedTranscript {
     }
   }
 
-  return { blocks, usage, toolCallCount, model, thinkingLevel };
+  const intelligence = blocks.length ? blocks[0].intelligence : pendingIntelligence;
+  return { blocks, usage, toolCallCount, model, thinkingLevel, intelligence };
 }
 
 export function buildSubagentDetail(record: SubagentNameRecord, options: { sessionDir?: string } = {}): SubagentDetail {
   const sessionDir = options.sessionDir ?? record.sessionDir;
+  let intelligence = record.intelligence;
   const notes: string[] = [];
   const files = sessionFilesIn(sessionDir);
   const sessionFile = files[files.length - 1];
@@ -250,6 +253,7 @@ export function buildSubagentDetail(record: SubagentNameRecord, options: { sessi
     notes.push(`No session transcript found in ${shortenPath(sessionDir)}`);
   } else {
     const parsed = parseTranscriptMessages(readSessionEntries(sessionFile));
+    intelligence ??= parsed.intelligence;
     model = parsed.model;
     thinkingLevel = parsed.thinkingLevel;
     blocks = parsed.blocks;
@@ -269,7 +273,7 @@ export function buildSubagentDetail(record: SubagentNameRecord, options: { sessi
         at: record.createdAt,
         model,
         thinkingLevel,
-        intelligence: sessionDir === record.sessionDir ? record.intelligence : undefined,
+        intelligence,
         events: [],
       },
     ];
@@ -281,6 +285,7 @@ export function buildSubagentDetail(record: SubagentNameRecord, options: { sessi
   return {
     name: record.name,
     agent: record.agent,
+    intelligence,
     model,
     thinkingLevel,
     tools: record.tools,

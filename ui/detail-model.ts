@@ -36,6 +36,8 @@ export interface DetailUsage {
 export interface SubagentDetail {
   name: string;
   agent: string;
+  /** Original preset label from the name registry or first task's session metadata. */
+  intelligence?: string;
   model?: string;
   thinkingLevel?: string;
   tools?: string[];

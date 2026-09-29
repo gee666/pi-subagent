@@ -7,7 +7,9 @@ import {
   STARTUP_RETRY_BASE_BACKOFF_MS,
 } from "./constants.js";
 import type { RunAgentOptions } from "./options.js";
-import { buildPiArgs, resolveChildExtensionArgs } from "./arguments.js";
+import { buildPiArgs, resolveChildExtensionArgs, resolveLaunchModelSettings } from "./arguments.js";
+import { readOriginalSessionSettings } from "../storage/session-settings.js";
+import { updateNameRecord } from "../names.js";
 import { writePromptToTempFile, cleanupTempDir, sessionDirExists } from "./files.js";
 import { appendBoundedStderr, priorDescendantUsage, endedWithSyntheticResumeFailure } from "./result.js";
 import { runAttempt } from "./attempt.js";
@@ -65,7 +67,9 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
     stderr: initialResult?.stderr ?? "",
     usage: initialResult?.usage ? { ...initialResult.usage } : emptyUsage(),
     toolCalls: initialResult?.toolCalls ? { ...initialResult.toolCalls } : {},
-    model: initialResult?.model ?? agent.model,
+    model: opts.resumeSettings?.model ?? initialResult?.model ?? agent.model,
+    thinking: opts.resumeSettings?.thinking,
+    intelligence: opts.resumeSettings?.intelligence,
     completedTurns: initialResult?.completedTurns ?? 0,
     turnInProgress: false,
     liveToolExecutions: initialResult?.liveToolExecutions,
@@ -118,9 +122,11 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       emitUpdate();
       return result;
     }
-    const selection = selectIntelligence(opts.intelligencePresets, opts.intelligence);
-    result.intelligence = selection?.name;
-    if (selection) result.model = `${selection.provider}/${selection.model}`;
+    const selection = opts.resumeSettings ? undefined : selectIntelligence(opts.intelligencePresets, opts.intelligence);
+    const settings = opts.resumeSettings ?? resolveLaunchModelSettings(agent, fallbackModel, selection);
+    result.intelligence = settings.intelligence;
+    result.model = settings.model;
+    result.thinking = settings.thinking;
     emitUpdate();
     const { args: piArgs, prompt: taskPrompt } = buildPiArgs(
       agent,
@@ -132,6 +138,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       opts.rawPrompt === true,
       selection,
       extensionArgs,
+      opts.resumeSettings,
     );
     const prompt =
       result.budget && readBudget(result.budget).limit > 0
@@ -144,7 +151,14 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
 
     for (let attempt = 0; ; attempt++) {
       startupTimedOut = false;
-      const outcome = await runAttempt(opts, result, piArgs, prompt, attempt, emitUpdate);
+      const outcome = await runAttempt(
+        opts.resumeSettings ? { ...opts, fallbackModel: settings.model } : opts,
+        result,
+        piArgs,
+        prompt,
+        attempt,
+        emitUpdate,
+      );
       exitCode = outcome.exitCode;
       startupTimedOut = outcome.startupTimedOut;
       wasAborted = outcome.wasAborted;
@@ -214,5 +228,14 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
     return result;
   } finally {
     cleanupTempDir(promptTmpDir);
+    if (!resumeSession && opts.namesFile && opts.subagentName && sessionDir) {
+      const original = readOriginalSessionSettings(sessionDir);
+      result.thinking = original.thinking ?? result.thinking;
+      await updateNameRecord(opts.namesFile, opts.subagentName, {
+        model: original.model ?? result.model,
+        thinking: result.thinking,
+        intelligence: result.intelligence,
+      });
+    }
   }
 }

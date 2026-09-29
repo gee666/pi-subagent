@@ -1,5 +1,6 @@
-import { createIntelligenceSchemas, validatePreparedArguments } from "./schemas.js";
-import { selectIntelligence } from "../intelligence.js";
+import { ResumeSubagentsParams, validatePreparedArguments } from "./schemas.js";
+import { originalModelSettings } from "../storage/session-settings.js";
+import type { SubagentModelSettings } from "../storage/name-records.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { discoverAgents, isAgentEnabledAtLayer, type AgentConfig } from "../agents.js";
@@ -23,32 +24,28 @@ import {
 import { updateLatestBroadcastTargets } from "./broadcast.js";
 import { makeDetailsFactory } from "./details.js";
 import { executeParallel } from "./execution.js";
-import { formatModelFlag } from "./models.js";
 import { resumableSubagentsDisabled } from "./policy.js";
 import { trackProgress } from "./progress.js";
-import { ensureBudget, getParentModelForSubagent } from "./runtime.js";
-import { normalizeResumes, prepareIntelligenceArguments } from "./schemas.js";
+import { ensureBudget } from "./runtime.js";
+import { normalizeResumes } from "./schemas.js";
 import type { ExtensionState } from "./state.js";
 
 export function registerResumeSubagentsTool(state: ExtensionState) {
   if (resumableSubagentsDisabled()) return;
-  const parameters = createIntelligenceSchemas(state.intelligencePresets).resumes;
+  const parameters = ResumeSubagentsParams;
   state.pi.registerTool({
     name: RESUME_SUBAGENTS_TOOL_NAME,
     label: "Resume subagents",
     description:
       state.configuredToolPrompts[RESUME_SUBAGENTS_TOOL_NAME] ??
       [
-        "Continue agents by their returned names, keeping their previous context.",
+        "Continue agents by their returned names, keeping their previous context and original model, thinking, and intelligence label. Resume does not accept an intelligence choice.",
         "Optional max_subagents_allowed replaces the lifetime descendant cap, excluding the resumed agent. Past launches and assigned slots still count. Increases reserve extra slots from the original launcher; omitting it keeps the current allowance.",
         "Pass { resumes: [{ subagent, task }] }. Resumes in one call run in parallel; wait between dependent tasks.",
       ].join("\n"),
     parameters,
     prepareArguments(args) {
-      return validatePreparedArguments(
-        parameters,
-        prepareIntelligenceArguments(prepareResumeArguments(args), "resumes"),
-      );
+      return validatePreparedArguments(parameters, prepareResumeArguments(args));
     },
 
     async execute(toolCallId, params, signal, onUpdate, ctx) {
@@ -72,8 +69,6 @@ export function registerResumeSubagentsTool(state: ExtensionState) {
               "Invalid parameters. Provide a non-empty resumes array of {subagent, task} objects (both fields are required strings).",
             );
           }
-
-          for (const resume of resumes) selectIntelligence(state.intelligencePresets, resume.intelligence);
 
           const duplicates = resumes
             .map((resume) => resume.name)
@@ -124,7 +119,7 @@ export function registerResumeSubagentsTool(state: ExtensionState) {
               tools?: string[];
               budget: SubagentBudget;
               max_subagents_allowed?: number;
-              intelligence?: string;
+              settings: SubagentModelSettings;
             }> = [];
             const hasSessionFiles = (dir: string): boolean => {
               try {
@@ -174,7 +169,7 @@ export function registerResumeSubagentsTool(state: ExtensionState) {
                 budget:
                   resolution.record.budget ?? createBudget(path.join(resolution.record.sessionDir, "legacy-budget"), 0),
                 max_subagents_allowed: resume.max_subagents_allowed,
-                intelligence: resume.intelligence,
+                settings: originalModelSettings(resolution.record),
               });
             }
             if (errors.length > 0) {
@@ -213,7 +208,10 @@ export function registerResumeSubagentsTool(state: ExtensionState) {
               overrideResumeBudgets(ensureBudget(state), overrides, state.currentDepth === 0 ? "main" : "subagent");
             }
             for (const target of targets) {
-              await updateNameRecord(state.currentNamesFile, target.name, { lastResumePrompt: target.task });
+              await updateNameRecord(state.currentNamesFile, target.name, {
+                lastResumePrompt: target.task,
+                ...target.settings,
+              });
             }
 
             // Resumed agents may reference agent types whose definition files no
@@ -237,7 +235,6 @@ export function registerResumeSubagentsTool(state: ExtensionState) {
             const tasks = targets.map((target) => ({
               agent: target.agent,
               task: target.task,
-              intelligence: target.intelligence,
             }));
             const topLevelBaseId = state.nextActiveSubagentId;
             state.nextActiveSubagentId += tasks.length;
@@ -254,12 +251,13 @@ export function registerResumeSubagentsTool(state: ExtensionState) {
               undefined,
               (index) => targets[index].sessionDir,
               true,
-              formatModelFlag(getParentModelForSubagent(state, ctx)),
+              undefined,
               topLevelBaseId,
               {
                 names: targets.map((target) => target.name),
                 budgets: targets.map((target) => target.budget),
                 rawPrompts: true,
+                resumeSettings: targets.map((target) => target.settings),
               },
             );
           } finally {

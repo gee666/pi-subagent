@@ -119,7 +119,12 @@ export async function executeParallel(
   resumeExistingSessions: boolean,
   fallbackModel: string | undefined,
   topLevelBaseId: number,
-  extras?: { names?: Array<string | undefined>; rawPrompts?: boolean; budgets?: Array<SubagentBudget | undefined> },
+  extras?: {
+    names?: Array<string | undefined>;
+    rawPrompts?: boolean;
+    budgets?: Array<SubagentBudget | undefined>;
+    resumeSettings?: Array<import("../storage/name-records.js").SubagentModelSettings>;
+  },
 ) {
   const taskIds = new Map<number, number>();
   try {

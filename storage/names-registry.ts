@@ -30,7 +30,9 @@ function isNameRecord(value: unknown): value is SubagentNameRecord {
     (!Array.isArray(value.tools) || !value.tools.every((tool) => typeof tool === "string"))
   )
     return false;
-  return ["model", "lastResumePrompt"].every((key) => value[key] === undefined || typeof value[key] === "string");
+  return ["model", "thinking", "intelligence", "lastResumePrompt"].every(
+    (key) => value[key] === undefined || typeof value[key] === "string",
+  );
 }
 
 function isNamesRegistry(value: unknown): value is NamesRegistry {

@@ -68,7 +68,7 @@ export interface SingleResult {
   task: string;
   /** Unique resumable human name within the delegation tree (e.g. "John"). */
   name?: string;
-  /** Configured preset name selected for this invocation, not a previous resume. */
+  /** Original configured preset label, retained by named resumes. */
   intelligence?: string;
   /** Durable branch allowance, shared by this agent's resumes and session forks. */
   budget?: import("../budget.js").SubagentBudget;
@@ -82,6 +82,7 @@ export interface SingleResult {
   usage: UsageStats;
   toolCalls: ToolCallCounts;
   model?: string;
+  thinking?: string;
   stopReason?: string;
   errorMessage?: string;
   /** Cached final assistant text so durable details can omit full transcripts. */

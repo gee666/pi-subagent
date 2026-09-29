@@ -217,6 +217,7 @@ test("pager navigates turns, tools, and named children", () => {
     ...detailFixture,
     name: "Maria",
     agent: "reviewer",
+    intelligence: "senior",
     blocks: [{ kind: "task", index: 0, prompt: "Review", events: [{ type: "text", text: "Child response" }] }],
   };
   const pager = new SubagentPager({
@@ -243,7 +244,7 @@ test("pager navigates turns, tools, and named children", () => {
   pager.handleInput("\u001b[B"); // -> its Maria child row
   assert.match(pager.render(100).join("\n"), /Enter to expand/);
   pager.handleInput("\r");
-  assert.match(pager.render(100).join("\n"), /Maria \(reviewer\)[\s\S]*Child response/);
+  assert.match(pager.render(100).join("\n"), /Maria \(Senior\/reviewer\)[\s\S]*Child response/);
   pager.handleInput("\u001b"); // back to Olga's overview
   assert.match(pager.render(100).join("\n"), /Olga \(writer\)/);
   pager.handleInput("T");
@@ -262,7 +263,7 @@ test("pager navigates turns, tools, and named children", () => {
   pager.handleInput("C");
   assert.match(pager.render(100).join("\n"), /1 direct child[\s\S]*Maria \(reviewer\)/);
   pager.handleInput("\r");
-  assert.match(pager.render(100).join("\n"), /Maria \(reviewer\)[\s\S]*Child response/);
+  assert.match(pager.render(100).join("\n"), /Maria \(Senior\/reviewer\)[\s\S]*Child response/);
   pager.handleInput("\u001b");
   assert.match(pager.render(100).join("\n"), /Olga \(writer\)/);
 });

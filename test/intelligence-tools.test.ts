@@ -18,7 +18,7 @@ const settings = [
 ];
 const flag = (args: string[], name: string) => args[args.indexOf(name) + 1];
 
-test("launch and named resume require per-item choices and preserve hidden defaults on schema refresh", async (t) => {
+test("named resumes retain original settings across preset, parent, definition, and owner changes", async (t) => {
   fs.mkdirSync("tmp", { recursive: true });
   const root = fs.mkdtempSync(path.resolve("tmp/intelligence-tools-"));
   const log = path.join(root, "calls.jsonl");
@@ -28,6 +28,9 @@ test("launch and named resume require per-item choices and preserve hidden defau
     `
     const fs = require('node:fs'), path = require('node:path'), readline = require('node:readline');
     const args = process.argv, session = args[args.indexOf('--session-dir') + 1];
+    const chosen = args[args.indexOf('--model') + 1];
+    const provider = args.includes('--provider') ? args[args.indexOf('--provider') + 1] : chosen.split('/')[0];
+    const modelId = args.includes('--provider') ? chosen : chosen.slice(provider.length + 1);
     readline.createInterface({ input: process.stdin }).on('line', (line) => {
       const request = JSON.parse(line); if (request.type !== 'prompt') return;
       fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ prompt: request.message, args }) + '\\n');
@@ -36,7 +39,7 @@ test("launch and named resume require per-item choices and preserve hidden defau
       if (!fs.existsSync(file)) fs.writeFileSync(file, JSON.stringify({ type: 'session', id: 'fake' }) + '\\n');
       for (const entry of [
         { type: 'custom', customType: ${JSON.stringify(SUBAGENT_INTELLIGENCE_CUSTOM_TYPE)}, data: { intelligence: JSON.parse(process.env.PI_SUBAGENT_RUN_INTELLIGENCE) } },
-        { type: 'model_change', provider: args.includes('--provider') ? args[args.indexOf('--provider') + 1] : 'parent', modelId: args[args.indexOf('--model') + 1] },
+        { type: 'model_change', provider, modelId },
         { type: 'thinking_level_change', thinkingLevel: args[args.indexOf('--thinking') + 1] },
         { type: 'message', message: { role: 'user', content: request.message } },
       ]) fs.appendFileSync(file, JSON.stringify(entry) + '\\n');
@@ -136,6 +139,8 @@ test("launch and named resume require per-item choices and preserve hidden defau
     const name = single.details.results[0].name!;
     assert.equal(readNamesRegistry(namesFile).agents[name].model, "chosen/org/model");
     assert.equal(readNamesRegistry(namesFile).agents[name].intelligence, "junior");
+    assert.equal(readNamesRegistry(namesFile).agents[name].thinking, "high");
+    assert.equal(JSON.parse(JSON.stringify(single.details)).results[0].thinking, "high");
     assert.equal(JSON.parse(JSON.stringify(single.details)).results[0].intelligence, "junior");
     const theme = { fg: ((_color, text) => text) as ThemeFg, bold: (text: string) => text };
     assert.ok(
@@ -166,9 +171,10 @@ test("launch and named resume require per-item choices and preserve hidden defau
     );
     const beforeCalls = calls().length;
     const beforeNames = fs.readFileSync(namesFile, "utf8");
-    for (const missing of [{}, { intelligence: null }]) {
-      const invalid = { subagent: name, task: "missing choice", max_subagents_allowed: 2, ...missing };
-      const valid = { subagent: parallel.details.results[0].name, task: "valid choice", intelligence: "junior" };
+    assert.equal(JSON.stringify(host.tool("resume_subagents").parameters).includes('"intelligence"'), false);
+    for (const intelligence of ["junior", "missing", null, 7]) {
+      const invalid = { subagent: name, task: "invalid choice", max_subagents_allowed: 2, intelligence };
+      const valid = { subagent: parallel.details.results[0].name, task: "follow up" };
       for (const args of [
         invalid,
         { resumes: invalid },
@@ -176,7 +182,7 @@ test("launch and named resume require per-item choices and preserve hidden defau
         { resumes: [valid, invalid] },
         { resumes: [invalid, valid] },
       ]) {
-        await assert.rejects(host.call("resume_subagents", "missing-resume-choice", args, ctx));
+        await assert.rejects(host.call("resume_subagents", "invalid-resume-choice", args, ctx));
       }
     }
     assert.equal(readBudget(budget).remaining, before);
@@ -187,8 +193,8 @@ test("launch and named resume require per-item choices and preserve hidden defau
       "resumed",
       {
         resumes: [
-          { subagent: name, task: "resume expert", intelligence: "expert" },
-          { subagent: parallel.details.results[0].name, task: "resume junior", intelligence: "junior" },
+          { subagent: name, task: "resume junior" },
+          { subagent: parallel.details.results[0].name, task: "resume expert" },
         ],
       },
       ctx,
@@ -204,13 +210,13 @@ test("launch and named resume require per-item choices and preserve hidden defau
     assert.equal(flag(juniorResume.args, "--thinking"), "high");
     assert.equal(flag(juniorResume.args, "--provider"), "chosen");
     assert.equal(readBudget(budget).remaining, before);
-    assert.equal(resumed.details.results[0].intelligence, "expert");
-    assert.equal(resumed.details.results[1].intelligence, "junior");
+    assert.equal(resumed.details.results[0].intelligence, "junior");
+    assert.equal(resumed.details.results[1].intelligence, "expert");
     assert.equal(single.details.results[0].intelligence, "junior", "resume cannot rewrite earlier results");
     const detail = buildSubagentDetail(readNamesRegistry(namesFile).agents[name]);
     assert.deepEqual(
       detail.blocks.map((block) => block.intelligence),
-      ["junior", "expert"],
+      ["junior", "junior"],
     );
     assert.match(
       renderTurnOverviewLines(detail, 0, 160).join("\n"),
@@ -218,7 +224,7 @@ test("launch and named resume require per-item choices and preserve hidden defau
     );
     assert.match(
       renderTurnOverviewLines(detail, 1, 160).join("\n"),
-      /Model: other\/big • Thinking: max • Intelligence: Expert/,
+      /Model: chosen\/org\/model • Thinking: high • Intelligence: Junior/,
     );
     const forkDir = path.join(root, "fork");
     assert.equal(forkSessionInto(detail.sessionDir, forkDir), true);
@@ -226,7 +232,12 @@ test("launch and named resume require per-item choices and preserve hidden defau
       buildSubagentDetail(readNamesRegistry(namesFile).agents[name], { sessionDir: forkDir }).blocks.map(
         (block) => block.intelligence,
       ),
-      ["junior", "expert"],
+      ["junior", "junior"],
+    );
+    ctx.model = model("changed-parent", "different");
+    fs.writeFileSync(
+      path.join(root, ".pi/agents/worker.md"),
+      "---\nname: intelligence-worker\ndescription: worker\nmodel: changed/model\nthinking: off\n---\nChanged.\n",
     );
     fs.writeFileSync(config, JSON.stringify({ "subagents-models": [{ renamed: settings[0].junior }] }));
     await host.emit("session_start", {}, ctx);
@@ -249,7 +260,7 @@ test("launch and named resume require per-item choices and preserve hidden defau
       { resumes: { subagent: name, task: "automatic resume" } },
       ctx,
     );
-    assert.equal(soleResume.details.results[0].intelligence, "renamed");
+    assert.equal(soleResume.details.results[0].intelligence, "junior");
     assert.equal(flag(calls().at(-1)!.args, "--thinking"), "high");
     assert.equal(readNamesRegistry(namesFile).agents[name].intelligence, "junior", "registry keeps initial label only");
     process.env.PI_SUBAGENT_INTELLIGENCE = "0";
@@ -262,34 +273,61 @@ test("launch and named resume require per-item choices and preserve hidden defau
       ctx,
     );
     assert.equal(disabled.details.results[0].intelligence, undefined);
-    assert.equal(flag(calls().at(-1)!.args, "--model"), "parent/live");
+    assert.equal(flag(calls().at(-1)!.args, "--model"), "changed-parent/different");
+    const disabledName = disabled.details.results[0].name!;
     const disabledResume = await host.call(
       "resume_subagents",
       "disabled-resume",
-      { resumes: { subagent: name, task: "disabled resume", intelligence: null } },
+      { resumes: { subagent: name, task: "disabled resume" } },
       ctx,
     );
-    assert.equal(disabledResume.details.results[0].intelligence, undefined);
-    assert.equal(flag(calls().at(-1)!.args, "--thinking"), "low");
+    assert.equal(disabledResume.details.results[0].intelligence, "junior");
+    assert.equal(flag(calls().at(-1)!.args, "--thinking"), "high");
     fs.writeFileSync(config, JSON.stringify({ "subagents-models": [] }));
     process.env.PI_SUBAGENT_INTELLIGENCE = "true";
     await host.emit("session_start", {}, ctx);
     const zero = await host.call("subagents", "zero", { tasks: [{ ...task("zero work"), intelligence: null }] }, ctx);
-    const zeroResume = await host.call(
-      "resume_subagents",
-      "zero-resume",
-      { subagent: name, task: "zero resume", intelligence: null },
-      ctx,
-    );
+    const zeroResume = await host.call("resume_subagents", "zero-resume", { subagent: name, task: "zero resume" }, ctx);
     assert.equal(zero.details.results[0].intelligence, undefined);
-    assert.equal(zeroResume.details.results[0].intelligence, undefined);
-    assert.equal(flag(calls().at(-1)!.args, "--model"), "parent/live");
+    assert.equal(zeroResume.details.results[0].intelligence, "junior");
+    assert.equal(flag(calls().at(-1)!.args, "--model"), "org/model");
     const finalDetail = buildSubagentDetail(readNamesRegistry(namesFile).agents[name]);
     assert.deepEqual(
       finalDetail.blocks.map((block) => block.intelligence),
-      ["junior", "expert", "renamed", undefined, undefined],
+      ["junior", "junior", "junior", "junior", "junior"],
     );
-    assert.doesNotMatch(renderTurnOverviewLines(finalDetail, 4, 160).join("\n"), /Intelligence:/);
+    assert.match(renderTurnOverviewLines(finalDetail, 4, 160).join("\n"), /Intelligence: Junior/);
+
+    // New extension instance, changed presets and missing definition: no dependence on in-memory state.
+    fs.unlinkSync(path.join(root, ".pi/agents/worker.md"));
+    fs.writeFileSync(config, JSON.stringify({ "subagents-models": settings }));
+    const restarted = createExtensionHarness();
+    await restarted.emit("session_start", {}, ctx);
+    const unselected = await restarted.call(
+      "resume_subagents",
+      "unselected",
+      { resumes: [{ subagent: disabledName, task: "unselected remains unselected" }] },
+      ctx,
+    );
+    assert.equal(unselected.isError, false, JSON.stringify(unselected.content));
+    assert.equal(unselected.details.results[0].intelligence, undefined);
+    assert.equal(flag(calls().at(-1)!.args, "--provider"), "changed-parent");
+    assert.equal(flag(calls().at(-1)!.args, "--model"), "different");
+    assert.equal(flag(calls().at(-1)!.args, "--thinking"), "off");
+    entries[0] = customEntry(SUBAGENT_NAMES_CUSTOM_TYPE, { namesFile, ownerId: "other-owner" });
+    await restarted.emit("session_start", {}, ctx);
+    for (const task of ["private fork", "same private fork"]) {
+      const forked = await restarted.call("resume_subagents", task, { subagent: name, task }, ctx);
+      assert.equal(forked.isError, false, JSON.stringify(forked.content));
+      assert.equal(forked.details.results[0].intelligence, "junior");
+      assert.equal(flag(calls().at(-1)!.args, "--model"), "org/model");
+      assert.equal(flag(calls().at(-1)!.args, "--thinking"), "high");
+    }
+    const last = calls().slice(-2);
+    assert.equal(flag(last[0].args, "--session-dir"), flag(last[1].args, "--session-dir"));
+    assert.notEqual(flag(last[0].args, "--session-dir"), detail.sessionDir);
+    assert.equal(buildSubagentDetail(readNamesRegistry(namesFile).agents[name]).blocks.length, 5);
+    await restarted.emit("session_shutdown", {}, ctx);
     assert.equal(fetch.mock.callCount(), 0);
   } finally {
     await host.emit("session_shutdown", {}, ctx);

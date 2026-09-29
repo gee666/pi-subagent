@@ -4,7 +4,14 @@ export interface SubagentForkRecord {
   createdAt: number;
 }
 
-export interface SubagentNameRecord {
+/** Original effective settings, independent of current presets and parent settings. */
+export interface SubagentModelSettings {
+  model?: string;
+  thinking?: string;
+  intelligence?: string;
+}
+
+export interface SubagentNameRecord extends SubagentModelSettings {
   name: string;
   /** Agent type this name was generated from (e.g. "code-writer"). */
   agent: string;
@@ -12,10 +19,6 @@ export interface SubagentNameRecord {
   task: string;
   /** Original branch budget. Resumes and private forks share it. */
   budget?: import("../budget.js").SubagentBudget;
-  /** Model pinned by the agent config at spawn time, if any. */
-  model?: string;
-  /** Preset selected for the initial task only. Resume labels live in their transcripts. */
-  intelligence?: string;
   /** Tool restriction from the agent config at spawn time, if any. */
   tools?: string[];
   /** Session id of the pi process that spawned this subagent (its owner). */

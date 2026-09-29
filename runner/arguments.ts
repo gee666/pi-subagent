@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentConfig } from "../agents.js";
+import type { SubagentModelSettings } from "../storage/name-records.js";
 import { SUBAGENT_FALLBACK_MODEL_ENV } from "./constants.js";
 import { childExtensionArgs, excludedExtensions } from "./extension-policy.js";
 function resolveExtensionArg(value: string): string {
@@ -19,6 +20,8 @@ interface InheritedCliArgs {
   extensionArgs: string[];
   /** All other non-blocked flags to forward verbatim to every child */
   alwaysProxy: string[];
+  /** Explicit CLI provider associated with a forwarded --api-key. */
+  explicitProvider: string | undefined;
   /** Parent --model value; used only when agent config doesn't specify model */
   fallbackModel: string | undefined;
   /** Parent --thinking value; used only when agent config doesn't specify thinking */
@@ -45,6 +48,7 @@ interface InheritedCliArgs {
 function parseInheritedCliArgs(argv: string[]): InheritedCliArgs {
   const extensionArgs: string[] = [];
   const alwaysProxy: string[] = [];
+  let explicitProvider: string | undefined;
   let fallbackModel: string | undefined;
   let fallbackThinking: string | undefined;
   let fallbackTools: string | undefined;
@@ -144,7 +148,10 @@ function parseInheritedCliArgs(argv: string[]): InheritedCliArgs {
       )
     ) {
       const [value, skip] = getVal();
-      if (value !== undefined) alwaysProxy.push(flagName, value);
+      if (value !== undefined) {
+        alwaysProxy.push(flagName, value);
+        if (flagName === "--provider") explicitProvider = value;
+      }
       i += skip;
       continue;
     }
@@ -197,7 +204,15 @@ function parseInheritedCliArgs(argv: string[]): InheritedCliArgs {
     i++;
   }
 
-  return { extensionArgs, alwaysProxy, fallbackModel, fallbackThinking, fallbackTools, fallbackNoTools };
+  return {
+    extensionArgs,
+    alwaysProxy,
+    explicitProvider,
+    fallbackModel,
+    fallbackThinking,
+    fallbackTools,
+    fallbackNoTools,
+  };
 }
 
 /** Cached once — process.argv is immutable at runtime */
@@ -217,6 +232,18 @@ export function resolveSubagentModel(agentModel?: string, currentParentModel?: s
   );
 }
 
+export function resolveLaunchModelSettings(
+  agent: Pick<AgentConfig, "model" | "thinking">,
+  fallbackModel?: string,
+  selection?: { name: string; provider: string; model: string; thinking: string },
+): SubagentModelSettings {
+  return {
+    model: selection ? `${selection.provider}/${selection.model}` : resolveSubagentModel(agent.model, fallbackModel),
+    thinking: selection?.thinking ?? agent.thinking ?? _inheritedCliArgs.fallbackThinking,
+    intelligence: selection?.name,
+  };
+}
+
 export function buildPiArgs(
   agent: AgentConfig,
   systemPromptPath: string | null,
@@ -227,14 +254,18 @@ export function buildPiArgs(
   rawPrompt = false,
   selection?: { provider: string; model: string; thinking: string },
   extensionArgsOverride?: string[],
+  resumeSettings?: SubagentModelSettings,
 ): { args: string[]; prompt: string } {
-  // A preset-selected provider must not inherit a conflicting provider or its CLI credential.
-  const proxyArgs = selection
-    ? _inheritedCliArgs.alwaysProxy.filter(
-        (arg, index, args) =>
-          !["--provider", "--api-key"].includes(arg) && !["--provider", "--api-key"].includes(args[index - 1]),
-      )
-    : _inheritedCliArgs.alwaysProxy;
+  const provider = resumeSettings?.model?.includes("/") ? resumeSettings.model.split("/", 1)[0] : selection?.provider;
+  // Named resumes can reuse CLI-only auth, but only for the explicitly matching provider.
+  const keepResumeApiKey = !!resumeSettings && !!provider && provider === _inheritedCliArgs.explicitProvider;
+  const blocked = keepResumeApiKey ? ["--provider"] : ["--provider", "--api-key"];
+  const proxyArgs =
+    selection || resumeSettings
+      ? _inheritedCliArgs.alwaysProxy.filter(
+          (arg, index, args) => !blocked.includes(arg) && !blocked.includes(args[index - 1]),
+        )
+      : _inheritedCliArgs.alwaysProxy;
   const args: string[] = [
     "--mode",
     "rpc",
@@ -248,12 +279,17 @@ export function buildPiArgs(
   if (sessionDir) args.push("--session-dir", sessionDir);
   if (resumeSession) args.push("--continue");
 
-  // Without a preset, preserve the live parent's model precedence.
-  const model = selection?.model ?? resolveSubagentModel(agent.model, fallbackModelOverride);
-  if (selection) args.push("--provider", selection.provider);
-  if (model) args.push("--model", model);
+  // Named resumes bypass today's parent, agent definition, CLI defaults, and presets.
+  // Missing legacy settings are left to --continue rather than replaced with current defaults.
+  const model = resumeSettings
+    ? resumeSettings.model
+    : (selection?.model ?? resolveSubagentModel(agent.model, fallbackModelOverride));
+  if (provider) args.push("--provider", provider);
+  if (model) args.push("--model", resumeSettings && provider ? model.slice(provider.length + 1) : model);
 
-  const thinking = selection?.thinking ?? agent.thinking ?? _inheritedCliArgs.fallbackThinking;
+  const thinking = resumeSettings
+    ? resumeSettings.thinking
+    : (selection?.thinking ?? agent.thinking ?? _inheritedCliArgs.fallbackThinking);
   if (thinking) args.push("--thinking", thinking);
 
   // agent.tools is set only when the agent file specifies tools (length > 0)
