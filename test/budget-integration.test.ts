@@ -18,6 +18,7 @@ async function withSetup(run: (dir: string, log: string) => Promise<void>) {
   const dir = workspace();
   const log = path.join(dir, "launches.jsonl");
   const variables: Record<string, string> = {
+    PI_SUBAGENT_INTELLIGENCE: "false",
     PI_SUBAGENT_MAX_TOTAL_AGENTS: "5",
     PI_SUBAGENT_DEPTH: "0",
     PI_SUBAGENT_STACK: "[]",

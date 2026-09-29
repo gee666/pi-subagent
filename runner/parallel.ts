@@ -14,7 +14,7 @@ import { configuredNonNegativeInt } from "./constants.js";
 import { sessionDirExists } from "./files.js";
 import { runAgentSubprocess } from "./single.js";
 export async function executeParallelSubprocess(
-  tasks: Array<{ agent: string; task: string }>,
+  tasks: Array<{ agent: string; task: string; intelligence?: string }>,
   agents: AgentConfig[],
   defaultCwd: string,
   parentDepth: number,
@@ -39,7 +39,7 @@ export async function executeParallelSubprocess(
     /** Shared name-registry file passed to children via spawn env. */
     namesFile?: string;
     budgets?: Array<SubagentBudget | undefined>;
-    smartDecision?: RunAgentOptions["smartDecision"];
+    intelligencePresets?: RunAgentOptions["intelligencePresets"];
     projectTrusted?: boolean;
   },
 ): Promise<{
@@ -142,7 +142,8 @@ export async function executeParallelSubprocess(
           resumeSession: shouldResumeThisSession && !!sessionDir,
           initialResult: previousResult,
           fallbackModel,
-          smartDecision: extras?.smartDecision,
+          intelligence: t.intelligence,
+          intelligencePresets: extras?.intelligencePresets,
           onHandle: (handle) => onHandleForTask?.(index, t, handle),
           onUpdate: (partial) => {
             if (partial.details?.results[0]) {

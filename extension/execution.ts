@@ -28,6 +28,7 @@ export async function executeSingle(
   topLevelBaseId: number,
   subagentName?: string,
   budget?: SubagentBudget,
+  intelligence?: string,
 ) {
   if (previousResult && isFinishedResult(previousResult)) {
     return {
@@ -65,7 +66,8 @@ export async function executeSingle(
       resumeSession: resumeExistingSession,
       initialResult: previousResult,
       fallbackModel,
-      smartDecision: state.smartDecision,
+      intelligence,
+      intelligencePresets: state.intelligencePresets,
       onHandle: (handle) => {
         activeId = topLevelBaseId;
         state.activeSubagents.set(activeId, { agent: agentName, task, handle, name: subagentName });
@@ -106,7 +108,7 @@ export async function executeSingle(
 
 export async function executeParallel(
   state: ExtensionState,
-  tasks: Array<{ agent: string; task: string }>,
+  tasks: Array<{ agent: string; task: string; intelligence?: string }>,
   agents: AgentConfig[],
   defaultCwd: string,
   signal: AbortSignal | undefined,
@@ -153,7 +155,7 @@ export async function executeParallel(
       {
         ...extras,
         namesFile: state.currentNamesFile || undefined,
-        smartDecision: state.smartDecision,
+        intelligencePresets: state.intelligencePresets,
         projectTrusted: state.latestSessionCtx?.cwd === defaultCwd && state.latestSessionCtx.isProjectTrusted(),
       },
     );

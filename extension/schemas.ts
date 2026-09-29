@@ -1,9 +1,10 @@
 import { Assert } from "@sinclair/typebox/value";
-import type { Static, TSchema } from "@sinclair/typebox";
+import type { Static, TSchema, TLiteral } from "@sinclair/typebox";
 import { Type } from "@sinclair/typebox";
 import { isBranchBudgetAmount, SubagentBudgetError } from "../budget.js";
 import { getTaskBranchSize, sameTasks, type ResumableSubagentCall, type ResumableTask } from "../resume.js";
 import { isRecord } from "./contracts.js";
+import type { IntelligencePreset } from "../intelligence.js";
 
 export const TaskItem = Type.Object(
   {
@@ -64,14 +65,61 @@ export const ResumeSubagentsParams = Type.Object(
   { additionalProperties: false },
 );
 
-export function normalizeResumes(raw: unknown): Array<{ name: string; task: string; max_subagents_allowed?: number }> {
+export function createIntelligenceSchemas(presets: IntelligencePreset[] = []) {
+  // Literal alternatives enforce validation; enum and descriptions advertise the caller's choices.
+  // The tuple is non-empty whenever these dynamic schemas are exposed.
+  const intelligence = {
+    intelligence: Type.Optional(
+      Type.Union(
+        presets.map((preset) => Type.Literal(preset.name, { description: preset.description })) as [
+          TLiteral<string>,
+          ...TLiteral<string>[],
+        ],
+        {
+          enum: presets.map((preset) => preset.name),
+          description: [
+            "Optional named model/provider/reasoning preset. Omit to use existing defaults.",
+            ...presets.map((preset) => `${preset.name}${preset.description ? `: ${preset.description}` : ""}`),
+          ].join("\n"),
+        },
+      ),
+    ),
+  };
+  const task = Type.Object({ ...TaskItem.properties, ...intelligence }, { additionalProperties: false });
+  const resume = Type.Object({ ...ResumeItem.properties, ...intelligence }, { additionalProperties: false });
+  const subagents = Type.Object(
+    { tasks: Type.Array(task, { minItems: 1, description: SubagentParams.properties.tasks.description }) },
+    { additionalProperties: false },
+  );
+  const resumes = Type.Object(
+    {
+      resumes: Type.Union([Type.Array(resume, { minItems: 1 }), resume], {
+        description: ResumeSubagentsParams.properties.resumes.description,
+      }),
+    },
+    { additionalProperties: false },
+  );
+  return presets.length
+    ? { subagents, resumes }
+    : {
+        subagents: SubagentParams as typeof subagents,
+        resumes: ResumeSubagentsParams as typeof resumes,
+      };
+}
+
+export function normalizeResumes(
+  raw: unknown,
+): Array<{ name: string; task: string; intelligence?: string; max_subagents_allowed?: number }> {
   const items = Array.isArray(raw) ? raw : raw && typeof raw === "object" ? [raw] : [];
-  const normalized: Array<{ name: string; task: string; max_subagents_allowed?: number }> = [];
+  const normalized: Array<{ name: string; task: string; intelligence?: string; max_subagents_allowed?: number }> = [];
   for (const item of items) {
     if (!isRecord(item)) continue;
     const name =
       typeof item.subagent === "string" ? item.subagent : typeof item.name === "string" ? item.name : undefined;
     const task = typeof item.task === "string" ? item.task : typeof item.prompt === "string" ? item.prompt : undefined;
+    if (item.intelligence !== undefined && typeof item.intelligence !== "string") {
+      throw new Error("Resume intelligence must be a configured preset name.");
+    }
     if (item.max_subagents_allowed !== undefined && !isBranchBudgetAmount(item.max_subagents_allowed)) {
       throw new SubagentBudgetError(
         "Resume max_subagents_allowed must be a non-negative safe integer below Number.MAX_SAFE_INTEGER. Omit it to keep the current allowance.",
@@ -81,10 +129,23 @@ export function normalizeResumes(raw: unknown): Array<{ name: string; task: stri
       normalized.push({
         name,
         task,
+        ...(item.intelligence !== undefined ? { intelligence: item.intelligence } : {}),
         ...(item.max_subagents_allowed !== undefined ? { max_subagents_allowed: item.max_subagents_allowed } : {}),
       });
   }
   return normalized;
+}
+
+/** Strict provider schemas can send null for omitted optional intelligence. Leave all other fields alone. */
+export function prepareIntelligenceArguments(args: unknown, key: "tasks" | "resumes"): unknown {
+  if (!isRecord(args) || !Object.hasOwn(args, key)) return args;
+  const omitNull = (item: unknown): unknown => {
+    if (!isRecord(item) || item.intelligence !== null) return item;
+    const { intelligence: _intelligence, ...rest } = item;
+    return rest;
+  };
+  const items = args[key];
+  return { ...args, [key]: Array.isArray(items) ? items.map(omitNull) : omitNull(items) };
 }
 
 /** Legacy task arguments are accepted only for a matching crash-recovery plan. */

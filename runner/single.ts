@@ -11,7 +11,7 @@ import { buildPiArgs, resolveChildExtensionArgs } from "./arguments.js";
 import { writePromptToTempFile, cleanupTempDir, sessionDirExists } from "./files.js";
 import { appendBoundedStderr, priorDescendantUsage, endedWithSyntheticResumeFailure } from "./result.js";
 import { runAttempt } from "./attempt.js";
-import { selectSmartDecision } from "./smart-decision.js";
+import { selectIntelligence } from "../intelligence.js";
 export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleResult> {
   const {
     agents,
@@ -113,11 +113,6 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
 
   try {
     const extensionArgs = await resolveChildExtensionArgs(opts.cwd, opts.projectTrusted);
-    const selection = await selectSmartDecision(
-      opts.smartDecision,
-      { systemPrompt: agent.systemPrompt, task },
-      opts.signal,
-    );
     if (opts.signal?.aborted) {
       result.exitCode = 130;
       result.stopReason = "aborted";
@@ -125,6 +120,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       emitUpdate();
       return result;
     }
+    const selection = selectIntelligence(opts.intelligencePresets, opts.intelligence);
     if (selection) {
       result.model = `${selection.provider}/${selection.model}`;
       emitUpdate();

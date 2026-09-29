@@ -14,7 +14,7 @@ import { resolveDelegationDepthConfig, type DelegationDepthConfig } from "./poli
 export interface ExtensionState extends DelegationDepthConfig {
   pi: ExtensionAPI;
   configuredToolPrompts: Record<string, string>;
-  smartDecision?: PiSubagentsConfig["smartDecision"];
+  intelligencePresets?: PiSubagentsConfig["intelligencePresets"];
   refreshRegisteredToolPrompts?: (cwd: string, includeProject: boolean) => void;
   resumeModelRegistry?: ResumeModelRegistry;
   lastRestorableModel?: ResumeModel;

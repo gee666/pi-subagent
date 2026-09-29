@@ -228,7 +228,7 @@ export function buildPiArgs(
   selection?: { provider: string; model: string; thinking: string },
   extensionArgsOverride?: string[],
 ): { args: string[]; prompt: string } {
-  // A Jev-selected provider must not inherit a conflicting provider or its CLI credential.
+  // A preset-selected provider must not inherit a conflicting provider or its CLI credential.
   const proxyArgs = selection
     ? _inheritedCliArgs.alwaysProxy.filter(
         (arg, index, args) =>
@@ -248,7 +248,7 @@ export function buildPiArgs(
   if (sessionDir) args.push("--session-dir", sessionDir);
   if (resumeSession) args.push("--continue");
 
-  // Without smart selection, preserve the live parent's model precedence.
+  // Without a preset, preserve the live parent's model precedence.
   const model = selection?.model ?? resolveSubagentModel(agent.model, fallbackModelOverride);
   if (selection) args.push("--provider", selection.provider);
   if (model) args.push("--model", model);

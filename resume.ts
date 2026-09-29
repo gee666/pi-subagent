@@ -20,6 +20,7 @@ type SessionEntry = ReturnType<ExtensionContext["sessionManager"]["getEntries"]>
 export interface ResumableTask {
   agent: string;
   task: string;
+  intelligence?: string;
   /** Lifetime descendant cap, excluding the assigned worker. */
   max_subagents_allowed?: number;
   /** Read-only compatibility for recorded inclusive allowances. */
@@ -99,7 +100,13 @@ function normalizeTasks(args: unknown): ResumableTask[] | null {
   const tasks: ResumableTask[] = [];
   for (const task of rawTasks) {
     if (!isRecord(task) || typeof task.agent !== "string" || typeof task.task !== "string") return null;
-    const normalized: ResumableTask = { agent: task.agent, task: task.task };
+    const intelligence = task.intelligence ?? undefined;
+    if (intelligence !== undefined && typeof intelligence !== "string") return null;
+    const normalized: ResumableTask = {
+      agent: task.agent,
+      task: task.task,
+      intelligence,
+    };
     for (const field of ["max_agents_allowed", "max_agents_in_branch", "max_subagents_allowed"] as const) {
       if (task[field] !== undefined) normalized[field] = typeof task[field] === "number" ? task[field] : NaN;
     }
@@ -107,6 +114,7 @@ function normalizeTasks(args: unknown): ResumableTask[] | null {
     tasks.push({
       agent: task.agent,
       task: task.task,
+      ...(normalized.intelligence !== undefined ? { intelligence: normalized.intelligence } : {}),
       ...(size !== undefined ? { max_subagents_allowed: size - 1 } : {}),
     });
   }
@@ -288,6 +296,7 @@ export function sameTasks(a: ResumableTask[], b: ResumableTask[]): boolean {
     return (
       task.agent === other.agent &&
       task.task === other.task &&
+      task.intelligence === other.intelligence &&
       (getTaskBranchSize(task) ?? 1) === (getTaskBranchSize(other) ?? 1)
     );
   });

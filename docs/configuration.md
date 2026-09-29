@@ -37,11 +37,13 @@ At maximum depth 1, combining `first-layer: only` with `last-layer: disabled` bl
 
 ## Tool descriptions
 
-Use `pi-subagents.json` to replace either tool's full model-facing description. Files load in this order, with later values overriding earlier values per tool:
+Use `pi-subagent.json` to configure model presets or replace either tool's full model-facing description. Files load in this order, with later values overriding earlier values per tool:
 
-1. `~/.pi/pi-subagents.json`
-2. `$PI_CODING_AGENT_DIR/pi-subagents.json`, normally `~/.pi/agent/pi-subagents.json`
-3. The nearest trusted `.pi/pi-subagents.json`, walking upward from the working directory
+1. `~/.pi/pi-subagent.json`
+2. `$PI_CODING_AGENT_DIR/pi-subagent.json`, normally `~/.pi/agent/pi-subagent.json`
+3. The nearest trusted `.pi/pi-subagent.json`, walking upward from the working directory
+
+The legacy filename `pi-subagents.json` is also supported. At each location, the singular filename takes precedence over the plural filename.
 
 ```json
 {
@@ -54,43 +56,55 @@ Use `pi-subagents.json` to replace either tool's full model-facing description. 
 
 Missing descriptions retain their defaults. Overrides change written guidance, not schemas, budget checks, or runtime limits. Keep instructions to estimate worker counts and avoid unnecessary delegation.
 
-## Smart-decision assistance
+## Caller-selected intelligence
 
-Optionally let TypeSafe's Jev choose a model for each subagent task. Add this section to `.pi/pi-subagents.json` in a trusted project, or to either user configuration file listed above:
+Define named model presets in `pi-subagent.json`. The calling model chooses a preset through each task's optional `intelligence` argument. No router or separate model-selection request is used.
 
 ```json
 {
-  "smart-decision": {
-    "enabled": true,
-    "fallback": true,
-    "timeout_seconds": 1200,
-    "model": "jev",
-    "provider_url": "https://api.typesafe.ai",
-    "api_key": "YOUR_TYPESAFE_API_KEY",
-    "use_models": [
-      {
-        "openai-codex/gpt-6-astra/high": "Frontier model for the most complicated tasks. Expensive and slow; use for difficult planning, architecture, and non-trivial problems.",
-        "openai/gpt-4.1-mini/off": "Fast, inexpensive model for small, well-defined edits and straightforward tasks."
+  "subagents-models": [
+    {
+      "junior": {
+        "model": "gpt-4.1-mini",
+        "provider": "openai",
+        "reasoning-level": "off",
+        "description": "Small, well-defined edits and lookups."
       }
-    ]
-  }
+    },
+    {
+      "senior": {
+        "model": "gpt-6-astra",
+        "provider": "openai-codex",
+        "reasoning-level": "high",
+        "description": "Difficult architecture and cross-system debugging."
+      }
+    }
+  ]
 }
 ```
 
-Replace the example choices with models available in your Pi installation. Each key has the form `provider/model/thinking-level`; model IDs may contain slashes. Thinking levels are `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`. Each value is a non-empty description of when to use that choice. You can put choices in one object or separate objects in `use_models`, up to 255 entries. Duplicate keys keep the first description.
+Use models available in your Pi installation. Names are arbitrary, unique, non-empty strings without leading or trailing whitespace. Each array entry defines one preset. `model`, `provider`, and `reasoning-level` are required. Accepted reasoning levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; support depends on the selected model and Pi version. `description` is optional. The tool schema shows each name with its description, or just its name when omitted.
 
-- `enabled` must be `true`. Missing settings, disabled settings, or an empty model list leave existing behavior unchanged and make no Jev requests.
-- `model` selects the decision model, not the worker model. `jev` maps to TypeSafe's `jev-latest`; explicit TypeSafe model IDs also work.
-- `timeout_seconds` defaults to `1200` seconds and bounds the whole Jev request, including reading the response body. Set a number from `0.001` to `2147483.647` seconds. Invalid values follow the `fallback` policy.
-- `provider_url` is the provider base URL, defaulting to `https://api.typesafe.ai`. For a local compatible server, use `http://localhost:8765`. The extension appends `/v1/systemone`; trailing slashes are ignored. Use an HTTP or HTTPS URL without credentials, query parameters, or a fragment.
-- `api_key` is your TypeSafe API key. Worker providers still need their own Pi credentials.
-- `fallback` defaults to `true`. When a loaded `smart-decision` object omits it, the extension adds `"fallback": true` and saves that configuration file at runtime. Existing values, including `false`, are left untouched. Untrusted project files are never changed. If saving fails, a warning is emitted and the runtime default still applies. If selection fails, a short warning is written and the worker uses the original launch settings. Set it to `false` to return a tool error without launching the affected worker. This covers network errors, the configured request timeout, API errors, invalid answers, and invalid enabled configuration. Cancellation cancels the task instead of falling back.
+```json
+{
+  "tasks": [
+    {
+      "agent": "code-writer",
+      "task": "Fix the button label.",
+      "max_subagents_allowed": 0,
+      "intelligence": "junior"
+    }
+  ]
+}
+```
 
-Each fresh launch and actual resume sends the agent definition's system prompt, the assigned task, and the candidate descriptions to `<provider_url>/v1/systemone`. Jev must select a configured candidate. When a task refers to a separate task-description or handoff file whose contents were not supplied, Jev is instructed to assume higher complexity and prefer a more capable model or higher reasoning level. It does not read that file. Mentioning a source filename alone does not trigger this guidance. Its provider, model, and thinking level override the parent model and agent frontmatter for that run. The parent's explicit `--provider` and `--api-key` are not forwarded when a Jev choice is applied. Startup retries reuse the choice. Finished results reused without launching a process make no request.
+`resume_subagents` also accepts `intelligence` on each resume item. A selected preset overrides the parent model and agent model/thinking settings for that run. The parent's explicit `--provider` and `--api-key` are not forwarded when a preset is selected. Worker providers use their configured Pi credentials. Omitting `intelligence` preserves existing defaults; it does not remember a previous preset choice.
 
-Configuration uses the same trust checks and file order as tool descriptions. A later `smart-decision` section replaces the entire earlier section, rather than merging credentials or choices. Reload Pi after editing settings. Nested workers load configuration through the same rules.
+`PI_SUBAGENT_INTELLIGENCE=true` enables selection when presets exist, which is the default. Set it to `false` or `0` to disable selection and hide the argument from both tools. Unknown names or attempts to select a preset while disabled fail before launching workers.
 
-Enabling this sends prompt contents and the configured API key to the selected provider and may incur separate API charges. Use only a provider you trust. Do not commit API keys to source control. The key is not included in worker arguments or saved tool results. Jev usage is not included in worker token totals.
+Configuration follows the trust checks and file order above. A later `subagents-models` block replaces the entire earlier block. An empty list disables selection. Invalid blocks warn and disable selection rather than using a partial list. Nested workers load configuration using the same rules. Reload Pi after changing settings.
+
+The old `smart-decision` block is ignored. Remove it and its router credentials when migrating. Configuration files are no longer modified at runtime.
 
 ## Limits and discovery
 
@@ -132,7 +146,7 @@ Normally Pi restarts through `process.execPath process.argv[1]`. No package-mana
 
 ## Forwarded CLI arguments
 
-Children inherit the parent's CLI settings except arguments managed by the extension. Without smart-decision selection, every new launch explicitly selects the parent's active model, so `/model` changes affect subsequent launches.
+Children inherit the parent's CLI settings except arguments managed by the extension. Without an intelligence preset, every new launch explicitly selects the parent's active model, so `/model` changes affect subsequent launches.
 
 Forwarded unchanged:
 

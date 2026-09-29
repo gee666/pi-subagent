@@ -1,4 +1,5 @@
-import { validatePreparedArguments } from "./schemas.js";
+import { createIntelligenceSchemas, validatePreparedArguments } from "./schemas.js";
+import { selectIntelligence } from "../intelligence.js";
 import * as path from "node:path";
 import { discoverAgents } from "../agents.js";
 import {
@@ -29,17 +30,21 @@ import {
 import { trackProgress } from "./progress.js";
 import { getSubagentsToolDescription } from "./prompts.js";
 import { ensureBudget, getParentModelForSubagent, getSessionDirForTask } from "./runtime.js";
-import { prepareRecoveryArguments, SubagentParams } from "./schemas.js";
+import { prepareIntelligenceArguments, prepareRecoveryArguments } from "./schemas.js";
 import type { ExtensionState } from "./state.js";
 
 export function registerSubagentsTool(state: ExtensionState) {
+  const parameters = createIntelligenceSchemas(state.intelligencePresets).subagents;
   state.pi.registerTool({
     name: SUBAGENT_TOOL_NAME,
     label: "Subagents",
     description: state.configuredToolPrompts[SUBAGENT_TOOL_NAME] ?? getSubagentsToolDescription(),
-    parameters: SubagentParams,
+    parameters,
     prepareArguments(args) {
-      return validatePreparedArguments(SubagentParams, prepareRecoveryArguments(args, state.pendingResumePlans));
+      return validatePreparedArguments(
+        parameters,
+        prepareRecoveryArguments(prepareIntelligenceArguments(args, "tasks"), state.pendingResumePlans),
+      );
     },
 
     async execute(toolCallId, params, signal, onUpdate, ctx) {
@@ -67,6 +72,7 @@ export function registerSubagentsTool(state: ExtensionState) {
           }
 
           for (const [index, task] of tasks.entries()) {
+            selectIntelligence(state.intelligencePresets, task.intelligence);
             if (!isBranchBudgetAmount(task.max_subagents_allowed)) {
               throw new SubagentBudgetError(
                 `tasks[${index}].max_subagents_allowed is required. Use a non-negative safe integer below Number.MAX_SAFE_INTEGER, excluding the assigned agent. Use 0 for a direct worker.`,
@@ -203,11 +209,14 @@ export function registerSubagentsTool(state: ExtensionState) {
                   state.currentOwnerId,
                   pendingAllocation.map(({ task, index }) => {
                     const agentConfig = agents.find((agent) => agent.name === task.agent);
+                    const preset = selectIntelligence(state.intelligencePresets, task.intelligence);
                     return {
                       agent: task.agent,
                       task: task.task,
                       budget: budgets[index],
-                      model: formatModelFlag(getParentModelForSubagent(state, ctx)) ?? agentConfig?.model,
+                      model: preset
+                        ? `${preset.provider}/${preset.model}`
+                        : (formatModelFlag(getParentModelForSubagent(state, ctx)) ?? agentConfig?.model),
                       tools: agentConfig?.tools,
                       sessionDir:
                         resumePlan?.details?.results[index]?.sessionDir ??
@@ -250,6 +259,7 @@ export function registerSubagentsTool(state: ExtensionState) {
               topLevelBaseId,
               names[0],
               budgets[0],
+              task.intelligence,
             );
           }
 

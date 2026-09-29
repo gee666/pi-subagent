@@ -11,9 +11,10 @@ export function registerToolsWithConfig(
   force = false,
 ): void {
   const config = loadPiSubagentsConfig(cwd, includeProject);
-  state.smartDecision = config.smartDecision;
+  const presetsChanged = JSON.stringify(state.intelligencePresets) !== JSON.stringify(config.intelligencePresets);
+  state.intelligencePresets = config.intelligencePresets;
   const nextToolPrompts = config.toolPrompts;
-  if (!force && sameToolPrompts(state.configuredToolPrompts, nextToolPrompts)) return;
+  if (!force && !presetsChanged && sameToolPrompts(state.configuredToolPrompts, nextToolPrompts)) return;
   state.configuredToolPrompts = nextToolPrompts;
   registerSubagentsTool(state);
   registerResumeSubagentsTool(state);

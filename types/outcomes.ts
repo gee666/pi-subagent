@@ -28,6 +28,7 @@ export function prepareResumeArguments(args: unknown): unknown {
         {
           subagent: record.subagent,
           task: record.task,
+          ...(record.intelligence !== undefined ? { intelligence: record.intelligence } : {}),
           ...(record.max_subagents_allowed !== undefined
             ? { max_subagents_allowed: record.max_subagents_allowed }
             : {}),

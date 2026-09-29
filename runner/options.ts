@@ -2,7 +2,7 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { AgentConfig } from "../agents.js";
 import type { SingleResult, SubagentDetails } from "../types.js";
 import type { SubagentBudget } from "../budget.js";
-import type { SmartDecisionConfig } from "./smart-decision.js";
+import type { IntelligencePreset } from "../intelligence.js";
 export type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
 export type DetailsFactory = ((results: SingleResult[]) => SubagentDetails) & {
   live?: (results: SingleResult[]) => SubagentDetails;
@@ -62,8 +62,10 @@ export interface RunAgentOptions {
   initialResult?: SingleResult;
   /** Fallback model to use when the agent config does not pin one. */
   fallbackModel?: string;
-  /** Optional trusted configuration for per-task Jev selection. Never persisted. */
-  smartDecision?: SmartDecisionConfig;
+  /** Caller-selected preset for this launch or resume. Omission keeps existing defaults. */
+  intelligence?: string;
+  /** Valid presets loaded from trusted configuration. */
+  intelligencePresets?: IntelligencePreset[];
   /** Test/debug override for the spawned pi executable. */
   piCommandOverride?: { command: string; argsPrefix?: string[] };
   /** Test/debug override for startup timeout. */
