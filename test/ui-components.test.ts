@@ -23,7 +23,11 @@ const detail: SubagentDetail = {
 test("overlay frames respect tiny widths and wide characters", () => {
   const common = { theme, getRows: () => 24, requestRender: () => {} };
   const pager = new SubagentPager({ ...common, detail, onClose: () => {} });
-  const picker = new SubagentPicker({ ...common, items: [{ name: "测试", agent: "writer" }], onPick: () => {} });
+  const picker = new SubagentPicker({
+    ...common,
+    items: [{ name: "测试", agent: "writer", intelligence: "高级 preset" }],
+    onPick: () => {},
+  });
   for (const component of [pager, picker]) {
     for (const width of [0, 1, 2, 3, 4, 5, 8, 20, 80]) {
       for (const line of component.render(width)) assert.ok(visibleWidth(line) <= width);
@@ -50,6 +54,24 @@ test("picker ranks names first without duplicate entries and accepts a selection
   picker.handleInput("John");
   picker.handleInput("\r");
   assert.equal(picked, "John");
+});
+
+test("picker shows and searches intelligence labels without relabeling legacy entries", () => {
+  const items = [
+    { name: "Maria", agent: "writer", intelligence: "myPRESET" },
+    { name: "John", agent: "reviewer" },
+  ];
+  const picker = new SubagentPicker({
+    items,
+    theme,
+    getRows: () => 24,
+    requestRender: () => {},
+    onPick: () => {},
+  });
+  const screen = picker.render(100).join("\n");
+  assert.match(screen, /Maria \(MyPRESET\/writer\)/);
+  assert.match(screen, /John \(reviewer\)/);
+  assert.deepEqual(filterPickerItems(items, "mypreset"), [items[0]]);
 });
 
 test("expand view backs through nested children to the filtered list, while q closes", () => {

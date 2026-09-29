@@ -36,7 +36,12 @@ export function registerSubagentExpandCommand(state: ExtensionState): void {
       // one by any fragment of the name, agent type, or task.
       const pickerItems: PickerItem[] = Object.values(registry.agents ?? {})
         .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
-        .map((record) => ({ name: record.name, agent: record.agent, task: record.task }));
+        .map((record) => ({
+          name: record.name,
+          agent: record.agent,
+          task: record.task,
+          intelligence: record.intelligence,
+        }));
       const items = filterPickerItems(pickerItems, prefix).map((item) => ({
         value: item.name,
         label: item.name,
@@ -70,7 +75,12 @@ export function registerSubagentExpandCommand(state: ExtensionState): void {
       const record = name ? findNameRecord(registry, name) : undefined;
       if (!record && name) {
         const suggestions = filterPickerItems(
-          sortedRecords.map((item) => ({ name: item.name, agent: item.agent, task: item.task })),
+          sortedRecords.map((item) => ({
+            name: item.name,
+            agent: item.agent,
+            task: item.task,
+            intelligence: item.intelligence,
+          })),
           name,
         )
           .slice(0, 10)
@@ -101,7 +111,12 @@ export function registerSubagentExpandCommand(state: ExtensionState): void {
       await ctx.ui.custom(
         (tui, theme, _keybindings, done: (value: void) => void) =>
           new SubagentExpandView({
-            items: sortedRecords.map((item) => ({ name: item.name, agent: item.agent, task: item.task })),
+            items: sortedRecords.map((item) => ({
+              name: item.name,
+              agent: item.agent,
+              task: item.task,
+              intelligence: item.intelligence,
+            })),
             detail,
             resolveDetail,
             getRows: () => tui?.terminal?.rows ?? 30,

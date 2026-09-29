@@ -1,9 +1,11 @@
 import { overlayFrame } from "./frame.js";
+import { displayIntelligence } from "../intelligence.js";
 import { Key, matchesKey, fuzzyFilter } from "@earendil-works/pi-tui";
 import type { DetailTheme } from "../detail.js";
 export interface PickerItem {
   name: string;
   agent: string;
+  intelligence?: string;
   task?: string;
 }
 
@@ -11,7 +13,11 @@ export function filterPickerItems(items: PickerItem[], query: string): PickerIte
   const trimmed = query.trim();
   if (!trimmed) return items;
   const byName = fuzzyFilter(items, trimmed, (item) => item.name);
-  const byEverything = fuzzyFilter(items, trimmed, (item) => `${item.name} ${item.agent} ${item.task ?? ""}`);
+  const byEverything = fuzzyFilter(
+    items,
+    trimmed,
+    (item) => `${item.name} ${item.agent} ${item.intelligence ?? ""} ${item.task ?? ""}`,
+  );
   const seen = new Set(byName);
   return [...byName, ...byEverything.filter((item) => !seen.has(item))];
 }
@@ -97,7 +103,8 @@ export class SubagentPicker {
       }
       const isSelected = this.scroll + index === this.selected;
       const marker = isSelected ? theme.fg("accent", ">") : " ";
-      const label = `${item.name} (${item.agent})`;
+      const agent = item.intelligence ? `${displayIntelligence(item.intelligence)}/${item.agent}` : item.agent;
+      const label = `${item.name} (${agent})`;
       const task = item.task ? ` — ${item.task.replace(/\s+/g, " ")}` : "";
       out.push(frame.row(`${marker} ${theme.fg("accent", label)}${theme.fg("dim", task)}`));
     }

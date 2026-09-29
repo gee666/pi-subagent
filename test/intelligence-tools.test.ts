@@ -18,7 +18,7 @@ const settings = [
 ];
 const flag = (args: string[], name: string) => args[args.indexOf(name) + 1];
 
-test("launch and named resume apply per-item choices, omission defaults, and schema refreshes", async (t) => {
+test("launch and named resume require per-item choices and preserve hidden defaults on schema refresh", async (t) => {
   fs.mkdirSync("tmp", { recursive: true });
   const root = fs.mkdtempSync(path.resolve("tmp/intelligence-tools-"));
   const log = path.join(root, "calls.jsonl");
@@ -115,6 +115,16 @@ test("launch and named resume apply per-item choices, omission defaults, and sch
     await host.emit("before_agent_start", {}, ctx);
     const budget = findPersistedBudget(entries)!;
     await assert.rejects(host.call("subagents", "bad", { tasks: [task("bad", "missing")] }, ctx));
+    for (const missing of [{}, { intelligence: null }]) {
+      const invalid = { ...task("missing choice"), ...missing };
+      for (const tasks of [
+        [invalid],
+        [task("valid choice", "junior"), invalid],
+        [invalid, task("valid choice", "expert")],
+      ]) {
+        await assert.rejects(host.call("subagents", "missing-launch-choice", { tasks }, ctx));
+      }
+    }
     assert.equal(readBudget(budget).remaining, 10);
     assert.equal(calls().length, 0);
     assert.equal(fs.existsSync(namesFile), false);
@@ -134,17 +144,17 @@ test("launch and named resume apply per-item choices, omission defaults, and sch
     const parallel = await host.call(
       "subagents",
       "parallel",
-      { tasks: [task("expert work", "expert"), { ...task("default work"), intelligence: null }] },
+      { tasks: [task("expert work", "expert"), task("junior work", "junior")] },
       ctx,
     );
     assert.equal(parallel.isError, false, JSON.stringify(parallel.content));
     const expert = calls().find((call) => call.prompt.includes("expert work"))!;
-    const omitted = calls().find((call) => call.prompt.includes("default work"))!;
+    const junior = calls().find((call) => call.prompt.includes("junior work"))!;
     assert.equal(flag(expert.args, "--provider"), "other");
     assert.equal(flag(expert.args, "--thinking"), "max");
-    assert.equal(flag(omitted.args, "--model"), "parent/live");
-    assert.equal(flag(omitted.args, "--thinking"), "low");
-    assert.equal(omitted.args.includes("--provider"), false);
+    assert.equal(flag(junior.args, "--model"), "org/model");
+    assert.equal(flag(junior.args, "--thinking"), "high");
+    assert.equal(flag(junior.args, "--provider"), "chosen");
     const before = readBudget(budget).remaining;
     await assert.rejects(
       host.call(
@@ -154,30 +164,48 @@ test("launch and named resume apply per-item choices, omission defaults, and sch
         ctx,
       ),
     );
+    const beforeCalls = calls().length;
+    const beforeNames = fs.readFileSync(namesFile, "utf8");
+    for (const missing of [{}, { intelligence: null }]) {
+      const invalid = { subagent: name, task: "missing choice", max_subagents_allowed: 2, ...missing };
+      const valid = { subagent: parallel.details.results[0].name, task: "valid choice", intelligence: "junior" };
+      for (const args of [
+        invalid,
+        { resumes: invalid },
+        { resumes: [invalid] },
+        { resumes: [valid, invalid] },
+        { resumes: [invalid, valid] },
+      ]) {
+        await assert.rejects(host.call("resume_subagents", "missing-resume-choice", args, ctx));
+      }
+    }
     assert.equal(readBudget(budget).remaining, before);
+    assert.equal(calls().length, beforeCalls, "invalid resume batches must not spawn any worker");
+    assert.equal(fs.readFileSync(namesFile, "utf8"), beforeNames, "invalid resumes must not change saved names");
     const resumed = await host.call(
       "resume_subagents",
       "resumed",
       {
         resumes: [
           { subagent: name, task: "resume expert", intelligence: "expert" },
-          { subagent: parallel.details.results[0].name, task: "resume default", intelligence: null },
+          { subagent: parallel.details.results[0].name, task: "resume junior", intelligence: "junior" },
         ],
       },
       ctx,
     );
     assert.equal(resumed.isError, false, JSON.stringify(resumed.content));
     const selectedResume = calls().find((call) => call.prompt === "resume expert")!;
-    const defaultResume = calls().find((call) => call.prompt === "resume default")!;
+    const juniorResume = calls().find((call) => call.prompt === "resume junior")!;
     assert.equal(flag(selectedResume.args, "--model"), "big");
     assert.equal(flag(selectedResume.args, "--provider"), "other");
     assert.equal(flag(selectedResume.args, "--thinking"), "max");
     assert.equal(selectedResume.args.includes("--continue"), true);
-    assert.equal(flag(defaultResume.args, "--model"), "parent/live");
-    assert.equal(flag(defaultResume.args, "--thinking"), "low");
+    assert.equal(flag(juniorResume.args, "--model"), "org/model");
+    assert.equal(flag(juniorResume.args, "--thinking"), "high");
+    assert.equal(flag(juniorResume.args, "--provider"), "chosen");
     assert.equal(readBudget(budget).remaining, before);
     assert.equal(resumed.details.results[0].intelligence, "expert");
-    assert.equal(resumed.details.results[1].intelligence, undefined);
+    assert.equal(resumed.details.results[1].intelligence, "junior");
     assert.equal(single.details.results[0].intelligence, "junior", "resume cannot rewrite earlier results");
     const detail = buildSubagentDetail(readNamesRegistry(namesFile).agents[name]);
     assert.deepEqual(
@@ -200,32 +228,18 @@ test("launch and named resume apply per-item choices, omission defaults, and sch
       ),
       ["junior", "expert"],
     );
-    const nullLaunch = await host.call(
-      "subagents",
-      "null-single",
-      { tasks: [{ ...task("null launch"), intelligence: null }] },
-      ctx,
-    );
-    assert.equal(nullLaunch.isError, false, JSON.stringify(nullLaunch.content));
-    for (const args of [
-      { resumes: { subagent: nullLaunch.details.results[0].name, task: "null object resume", intelligence: null } },
-      { subagent: nullLaunch.details.results[0].name, task: "null shorthand resume", intelligence: null },
-    ]) {
-      const result = await host.call("resume_subagents", "null-resume", args, ctx);
-      assert.equal(result.isError, false, JSON.stringify(result.content));
-    }
-    for (const call of calls().filter((call) => call.prompt.includes("null "))) {
-      assert.equal(flag(call.args, "--model"), "parent/live");
-      assert.equal(flag(call.args, "--thinking"), "low");
-      assert.equal(call.args.includes("--provider"), false);
-    }
     fs.writeFileSync(config, JSON.stringify({ "subagents-models": [{ renamed: settings[0].junior }] }));
     await host.emit("session_start", {}, ctx);
     assert.notEqual(host.tool("subagents").parameters, initialSchema);
     for (const tool of ["subagents", "resume_subagents"]) {
       assert.equal(JSON.stringify(host.tool(tool).parameters).includes('"intelligence"'), false);
     }
-    const sole = await host.call("subagents", "sole", { tasks: [task("automatic sole")] }, ctx);
+    const sole = await host.call(
+      "subagents",
+      "sole",
+      { tasks: [{ ...task("automatic sole"), intelligence: null }] },
+      ctx,
+    );
     assert.equal(sole.isError, false, JSON.stringify(sole.content));
     assert.equal(sole.details.results[0].intelligence, "renamed");
     assert.equal(flag(calls().at(-1)!.args, "--model"), "org/model");
@@ -241,13 +255,18 @@ test("launch and named resume apply per-item choices, omission defaults, and sch
     process.env.PI_SUBAGENT_INTELLIGENCE = "0";
     await host.emit("session_start", {}, ctx);
     assert.equal(JSON.stringify(host.tool("subagents").parameters).includes('"intelligence"'), false);
-    const disabled = await host.call("subagents", "disabled", { tasks: [task("disabled work")] }, ctx);
+    const disabled = await host.call(
+      "subagents",
+      "disabled",
+      { tasks: [{ ...task("disabled work"), intelligence: null }] },
+      ctx,
+    );
     assert.equal(disabled.details.results[0].intelligence, undefined);
     assert.equal(flag(calls().at(-1)!.args, "--model"), "parent/live");
     const disabledResume = await host.call(
       "resume_subagents",
       "disabled-resume",
-      { resumes: { subagent: name, task: "disabled resume" } },
+      { resumes: { subagent: name, task: "disabled resume", intelligence: null } },
       ctx,
     );
     assert.equal(disabledResume.details.results[0].intelligence, undefined);
@@ -255,11 +274,11 @@ test("launch and named resume apply per-item choices, omission defaults, and sch
     fs.writeFileSync(config, JSON.stringify({ "subagents-models": [] }));
     process.env.PI_SUBAGENT_INTELLIGENCE = "true";
     await host.emit("session_start", {}, ctx);
-    const zero = await host.call("subagents", "zero", { tasks: [task("zero work")] }, ctx);
+    const zero = await host.call("subagents", "zero", { tasks: [{ ...task("zero work"), intelligence: null }] }, ctx);
     const zeroResume = await host.call(
       "resume_subagents",
       "zero-resume",
-      { resumes: { subagent: name, task: "zero resume" } },
+      { subagent: name, task: "zero resume", intelligence: null },
       ctx,
     );
     assert.equal(zero.details.results[0].intelligence, undefined);

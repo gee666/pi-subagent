@@ -105,7 +105,7 @@ Collapsed results show each child's name, task, status, and most recent activity
 
 `/subagent-expand <name>` opens a saved worker transcript. With no name, it opens a searchable picker. Name completion is fuzzy. Each task or resume shows its actual provider/model and thinking level from the worker's session, not the parent's settings. Selected presets also appear as an intelligence label, kept separately for each run. Missing historical model/thinking metadata appears as `unknown`.
 
-[Model presets](docs/configuration.md#caller-selected-intelligence) show labels such as `Nicolas (Junior/code-writer)` in regular tool results. One enabled preset applies automatically to all launches and resumes without exposing an `intelligence` argument. Two or more expose an optional choice; zero or disabled presets keep the existing defaults and show no intelligence label.
+[Model presets](docs/configuration.md#caller-selected-intelligence) show labels such as `Nicolas (Junior/code-writer)` in regular tool results. One enabled preset applies automatically to all launches and resumes without exposing an `intelligence` argument. Two or more require an explicit `intelligence` choice on every launch and resume item. Omitted or `null` choices reject the whole batch before any worker starts. Zero or disabled presets keep the existing defaults and show no intelligence label.
 
 | Key | Action |
 | --- | --- |

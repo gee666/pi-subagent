@@ -69,20 +69,18 @@ export function createIntelligenceSchemas(presets: IntelligencePreset[] = []) {
   // Literal alternatives enforce validation; enum and descriptions advertise the caller's choices.
   // The tuple is non-empty whenever these dynamic schemas are exposed.
   const intelligence = {
-    intelligence: Type.Optional(
-      Type.Union(
-        presets.map((preset) => Type.Literal(preset.name, { description: preset.description })) as [
-          TLiteral<string>,
-          ...TLiteral<string>[],
-        ],
-        {
-          enum: presets.map((preset) => preset.name),
-          description: [
-            "Optional named model/provider/reasoning preset. Omit to use existing defaults.",
-            ...presets.map((preset) => `${preset.name}${preset.description ? `: ${preset.description}` : ""}`),
-          ].join("\n"),
-        },
-      ),
+    intelligence: Type.Union(
+      presets.map((preset) => Type.Literal(preset.name, { description: preset.description })) as [
+        TLiteral<string>,
+        ...TLiteral<string>[],
+      ],
+      {
+        enum: presets.map((preset) => preset.name),
+        description: [
+          "Required named model/provider/reasoning preset. Choose a configured preset for every launch and resume.",
+          ...presets.map((preset) => `${preset.name}${preset.description ? `: ${preset.description}` : ""}`),
+        ].join("\n"),
+      },
     ),
   };
   const task = Type.Object({ ...TaskItem.properties, ...intelligence }, { additionalProperties: false });
@@ -102,8 +100,8 @@ export function createIntelligenceSchemas(presets: IntelligencePreset[] = []) {
   return presets.length >= 2 && intelligenceEnabled(presets)
     ? { subagents, resumes }
     : {
-        subagents: SubagentParams as typeof subagents,
-        resumes: ResumeSubagentsParams as typeof resumes,
+        subagents: SubagentParams as unknown as typeof subagents,
+        resumes: ResumeSubagentsParams as unknown as typeof resumes,
       };
 }
 
@@ -136,7 +134,7 @@ export function normalizeResumes(
   return normalized;
 }
 
-/** Strict provider schemas can send null for omitted optional intelligence. Leave all other fields alone. */
+/** Normalize provider nulls to omission. Exposed choices still fail required-field validation. */
 export function prepareIntelligenceArguments(args: unknown, key: "tasks" | "resumes"): unknown {
   if (!isRecord(args) || !Object.hasOwn(args, key)) return args;
   const omitNull = (item: unknown): unknown => {
