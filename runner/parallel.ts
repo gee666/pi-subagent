@@ -1,4 +1,5 @@
 import type { AgentConfig } from "../agents.js";
+import { selectIntelligence } from "../intelligence.js";
 import { type SingleResult, type SubagentDetails, emptyUsage, isResultSuccess, getFinalOutput } from "../types.js";
 import type { SubagentBudget } from "../budget.js";
 import {
@@ -63,9 +64,17 @@ export async function executeParallelSubprocess(
     };
   }
 
-  const allResults: SingleResult[] = tasks.map(
-    (t, index) =>
-      resumeResults?.[index] ?? {
+  const allResults: SingleResult[] = tasks.map((t, index) => {
+    const previous = resumeResults?.[index];
+    if (previous && isResultSuccess(previous)) return previous;
+    let intelligence: string | undefined;
+    try {
+      intelligence = selectIntelligence(extras?.intelligencePresets, t.intelligence)?.name;
+    } catch {
+      // Let the single runner report invalid selections as aligned task failures.
+    }
+    return {
+      ...(previous ?? {
         agent: t.agent,
         agentSource: "unknown" as const,
         task: t.task,
@@ -80,8 +89,10 @@ export async function executeParallelSubprocess(
         completedTurns: 0,
         turnInProgress: false,
         liveLog: [],
-      },
-  );
+      }),
+      intelligence,
+    };
+  });
 
   const emitProgress = () => {
     if (!onUpdate) return;

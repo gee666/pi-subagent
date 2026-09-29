@@ -102,13 +102,17 @@ test("legacy assistant metadata is used without guessing thinking or trusting th
   }
 });
 
-test("missing transcripts report unknown instead of claiming the parent model was used", () => {
+test("missing transcripts keep a known initial intelligence but never guess model or thinking", () => {
   const f = fixture([]);
   try {
     fs.unlinkSync(f.file);
+    f.record.intelligence = "junior";
     const detail = buildSubagentDetail(f.record);
     assert.equal(detail.model, undefined);
-    assert.match(renderTurnOverviewLines(detail, 0, 120).join("\n"), /Model: unknown • Thinking: unknown/);
+    assert.match(
+      renderTurnOverviewLines(detail, 0, 120).join("\n"),
+      /Model: unknown • Thinking: unknown • Intelligence: Junior/,
+    );
   } finally {
     f.cleanup();
   }

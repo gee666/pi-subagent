@@ -1,4 +1,5 @@
 import { sessionFilesIn, readSessionEntries } from "./session.js";
+import { SUBAGENT_INTELLIGENCE_CUSTOM_TYPE } from "../intelligence.js";
 export { sessionFilesIn, readSessionMessages } from "./session.js";
 import * as os from "node:os";
 import type { NamesRegistry, SubagentNameRecord } from "../names.js";
@@ -104,6 +105,7 @@ export function parseTranscriptMessages(messages: unknown[]): ParsedTranscript {
   let thinkingLevel: string | undefined;
   const pendingTools = new Map<string, Extract<DetailEvent, { type: "tool" }>>();
   const observedModels = new Set<DetailBlock>();
+  let pendingIntelligence: string | undefined;
 
   const currentBlock = (): DetailBlock => {
     if (blocks.length === 0) {
@@ -114,6 +116,11 @@ export function parseTranscriptMessages(messages: unknown[]): ParsedTranscript {
 
   for (const entry of messages) {
     const wrapper = asRecord(entry);
+    if (wrapper.type === "custom" && wrapper.customType === SUBAGENT_INTELLIGENCE_CUSTOM_TYPE) {
+      const value = asRecord(wrapper.data).intelligence;
+      if (value === null || typeof value === "string") pendingIntelligence = value || undefined;
+      continue;
+    }
     if (wrapper.type === "model_change") {
       if (typeof wrapper.modelId === "string" && wrapper.modelId && wrapper.modelId !== "synthetic-tool-call") {
         model =
@@ -141,8 +148,11 @@ export function parseTranscriptMessages(messages: unknown[]): ParsedTranscript {
         at,
         model,
         thinkingLevel,
+        intelligence: pendingIntelligence,
         events: [],
       });
+      // Metadata belongs to the next task only, not an unrecorded later continuation.
+      pendingIntelligence = undefined;
       continue;
     }
 
@@ -251,7 +261,18 @@ export function buildSubagentDetail(record: SubagentNameRecord, options: { sessi
   }
 
   if (blocks.length === 0 && record.task) {
-    blocks = [{ kind: "task", index: 0, prompt: record.task, at: record.createdAt, model, thinkingLevel, events: [] }];
+    blocks = [
+      {
+        kind: "task",
+        index: 0,
+        prompt: record.task,
+        at: record.createdAt,
+        model,
+        thinkingLevel,
+        intelligence: sessionDir === record.sessionDir ? record.intelligence : undefined,
+        events: [],
+      },
+    ];
   }
   if (blocks.length > 0 && !blocks[0].prompt && record.task) {
     blocks[0].prompt = record.task;

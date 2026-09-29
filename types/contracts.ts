@@ -68,6 +68,8 @@ export interface SingleResult {
   task: string;
   /** Unique resumable human name within the delegation tree (e.g. "John"). */
   name?: string;
+  /** Configured preset name selected for this invocation, not a previous resume. */
+  intelligence?: string;
   /** Durable branch allowance, shared by this agent's resumes and session forks. */
   budget?: import("../budget.js").SubagentBudget;
   /** Epoch ms when this subagent run started (used for TUI timestamps). */

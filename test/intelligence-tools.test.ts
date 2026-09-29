@@ -6,6 +6,11 @@ import { createExtensionHarness, customEntry, hostDouble, model } from "./helper
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { SUBAGENT_NAMES_CUSTOM_TYPE, readNamesRegistry } from "../names.js";
 import { findPersistedBudget, readBudget } from "../budget.js";
+import { buildSubagentDetail, renderTurnOverviewLines } from "../detail.js";
+import { SUBAGENT_INTELLIGENCE_CUSTOM_TYPE } from "../intelligence.js";
+import { renderResult } from "../render.js";
+import { forkSessionInto } from "../names.js";
+import type { ThemeFg } from "../tree.js";
 
 const settings = [
   { junior: { model: "org/model", provider: "chosen", "reasoning-level": "high", description: "Small changes" } },
@@ -27,13 +32,22 @@ test("launch and named resume apply per-item choices, omission defaults, and sch
       const request = JSON.parse(line); if (request.type !== 'prompt') return;
       fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ prompt: request.message, args }) + '\\n');
       fs.mkdirSync(session, { recursive: true });
-      fs.writeFileSync(path.join(session, 'session.jsonl'), JSON.stringify({ type: 'session', id: 'fake' }) + '\\n');
+      const file = path.join(session, 'session.jsonl');
+      if (!fs.existsSync(file)) fs.writeFileSync(file, JSON.stringify({ type: 'session', id: 'fake' }) + '\\n');
+      for (const entry of [
+        { type: 'custom', customType: ${JSON.stringify(SUBAGENT_INTELLIGENCE_CUSTOM_TYPE)}, data: { intelligence: JSON.parse(process.env.PI_SUBAGENT_RUN_INTELLIGENCE) } },
+        { type: 'model_change', provider: args.includes('--provider') ? args[args.indexOf('--provider') + 1] : 'parent', modelId: args[args.indexOf('--model') + 1] },
+        { type: 'thinking_level_change', thinkingLevel: args[args.indexOf('--thinking') + 1] },
+        { type: 'message', message: { role: 'user', content: request.message } },
+      ]) fs.appendFileSync(file, JSON.stringify(entry) + '\\n');
       console.log(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'done' }], stopReason: 'stop' } }));
       console.log(JSON.stringify({ type: 'agent_settled' }));
     });
   `,
   );
   const variables = {
+    HOME: path.join(root, "home"),
+    PI_SUBAGENT_RUN_INTELLIGENCE: "null",
     PI_CODING_AGENT_DIR: path.join(root, "user"),
     PI_SUBAGENT_INTELLIGENCE: "true",
     PI_SUBAGENT_MAX_TOTAL_AGENTS: "10",
@@ -111,6 +125,12 @@ test("launch and named resume apply per-item choices, omission defaults, and sch
     assert.equal(flag(calls()[0].args, "--thinking"), "high");
     const name = single.details.results[0].name!;
     assert.equal(readNamesRegistry(namesFile).agents[name].model, "chosen/org/model");
+    assert.equal(readNamesRegistry(namesFile).agents[name].intelligence, "junior");
+    assert.equal(JSON.parse(JSON.stringify(single.details)).results[0].intelligence, "junior");
+    const theme = { fg: ((_color, text) => text) as ThemeFg, bold: (text: string) => text };
+    assert.ok(
+      renderResult(single, false, theme).render(160).join("\n").includes(`${name} (Junior/intelligence-worker)`),
+    );
     const parallel = await host.call(
       "subagents",
       "parallel",
@@ -156,6 +176,30 @@ test("launch and named resume apply per-item choices, omission defaults, and sch
     assert.equal(flag(defaultResume.args, "--model"), "parent/live");
     assert.equal(flag(defaultResume.args, "--thinking"), "low");
     assert.equal(readBudget(budget).remaining, before);
+    assert.equal(resumed.details.results[0].intelligence, "expert");
+    assert.equal(resumed.details.results[1].intelligence, undefined);
+    assert.equal(single.details.results[0].intelligence, "junior", "resume cannot rewrite earlier results");
+    const detail = buildSubagentDetail(readNamesRegistry(namesFile).agents[name]);
+    assert.deepEqual(
+      detail.blocks.map((block) => block.intelligence),
+      ["junior", "expert"],
+    );
+    assert.match(
+      renderTurnOverviewLines(detail, 0, 160).join("\n"),
+      /Model: chosen\/org\/model • Thinking: high • Intelligence: Junior/,
+    );
+    assert.match(
+      renderTurnOverviewLines(detail, 1, 160).join("\n"),
+      /Model: other\/big • Thinking: max • Intelligence: Expert/,
+    );
+    const forkDir = path.join(root, "fork");
+    assert.equal(forkSessionInto(detail.sessionDir, forkDir), true);
+    assert.deepEqual(
+      buildSubagentDetail(readNamesRegistry(namesFile).agents[name], { sessionDir: forkDir }).blocks.map(
+        (block) => block.intelligence,
+      ),
+      ["junior", "expert"],
+    );
     const nullLaunch = await host.call(
       "subagents",
       "null-single",
@@ -178,11 +222,55 @@ test("launch and named resume apply per-item choices, omission defaults, and sch
     fs.writeFileSync(config, JSON.stringify({ "subagents-models": [{ renamed: settings[0].junior }] }));
     await host.emit("session_start", {}, ctx);
     assert.notEqual(host.tool("subagents").parameters, initialSchema);
-    assert.match(JSON.stringify(host.tool("subagents").parameters), /renamed/);
-    assert.doesNotMatch(JSON.stringify(host.tool("resume_subagents").parameters), /expert/);
+    for (const tool of ["subagents", "resume_subagents"]) {
+      assert.equal(JSON.stringify(host.tool(tool).parameters).includes('"intelligence"'), false);
+    }
+    const sole = await host.call("subagents", "sole", { tasks: [task("automatic sole")] }, ctx);
+    assert.equal(sole.isError, false, JSON.stringify(sole.content));
+    assert.equal(sole.details.results[0].intelligence, "renamed");
+    assert.equal(flag(calls().at(-1)!.args, "--model"), "org/model");
+    const soleResume = await host.call(
+      "resume_subagents",
+      "sole-resume",
+      { resumes: { subagent: name, task: "automatic resume" } },
+      ctx,
+    );
+    assert.equal(soleResume.details.results[0].intelligence, "renamed");
+    assert.equal(flag(calls().at(-1)!.args, "--thinking"), "high");
+    assert.equal(readNamesRegistry(namesFile).agents[name].intelligence, "junior", "registry keeps initial label only");
     process.env.PI_SUBAGENT_INTELLIGENCE = "0";
     await host.emit("session_start", {}, ctx);
     assert.equal(JSON.stringify(host.tool("subagents").parameters).includes('"intelligence"'), false);
+    const disabled = await host.call("subagents", "disabled", { tasks: [task("disabled work")] }, ctx);
+    assert.equal(disabled.details.results[0].intelligence, undefined);
+    assert.equal(flag(calls().at(-1)!.args, "--model"), "parent/live");
+    const disabledResume = await host.call(
+      "resume_subagents",
+      "disabled-resume",
+      { resumes: { subagent: name, task: "disabled resume" } },
+      ctx,
+    );
+    assert.equal(disabledResume.details.results[0].intelligence, undefined);
+    assert.equal(flag(calls().at(-1)!.args, "--thinking"), "low");
+    fs.writeFileSync(config, JSON.stringify({ "subagents-models": [] }));
+    process.env.PI_SUBAGENT_INTELLIGENCE = "true";
+    await host.emit("session_start", {}, ctx);
+    const zero = await host.call("subagents", "zero", { tasks: [task("zero work")] }, ctx);
+    const zeroResume = await host.call(
+      "resume_subagents",
+      "zero-resume",
+      { resumes: { subagent: name, task: "zero resume" } },
+      ctx,
+    );
+    assert.equal(zero.details.results[0].intelligence, undefined);
+    assert.equal(zeroResume.details.results[0].intelligence, undefined);
+    assert.equal(flag(calls().at(-1)!.args, "--model"), "parent/live");
+    const finalDetail = buildSubagentDetail(readNamesRegistry(namesFile).agents[name]);
+    assert.deepEqual(
+      finalDetail.blocks.map((block) => block.intelligence),
+      ["junior", "expert", "renamed", undefined, undefined],
+    );
+    assert.doesNotMatch(renderTurnOverviewLines(finalDetail, 4, 160).join("\n"), /Intelligence:/);
     assert.equal(fetch.mock.callCount(), 0);
   } finally {
     await host.emit("session_shutdown", {}, ctx);

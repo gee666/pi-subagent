@@ -1,4 +1,5 @@
 import { sessionFilesIn, readSessionMessages } from "./session.js";
+import { displayIntelligence } from "../intelligence.js";
 import {
   type NestedSubagentResult,
   type SingleResult,
@@ -284,8 +285,12 @@ function buildResultNode(rawResult: SingleResult, hydrateSessions: boolean): Tre
   const descendantLastAction = children.reduce((latest, child) => Math.max(latest, child.lastActionAt ?? 0), 0);
   const agentType = stringValue(result.agent, "unknown agent");
   const humanName = typeof result.name === "string" && result.name ? result.name : undefined;
+  const agentLabel =
+    typeof result.intelligence === "string" && result.intelligence
+      ? `${displayIntelligence(result.intelligence)}/${agentType}`
+      : agentType;
   return {
-    label: humanName ? `${humanName} (${agentType})` : agentType,
+    label: humanName ? `${humanName} (${agentLabel})` : agentLabel,
     status,
     meta: metaParts.join(" • "),
     task: typeof result.task === "string" ? result.task : undefined,

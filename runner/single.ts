@@ -87,8 +87,6 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
     });
   };
 
-  emitUpdate();
-
   // Enforce cycle prevention per task rather than rejecting an entire parallel
   // call. Legal siblings can still run while the cyclic task returns a normal
   // structured failure.
@@ -121,10 +119,9 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       return result;
     }
     const selection = selectIntelligence(opts.intelligencePresets, opts.intelligence);
-    if (selection) {
-      result.model = `${selection.provider}/${selection.model}`;
-      emitUpdate();
-    }
+    result.intelligence = selection?.name;
+    if (selection) result.model = `${selection.provider}/${selection.model}`;
+    emitUpdate();
     const { args: piArgs, prompt: taskPrompt } = buildPiArgs(
       agent,
       promptTmpPath,

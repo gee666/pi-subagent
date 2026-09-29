@@ -4,6 +4,7 @@ import { isResultError, type SingleResult } from "../types.js";
 import { SUBAGENT_SESSION_ROOT_ENV } from "../resume.js";
 import { SUBAGENT_NAMES_FILE_ENV } from "../names.js";
 import { SUBAGENT_BUDGET_DIR_ENV } from "../budget.js";
+import { SUBAGENT_RUN_INTELLIGENCE_ENV } from "../intelligence.js";
 import {
   configuredNonNegativeInt,
   SIGKILL_TIMEOUT_MS,
@@ -84,6 +85,8 @@ export async function runAttempt(
         ...(opts.namesFile ? { [SUBAGENT_NAMES_FILE_ENV]: opts.namesFile } : {}),
         // Never let an unbudgeted child inherit its parent's spendable slots.
         [SUBAGENT_BUDGET_DIR_ENV]: result.budget?.directory ?? "",
+        // An explicit null prevents an unselected child from inheriting its parent's label.
+        [SUBAGENT_RUN_INTELLIGENCE_ENV]: JSON.stringify(result.intelligence ?? null),
         ...(fallbackModel ? { [SUBAGENT_FALLBACK_MODEL_ENV]: fallbackModel } : {}),
         // All other provider/auth/proxy/temp/home variables are inherited.
         // PI_OFFLINE is inherited, never forced by this runner.

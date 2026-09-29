@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test, before, after } from "node:test";
+const originalEnabled = process.env.PI_SUBAGENT_INTELLIGENCE;
+before(() => {
+  process.env.PI_SUBAGENT_INTELLIGENCE = "true";
+});
+after(() => {
+  if (originalEnabled === undefined) delete process.env.PI_SUBAGENT_INTELLIGENCE;
+  else process.env.PI_SUBAGENT_INTELLIGENCE = originalEnabled;
+});
 import { intelligenceEnabled, parseIntelligencePresets, selectIntelligence } from "../intelligence.js";
 import {
   createIntelligenceSchemas,
@@ -76,6 +84,41 @@ test("environment supports boolean enable/disable with valid presets required", 
     if (previous === undefined) delete process.env.PI_SUBAGENT_INTELLIGENCE;
     else process.env.PI_SUBAGENT_INTELLIGENCE = previous;
   }
+});
+
+test("zero, sole, multiple, and disabled presets expose only actual caller choices", () => {
+  const task = { agent: "worker", task: "work", max_subagents_allowed: 0 };
+  const resume = { subagent: "Nicolas", task: "follow up" };
+  for (const [configured, enabled, exposed, automatic] of [
+    [[], "true", false, undefined],
+    [[presets[0]], "true", false, "junior"],
+    [presets, "true", true, undefined],
+    [[presets[0]], "false", false, undefined],
+    [presets, "0", false, undefined],
+  ] as const) {
+    process.env.PI_SUBAGENT_INTELLIGENCE = enabled;
+    const schemas = createIntelligenceSchemas([...configured]);
+    for (const schema of Object.values(schemas)) {
+      assert.equal(JSON.stringify(schema).includes('"intelligence"'), exposed);
+    }
+    assert.equal(selectIntelligence([...configured], undefined)?.name, automatic);
+    assert.deepEqual(validatePreparedArguments(schemas.subagents, { tasks: [task] }), { tasks: [task] });
+    assert.deepEqual(validatePreparedArguments(schemas.resumes, { resumes: [resume] }), { resumes: [resume] });
+    if (!exposed) {
+      assert.throws(() =>
+        validatePreparedArguments(schemas.subagents, { tasks: [{ ...task, intelligence: "junior" }] }),
+      );
+      assert.throws(() =>
+        validatePreparedArguments(schemas.resumes, { resumes: { ...resume, intelligence: "junior" } }),
+      );
+    }
+  }
+  process.env.PI_SUBAGENT_INTELLIGENCE = "true";
+  assert.equal(
+    selectIntelligence([presets[0]], "old configured name")?.name,
+    "junior",
+    "sole preset is automatic at runtime",
+  );
 });
 
 test("dynamic launch and resume schemas list names and descriptions and reject unknown choices", () => {
@@ -179,7 +222,7 @@ test("recovery discovers persisted null intelligence as omission without droppin
     const snapshot = structuredClone(recorded);
     const plan = findLatestResumableSubagentCall(makeCtx([assistantSubagentCall("recorded-null", recorded)]));
     const expected = recorded.map((task) => {
-      const { intelligence, ...rest } = task;
+      const { intelligence, ...rest } = { intelligence: undefined, ...task };
       return { ...rest, ...(intelligence != null ? { intelligence } : {}) };
     });
     assert.ok(plan, "recorded optional null must not discard the recovery plan");
@@ -188,10 +231,9 @@ test("recovery discovers persisted null intelligence as omission without droppin
     assert.deepEqual(recorded, snapshot, "discovery must not modify recorded arguments");
   }
   for (const intelligence of [7, false, {}]) {
+    const invalidTask = { ...omitted, intelligence };
     assert.equal(
-      findLatestResumableSubagentCall(
-        makeCtx([assistantSubagentCall("invalid", [{ ...omitted, intelligence }, selected])]),
-      ),
+      findLatestResumableSubagentCall(makeCtx([assistantSubagentCall("invalid", [invalidTask, selected])])),
       null,
     );
   }
@@ -203,5 +245,5 @@ test("crash recovery preserves the choice and does not match a differently selec
   assert.deepEqual(plan?.tasks, tasks);
   assert.equal(sameTasks(tasks, [{ ...tasks[0], intelligence: "other" }]), false);
   assert.equal(sameTasks(tasks, [{ agent: "worker", task: "work", max_subagents_allowed: 0 }]), false);
-  assert.deepEqual(prepareRecoveryArguments({ tasks }, [plan!]), { tasks });
+  assert.deepEqual(prepareRecoveryArguments({ tasks }, [plan!], presets), { tasks });
 });

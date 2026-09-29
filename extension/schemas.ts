@@ -4,7 +4,7 @@ import { Type } from "@sinclair/typebox";
 import { isBranchBudgetAmount, SubagentBudgetError } from "../budget.js";
 import { getTaskBranchSize, sameTasks, type ResumableSubagentCall, type ResumableTask } from "../resume.js";
 import { isRecord } from "./contracts.js";
-import type { IntelligencePreset } from "../intelligence.js";
+import { intelligenceEnabled, type IntelligencePreset } from "../intelligence.js";
 
 export const TaskItem = Type.Object(
   {
@@ -99,7 +99,7 @@ export function createIntelligenceSchemas(presets: IntelligencePreset[] = []) {
     },
     { additionalProperties: false },
   );
-  return presets.length
+  return presets.length >= 2 && intelligenceEnabled(presets)
     ? { subagents, resumes }
     : {
         subagents: SubagentParams as typeof subagents,
@@ -148,8 +148,37 @@ export function prepareIntelligenceArguments(args: unknown, key: "tasks" | "resu
   return { ...args, [key]: Array.isArray(items) ? items.map(omitNull) : omitNull(items) };
 }
 
-/** Legacy task arguments are accepted only for a matching crash-recovery plan. */
-export function prepareRecoveryArguments(args: unknown, plans: ResumableSubagentCall[]): unknown {
+/** Replay hidden choices through current defaults: a sole preset is automatic, zero/disabled uses no preset. */
+export function normalizeRecoveryIntelligence(
+  tasks: ResumableTask[],
+  presets: IntelligencePreset[] = [],
+): ResumableTask[] {
+  const exposeChoice = presets.length >= 2 && intelligenceEnabled(presets);
+  return tasks.map((task) => {
+    if (exposeChoice) return { ...task };
+    const { intelligence: _intelligence, ...rest } = task;
+    return rest;
+  });
+}
+
+/** Keep the saved plan intact so recovery reuses its call id, budgets, names, and sessions. */
+export function findRecoveryPlanIndex(
+  tasks: ResumableTask[],
+  plans: ResumableSubagentCall[],
+  presets: IntelligencePreset[] = [],
+): number {
+  const exact = plans.findIndex((plan) => sameTasks(plan.tasks, tasks));
+  return exact >= 0
+    ? exact
+    : plans.findIndex((plan) => sameTasks(normalizeRecoveryIntelligence(plan.tasks, presets), tasks));
+}
+
+/** Legacy task arguments and hidden intelligence are accepted only for a matching crash-recovery plan. */
+export function prepareRecoveryArguments(
+  args: unknown,
+  plans: ResumableSubagentCall[],
+  presets: IntelligencePreset[] = [],
+): unknown {
   if (!isRecord(args) || !Array.isArray(args.tasks)) return args;
   const tasks: unknown[] = args.tasks;
   const isTask = (task: unknown): task is ResumableTask =>
@@ -159,10 +188,10 @@ export function prepareRecoveryArguments(args: unknown, plans: ResumableSubagent
     ["max_agents_allowed", "max_agents_in_branch", "max_subagents_allowed"].every(
       (key) => task[key] === undefined || typeof task[key] === "number",
     );
-  if (!tasks.every(isTask) || !plans.some((plan) => sameTasks(plan.tasks, tasks))) return args;
+  if (!tasks.every(isTask) || findRecoveryPlanIndex(tasks, plans, presets) < 0) return args;
   return {
     ...args,
-    tasks: tasks.map((task) => {
+    tasks: normalizeRecoveryIntelligence(tasks, presets).map((task) => {
       const { max_agents_allowed: _inclusive, max_agents_in_branch: _previous, ...rest } = task;
       return { ...rest, max_subagents_allowed: (getTaskBranchSize(task) ?? 1) - 1 };
     }),

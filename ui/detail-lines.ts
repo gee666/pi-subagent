@@ -1,4 +1,5 @@
 import { RESUME_SUBAGENTS_TOOL_NAME } from "../types.js";
+import { displayIntelligence } from "../intelligence.js";
 import { type ThemeFg, formatClockTime, formatTokens, truncate } from "./tree-format.js";
 import type { DetailBlock, DetailChildRef, DetailUsage, SubagentDetail } from "./detail-model.js";
 import {
@@ -97,7 +98,11 @@ export function renderTurnOverviewLines(
     .filter(Boolean)
     .join(" • ");
   out.wrap(meta, "", "dim");
-  out.wrap(`Model: ${block.model ?? "unknown"} • Thinking: ${block.thinkingLevel ?? "unknown"}`, "", "dim");
+  out.wrap(
+    `Model: ${block.model ?? "unknown"} • Thinking: ${block.thinkingLevel ?? "unknown"}${block.intelligence ? ` • Intelligence: ${displayIntelligence(block.intelligence)}` : ""}`,
+    "",
+    "dim",
+  );
   out.wrap(`session total: ${usageLine(detail.usage)}`, "", "dim");
   for (const note of detail.notes) out.wrap(note, "", "warning");
 

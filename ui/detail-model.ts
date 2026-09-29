@@ -19,6 +19,8 @@ export interface DetailBlock {
   /** Actual settings recorded for this task or resume, not the parent's model. */
   model?: string;
   thinkingLevel?: string;
+  /** Preset recorded for this task, never inferred from model settings or later resumes. */
+  intelligence?: string;
   events: DetailEvent[];
 }
 

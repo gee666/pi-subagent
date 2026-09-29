@@ -1,6 +1,13 @@
 import { parseBoolean } from "./shared.js";
 
 export const SUBAGENT_INTELLIGENCE_ENV = "PI_SUBAGENT_INTELLIGENCE";
+/** Runner-owned metadata, separate from the preset feature toggle. */
+export const SUBAGENT_RUN_INTELLIGENCE_ENV = "PI_SUBAGENT_RUN_INTELLIGENCE";
+export const SUBAGENT_INTELLIGENCE_CUSTOM_TYPE = "pi-subagent-intelligence";
+
+export function displayIntelligence(name: string): string {
+  return name.charAt(0).toUpperCase() + name.slice(1);
+}
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
 export interface IntelligencePreset {
@@ -51,14 +58,17 @@ export function intelligenceEnabled(presets: IntelligencePreset[]): boolean {
   return presets.length > 0 && parseBoolean(process.env[SUBAGENT_INTELLIGENCE_ENV]) !== false;
 }
 
-/** Omission never changes the existing model/provider/thinking defaults. */
+/** A sole enabled preset is automatic; with multiple presets omission keeps existing defaults. */
 export function selectIntelligence(
   presets: IntelligencePreset[] | undefined,
   name: unknown,
 ): IntelligencePreset | undefined {
-  if (name === undefined) return undefined;
-  if (!presets || !intelligenceEnabled(presets))
+  if (!presets || !intelligenceEnabled(presets)) {
+    if (name === undefined) return undefined;
     throw new Error("Subagent intelligence selection is disabled or no valid presets are configured.");
+  }
+  if (presets.length === 1) return presets[0];
+  if (name === undefined) return undefined;
   const preset = presets.find((item) => item.name === name);
   if (!preset)
     throw new Error(

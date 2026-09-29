@@ -14,6 +14,8 @@ export interface SubagentNameRecord {
   budget?: import("../budget.js").SubagentBudget;
   /** Model pinned by the agent config at spawn time, if any. */
   model?: string;
+  /** Preset selected for the initial task only. Resume labels live in their transcripts. */
+  intelligence?: string;
   /** Tool restriction from the agent config at spawn time, if any. */
   tools?: string[];
   /** Session id of the pi process that spawned this subagent (its owner). */

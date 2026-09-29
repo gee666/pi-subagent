@@ -11,7 +11,7 @@ import {
 } from "../budget.js";
 import { allocateSubagentNames } from "../names.js";
 import { recordToolCallStart, renderCall, renderResult } from "../render.js";
-import { getTaskBranchSize, sameTasks } from "../resume.js";
+import { getTaskBranchSize } from "../resume.js";
 import { buildSubagentDetails, DEFAULT_DELEGATION_MODE, SUBAGENT_TOOL_NAME } from "../types.js";
 import { updateLatestBroadcastTargets } from "./broadcast.js";
 import { makeDetailsFactory } from "./details.js";
@@ -30,7 +30,7 @@ import {
 import { trackProgress } from "./progress.js";
 import { getSubagentsToolDescription } from "./prompts.js";
 import { ensureBudget, getParentModelForSubagent, getSessionDirForTask } from "./runtime.js";
-import { prepareIntelligenceArguments, prepareRecoveryArguments } from "./schemas.js";
+import { findRecoveryPlanIndex, prepareIntelligenceArguments, prepareRecoveryArguments } from "./schemas.js";
 import type { ExtensionState } from "./state.js";
 
 export function registerSubagentsTool(state: ExtensionState) {
@@ -43,7 +43,11 @@ export function registerSubagentsTool(state: ExtensionState) {
     prepareArguments(args) {
       return validatePreparedArguments(
         parameters,
-        prepareRecoveryArguments(prepareIntelligenceArguments(args, "tasks"), state.pendingResumePlans),
+        prepareRecoveryArguments(
+          prepareIntelligenceArguments(args, "tasks"),
+          state.pendingResumePlans,
+          state.intelligencePresets,
+        ),
       );
     },
 
@@ -150,7 +154,7 @@ export function registerSubagentsTool(state: ExtensionState) {
             }
           }
 
-          const resumePlanIndex = state.pendingResumePlans.findIndex((plan) => sameTasks(plan.tasks, tasks));
+          const resumePlanIndex = findRecoveryPlanIndex(tasks, state.pendingResumePlans, state.intelligencePresets);
           const resumePlan = resumePlanIndex >= 0 ? state.pendingResumePlans[resumePlanIndex] : null;
           if (launchGeneration !== state.lifecycleGeneration || signal?.aborted)
             throw new SubagentBudgetError("Launch canceled or session changed. No slots were reserved.");
@@ -217,6 +221,7 @@ export function registerSubagentsTool(state: ExtensionState) {
                       model: preset
                         ? `${preset.provider}/${preset.model}`
                         : (formatModelFlag(getParentModelForSubagent(state, ctx)) ?? agentConfig?.model),
+                      intelligence: preset?.name,
                       tools: agentConfig?.tools,
                       sessionDir:
                         resumePlan?.details?.results[index]?.sessionDir ??

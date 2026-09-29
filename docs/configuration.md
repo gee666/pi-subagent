@@ -58,7 +58,7 @@ Missing descriptions retain their defaults. Overrides change written guidance, n
 
 ## Caller-selected intelligence
 
-Define named model presets in `pi-subagent.json`. The calling model chooses a preset through each task's optional `intelligence` argument. No router or separate model-selection request is used.
+Define named model presets in `pi-subagent.json`. With two or more enabled presets, the calling model chooses through each task's optional `intelligence` argument. With exactly one enabled preset, both tools hide the argument and automatically use that preset for every launch and resume. With no presets, the argument is absent and existing model/thinking defaults apply. No router or separate model-selection request is used.
 
 ```json
 {
@@ -98,9 +98,11 @@ Use models available in your Pi installation. Names are arbitrary, unique, non-e
 }
 ```
 
-`resume_subagents` also accepts `intelligence` on each resume item. A selected preset overrides the parent model and agent model/thinking settings for that run. The parent's explicit `--provider` and `--api-key` are not forwarded when a preset is selected. Worker providers use their configured Pi credentials. Omitting `intelligence` preserves existing defaults; it does not remember a previous preset choice.
+With multiple presets, `resume_subagents` also accepts `intelligence` on each resume item. A selected or automatic preset overrides the parent model and agent model/thinking settings for that run. The parent's explicit `--provider` and `--api-key` are not forwarded when a preset is selected. Worker providers use their configured Pi credentials. With multiple presets, omitting `intelligence` preserves existing defaults; it does not remember a previous preset choice.
 
-`PI_SUBAGENT_INTELLIGENCE=true` enables selection when presets exist, which is the default. Set it to `false` or `0` to disable selection and hide the argument from both tools. Unknown names or attempts to select a preset while disabled fail before launching workers.
+Tool result rows show the selected preset, for example `Nicolas (Junior/code-writer)`. Display names capitalize only the first character; configured spelling and argument values otherwise stay unchanged. Runs without a preset show `Nicolas (code-writer)`. Durable results retain their own preset name, and the name registry retains the initial choice. `/subagent-expand` shows each task's or resume's recorded intelligence alongside its actual transcript model and thinking level. Later resumes do not relabel earlier work. Missing model or thinking metadata remains `unknown`, even when a preset name is known.
+
+`PI_SUBAGENT_INTELLIGENCE=true` enables presets when they exist, which is the default. Set it to `false` or `0` to treat the configuration as having no presets: both tools hide the argument and no automatic preset applies. Unknown choices or attempts to pass a hidden argument fail before launching workers.
 
 Configuration follows the trust checks and file order above. A later `subagents-models` block replaces the entire earlier block. An empty list disables selection. Invalid blocks warn and disable selection rather than using a partial list. Nested workers load configuration using the same rules. Reload Pi after changing settings.
 

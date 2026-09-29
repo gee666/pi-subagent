@@ -74,6 +74,7 @@ export function compactSingleResultForDurableDetails(result: SingleResult): Sing
       ? withSubagentIdentities(result.subtreeUsageSummary, [result])
       : buildUsageSummary([result]),
     ...(result.name !== undefined ? { name: result.name } : {}),
+    ...(result.intelligence !== undefined ? { intelligence: result.intelligence } : {}),
     ...(result.startedAt !== undefined ? { startedAt: result.startedAt } : {}),
     ...(result.lastActionAt !== undefined ? { lastActionAt: result.lastActionAt } : {}),
     ...(result.stopReason !== undefined ? { stopReason: result.stopReason } : {}),

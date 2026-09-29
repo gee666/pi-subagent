@@ -6,6 +6,7 @@ import type { ResumeModel, StreamOptions, ProviderContext } from "./contracts.js
 import { RESUME_MODEL_DEF, isSyntheticResumePrompt } from "./models.js";
 import { restoreVisibleModelForResume } from "./runtime.js";
 import type { ExtensionState } from "./state.js";
+import { normalizeRecoveryIntelligence } from "./schemas.js";
 
 export function mergeProviderHeaders(
   base: Record<string, string | null> | undefined,
@@ -129,7 +130,11 @@ export function registerResumeProvider(state: ExtensionState): void {
           const toolCalls = plans.map((plan, index) =>
             fauxToolCall(
               SUBAGENT_TOOL_NAME,
-              { tasks: plan.tasks.map((task) => ({ ...task })) },
+              {
+                tasks: normalizeRecoveryIntelligence(plan.tasks, state.intelligencePresets).map((task) => ({
+                  ...task,
+                })),
+              },
               { id: `resume_subagent_${Date.now()}_${index}` },
             ),
           );

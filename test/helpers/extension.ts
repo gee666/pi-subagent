@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import * as path from "node:path";
 import { createFauxCore, fauxAssistantMessage, type Provider, type Model, type Api } from "@earendil-works/pi-ai";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type {
@@ -197,7 +198,7 @@ export function createExtensionHarness(options: { confirmAnswer?: boolean } = {}
         getBranch: () => entries,
         getEntries: () => entries,
         getSessionId: () => "session-1",
-        getSessionDir: () => process.cwd(),
+        getSessionDir: () => path.resolve("tmp", "harness-sessions", String(process.pid)),
         getHeader: () => null,
       }),
       ui: hostDouble<ExtensionContext["ui"]>({

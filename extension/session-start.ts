@@ -1,4 +1,5 @@
 import { isRecord } from "./contracts.js";
+import { SUBAGENT_INTELLIGENCE_CUSTOM_TYPE, SUBAGENT_RUN_INTELLIGENCE_ENV } from "../intelligence.js";
 import * as path from "node:path";
 import { discoverAgents } from "../agents.js";
 import {
@@ -30,6 +31,19 @@ export function registerSessionLifecycle(state: ExtensionState): void {
     state.lifecycleGeneration += 1;
     state.sessionActive = true;
     state.latestSessionCtx = ctx;
+    // Record this invocation before its first user message, including on leaf workers.
+    // Null clears the label on a resume that uses no preset. Do not rewrite earlier entries.
+    const runIntelligence = process.env[SUBAGENT_RUN_INTELLIGENCE_ENV];
+    if (runIntelligence !== undefined) {
+      try {
+        const intelligence: unknown = JSON.parse(runIntelligence);
+        if (intelligence === null || (typeof intelligence === "string" && intelligence.trim())) {
+          state.pi.appendEntry?.(SUBAGENT_INTELLIGENCE_CUSTOM_TYPE, { intelligence });
+        }
+      } catch {
+        // Ignore malformed external metadata without guessing a preset from the active model.
+      }
+    }
     const previouslyCouldDelegate = state.canDelegate;
     state.canDelegate = state.currentDepth < state.maxDepth;
     state.currentBudget = undefined;

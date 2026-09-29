@@ -22,6 +22,7 @@ export interface AllocateNameRequest {
   task: string;
   sessionDir: string;
   model?: string;
+  intelligence?: string;
   tools?: string[];
 }
 
@@ -51,6 +52,7 @@ export async function allocateSubagentNames(
         agent: request.agent,
         task: request.task,
         ...(request.model !== undefined ? { model: request.model } : {}),
+        ...(request.intelligence !== undefined ? { intelligence: request.intelligence } : {}),
         ...(request.budget !== undefined ? { budget: request.budget } : {}),
         ...(request.tools !== undefined ? { tools: request.tools } : {}),
         ownerSessionId,
