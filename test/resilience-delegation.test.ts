@@ -2,6 +2,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { buildSubagentDetails, isResultError } from "../types.js";
 import { makeResult } from "./fixtures/resilience.js";
+import { savedSessionDir } from "./helpers/saved-session.js";
 
 describe("runAgent delegation recovery", () => {
   test("a recovered nested delegation failure does not poison the calling agent", async () => {
@@ -161,8 +162,9 @@ describe("runAgent delegation recovery", () => {
     }
   });
 
-  test("resuming an unfinished durable result preserves pre-crash descendant usage", async () => {
+  test("resuming an unfinished durable result preserves pre-crash descendant usage", async (t) => {
     const { runAgentSubprocess: runAgent } = await import("../runner.js");
+    const sessionDir = savedSessionDir(t);
     const script = [
       `const usage={input:2,output:1,cacheRead:0,cacheWrite:0,totalTokens:3,cost:{total:0.02}}`,
       `console.log(JSON.stringify({type:"turn_start"}))`,
@@ -191,11 +193,11 @@ describe("runAgent delegation recovery", () => {
         costUsd: 0.17,
         turns: 2,
       },
-      sessionDir: "/tmp",
+      sessionDir,
     });
     const result = await runAgent({
       piCommandOverride: { command: process.execPath, argsPrefix: ["-e", script, "--"] },
-      cwd: "/tmp",
+      cwd: sessionDir,
       agents: [fakeAgent],
       agentName: "fake-agent",
       task: "resume",
@@ -204,7 +206,7 @@ describe("runAgent delegation recovery", () => {
       maxDepth: 3,
       preventCycles: false,
       resumeSession: true,
-      sessionDir: "/tmp",
+      sessionDir,
       initialResult: initial,
       makeDetails: (results) => buildSubagentDetails("single", "spawn", null, results),
     });

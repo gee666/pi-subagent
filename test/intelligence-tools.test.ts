@@ -205,7 +205,8 @@ test("named resumes retain original settings across preset, parent, definition, 
     assert.equal(flag(selectedResume.args, "--model"), "big");
     assert.equal(flag(selectedResume.args, "--provider"), "other");
     assert.equal(flag(selectedResume.args, "--thinking"), "max");
-    assert.equal(selectedResume.args.includes("--continue"), true);
+    assert.equal(selectedResume.args.includes("--continue"), false);
+    assert.ok(flag(selectedResume.args, "--session").endsWith("session.jsonl"));
     assert.equal(flag(juniorResume.args, "--model"), "org/model");
     assert.equal(flag(juniorResume.args, "--thinking"), "high");
     assert.equal(flag(juniorResume.args, "--provider"), "chosen");

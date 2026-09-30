@@ -18,26 +18,26 @@ export function subagentDetailsHaveErrors(value: unknown): boolean {
   return isSubagentDetails(value) && value.results.some((result) => isResultError(result));
 }
 
-/** Normalize common legacy/model-generated resume argument shorthands. */
+/** Normalize resume shorthands and strict-provider nulls before schema validation.
+ * Only the optional budget accepts null as omission; required fields and intelligence remain invalid. */
 export function prepareResumeArguments(args: unknown): unknown {
   if (!args || typeof args !== "object" || Array.isArray(args)) return args;
   const record = args as Record<string, unknown>;
+  const omitNullBudget = (item: unknown): unknown => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+    const resume = item as Record<string, unknown>;
+    if (resume.max_subagents_allowed !== null) return item;
+    const { max_subagents_allowed: _budget, ...rest } = resume;
+    return rest;
+  };
   if (record.resumes === undefined && typeof record.subagent === "string" && typeof record.task === "string") {
-    return {
-      resumes: [
-        {
-          subagent: record.subagent,
-          task: record.task,
-          ...(record.intelligence !== undefined ? { intelligence: record.intelligence } : {}),
-          ...(record.max_subagents_allowed !== undefined
-            ? { max_subagents_allowed: record.max_subagents_allowed }
-            : {}),
-        },
-      ],
-    };
+    // Preserve unknown fields so validation still rejects intelligence and misspelled arguments.
+    const { resumes: _resumes, ...item } = record;
+    return { resumes: [omitNullBudget(item)] };
   }
-  if (record.resumes && typeof record.resumes === "object" && !Array.isArray(record.resumes)) {
-    return { ...record, resumes: [record.resumes] };
+  if (Array.isArray(record.resumes)) return { ...record, resumes: record.resumes.map(omitNullBudget) };
+  if (record.resumes && typeof record.resumes === "object") {
+    return { ...record, resumes: [omitNullBudget(record.resumes)] };
   }
   return args;
 }

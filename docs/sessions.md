@@ -30,7 +30,7 @@ The ledger uses immutable files and atomic hard links beside saved worker sessio
 }
 ```
 
-The override replaces the worker's lifetime descendant cap, excluding itself. It does not grant ten fresh launches. Omit it to retain the existing cap.
+The override replaces the worker's lifetime descendant cap, excluding itself. It does not grant ten fresh launches. Omit it to retain the existing cap. Provider-generated `null` for this optional field also keeps the cap; explicit `0` still replaces it with zero.
 
 - Increases reserve only additional capacity from the original launcher's allowance.
 - Decreases cannot remove slots already spent or assigned. They do not refund the parent. Raising a cap to a previously funded value needs no new reservation.
@@ -47,7 +47,9 @@ The shared name registry and ownership identity are recorded in session metadata
 
 The agent that launched a worker owns its original session. A child may receive an ancestor's worker name in its task. Resuming that name creates a private session fork, leaving the owner's context untouched. Each caller reuses one fork per name, including across restarts. Forks retain the same budget.
 
-Concurrent resumes of the same session are rejected using both in-process checks and crash-tolerant registry markers. Removed agent definitions do not prevent resume; the registry retains model/tool restrictions and the saved session retains context.
+Concurrent resumes of the same session are rejected using both in-process checks and crash-tolerant registry markers. Removed agent definitions do not prevent resume; the registry retains model/tool restrictions and the saved session retains context. Resumes open the saved transcript explicitly, preserving its original working directory even when the caller's directory differs. They do not use Pi's cwd-filtered `--continue` discovery. The runner selects that transcript once before extension discovery and uses its working directory for discovery and process startup. Caller approval applies only when that directory matches the caller's project; otherwise the saved project is explicitly unapproved, including when extension exclusions are disabled.
+
+Relative `--skill`, `--prompt-template`, and theme file/directory arguments keep the parent's startup directory as their base, even when a resumed worker runs in another project. Named theme selections and non-filesystem references are forwarded unchanged.
 
 ## Crash recovery
 

@@ -3,7 +3,8 @@ import * as path from "node:path";
 import { SUBAGENT_NAMES_CUSTOM_TYPE } from "./names-identity.js";
 import { isRecord } from "./values.js";
 
-function latestSessionFile(sessionDir: string): string | undefined {
+/** Select the saved file directly; Pi's --continue filters custom session dirs by cwd. */
+export function latestSessionFile(sessionDir: string): string | undefined {
   try {
     const entries = fs
       .readdirSync(sessionDir)

@@ -304,8 +304,11 @@ describe("budget tool integration", () => {
       assert.equal(calls(log).length, before);
       assert.equal(readBudget(worker.budget).remaining, 3);
       assert.equal(readBudget(parentBudget).remaining, 1);
-      await assert.rejects(resume("invalid", -1), /Expected union value/);
-      await assert.rejects(resume("overflow", Number.MAX_SAFE_INTEGER), /Expected union value/);
+      await assert.rejects(resume("invalid", -1), /Invalid tool arguments:[\s\S]*\/resumes\/0\/max_subagents_allowed/);
+      await assert.rejects(
+        resume("overflow", Number.MAX_SAFE_INTEGER),
+        /Invalid tool arguments:[\s\S]*\/resumes\/0\/max_subagents_allowed/,
+      );
       assert.equal(calls(log).length, before);
       assert.equal(Object.keys(readNamesRegistry(path.join(dir, "names.json")).agents).length, 1);
       const reloaded = await harness(dir, "reloaded", undefined, [...root.entries]);

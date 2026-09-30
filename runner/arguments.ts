@@ -3,8 +3,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentConfig } from "../agents.js";
 import type { SubagentModelSettings } from "../storage/name-records.js";
+import { latestSessionFile } from "../storage/session-fork.js";
 import { SUBAGENT_FALLBACK_MODEL_ENV } from "./constants.js";
 import { childExtensionArgs, excludedExtensions } from "./extension-policy.js";
+import { resolveInheritedResource } from "./resource-paths.js";
 function resolveExtensionArg(value: string): string {
   if (!value) return value;
   if (value.startsWith("npm:") || value.startsWith("git:")) return value;
@@ -18,7 +20,7 @@ function resolveExtensionArg(value: string): string {
 interface InheritedCliArgs {
   /** --extension/-e and --no-extensions/-ne args (with path resolution) */
   extensionArgs: string[];
-  /** All other non-blocked flags to forward verbatim to every child */
+  /** Other non-blocked flags, with filesystem resources anchored to the startup cwd. */
   alwaysProxy: string[];
   /** Explicit CLI provider associated with a forwarded --api-key. */
   explicitProvider: string | undefined;
@@ -45,7 +47,7 @@ interface InheritedCliArgs {
  * Unknown flags use a heuristic: if the next token doesn't start with "-",
  * it is treated as the flag's value.
  */
-function parseInheritedCliArgs(argv: string[]): InheritedCliArgs {
+function parseInheritedCliArgs(argv: string[], startupCwd = process.cwd()): InheritedCliArgs {
   const extensionArgs: string[] = [];
   const alwaysProxy: string[] = [];
   let explicitProvider: string | undefined;
@@ -149,7 +151,10 @@ function parseInheritedCliArgs(argv: string[]): InheritedCliArgs {
     ) {
       const [value, skip] = getVal();
       if (value !== undefined) {
-        alwaysProxy.push(flagName, value);
+        const forwarded = ["--skill", "--prompt-template", "--theme"].includes(flagName)
+          ? resolveInheritedResource(flagName, value, startupCwd)
+          : value;
+        alwaysProxy.push(flagName, forwarded);
         if (flagName === "--provider") explicitProvider = value;
       }
       i += skip;
@@ -218,9 +223,16 @@ function parseInheritedCliArgs(argv: string[]): InheritedCliArgs {
 /** Cached once — process.argv is immutable at runtime */
 const _inheritedCliArgs = parseInheritedCliArgs(process.argv);
 
-export async function resolveChildExtensionArgs(cwd: string, projectTrusted?: boolean): Promise<string[] | undefined> {
+export async function resolveChildExtensionArgs(
+  cwd: string,
+  projectTrusted?: boolean,
+  forceTrustDecision = false,
+): Promise<string[] | undefined> {
   const excludes = excludedExtensions();
-  if (excludes.length === 0) return undefined;
+  if (excludes.length === 0)
+    return forceTrustDecision
+      ? [..._inheritedCliArgs.extensionArgs, projectTrusted ? "--approve" : "--no-approve"]
+      : undefined;
   return childExtensionArgs(_inheritedCliArgs.extensionArgs, cwd, projectTrusted, excludes);
 }
 
@@ -255,6 +267,7 @@ export function buildPiArgs(
   selection?: { provider: string; model: string; thinking: string },
   extensionArgsOverride?: string[],
   resumeSettings?: SubagentModelSettings,
+  savedSessionFile?: string | null,
 ): { args: string[]; prompt: string } {
   const provider = resumeSettings?.model?.includes("/") ? resumeSettings.model.split("/", 1)[0] : selection?.provider;
   // Named resumes can reuse CLI-only auth, but only for the explicitly matching provider.
@@ -277,10 +290,18 @@ export function buildPiArgs(
   if (extensionArgsOverride) args.push(...extensionArgsOverride);
 
   if (sessionDir) args.push("--session-dir", sessionDir);
-  if (resumeSession) args.push("--continue");
+  if (resumeSession || resumeSettings) {
+    // The runner pins this before resource discovery. Only standalone callers select here.
+    const savedFile =
+      savedSessionFile === undefined ? (sessionDir ? latestSessionFile(sessionDir) : undefined) : savedSessionFile;
+    if (savedFile) args.push("--session", savedFile);
+    else if (resumeSettings)
+      throw new Error(`Cannot resume named subagent: no saved session file in ${sessionDir ?? "(missing directory)"}.`);
+    else args.push("--continue"); // Legacy recovery without a saved transcript can start from its task.
+  }
 
   // Named resumes bypass today's parent, agent definition, CLI defaults, and presets.
-  // Missing legacy settings are left to --continue rather than replaced with current defaults.
+  // Missing legacy settings are left to the saved session rather than replaced with current defaults.
   const model = resumeSettings
     ? resumeSettings.model
     : (selection?.model ?? resolveSubagentModel(agent.model, fallbackModelOverride));

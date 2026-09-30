@@ -2,6 +2,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { emptyUsage } from "../types.js";
 import { makeRunningResult as makeResult } from "./helpers/results.js";
+import { savedSessionDir } from "./helpers/saved-session.js";
 
 function hungPiMockOptions(timeoutMs = 50) {
   return {
@@ -146,8 +147,9 @@ describe("runAgent resilience", () => {
     assert.doesNotMatch(result.stderr, /session directory does not exist/);
   });
 
-  test("resume subprocess that exits without new messages is an error", async () => {
+  test("resume subprocess that exits without new messages is an error", async (t) => {
     const { runAgentSubprocess: runAgent } = await import("../runner.js");
+    const sessionDir = savedSessionDir(t);
     const fakeAgent = {
       name: "fake",
       description: "fake agent",
@@ -161,7 +163,7 @@ describe("runAgent resilience", () => {
         command: process.execPath,
         argsPrefix: ["-e", "process.exit(0)", "--"],
       },
-      cwd: "/tmp",
+      cwd: sessionDir,
       agents: [fakeAgent],
       agentName: "fake",
       task: "continue work",
@@ -170,13 +172,13 @@ describe("runAgent resilience", () => {
       maxDepth: 3,
       preventCycles: false,
       resumeSession: true,
-      sessionDir: "/tmp",
+      sessionDir,
       initialResult: makeResult({
         agent: "fake",
         agentSource: "user",
         task: "continue work",
         messages: [{ role: "assistant", content: [{ type: "text", text: "started" }] }],
-        sessionDir: "/tmp",
+        sessionDir,
       }),
       makeDetails: (results) => ({
         mode: "single",

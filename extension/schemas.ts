@@ -1,4 +1,4 @@
-import { Assert } from "@sinclair/typebox/value";
+import { Value } from "@sinclair/typebox/value";
 import type { Static, TSchema, TLiteral } from "@sinclair/typebox";
 import { Type } from "@sinclair/typebox";
 import { isBranchBudgetAmount, SubagentBudgetError } from "../budget.js";
@@ -58,7 +58,8 @@ export const ResumeItem = Type.Object(
 
 export const ResumeSubagentsParams = Type.Object(
   {
-    resumes: Type.Union([Type.Array(ResumeItem, { minItems: 1 }), ResumeItem], {
+    resumes: Type.Array(ResumeItem, {
+      minItems: 1,
       description: "Array of {subagent, task} objects. Each named subagent is resumed in parallel with its new task.",
     }),
   },
@@ -188,6 +189,15 @@ export function prepareRecoveryArguments(
 
 /** SDK argument preparation must return a schema-validated value. */
 export function validatePreparedArguments<T extends TSchema>(schema: T, value: unknown): Static<T> {
-  Assert(schema, value);
-  return value;
+  if (Value.Check(schema, value)) return value;
+  // Pi aliases TypeBox imports to its installed version. Newer Assert errors say only "Assert".
+  // Read validation issues directly so both TypeBox versions report useful paths without echoing input.
+  const issues = Array.from(Value.Errors(schema, value), (error) => {
+    const at = "instancePath" in error && typeof error.instancePath === "string" ? error.instancePath : error.path;
+    const params = "params" in error && isRecord(error.params) ? error.params : {};
+    const keys = params.additionalProperties ?? params.requiredProperties;
+    const properties = Array.isArray(keys) ? ` (${keys.filter((key) => typeof key === "string").join(", ")})` : "";
+    return `${at || "root"}: ${error.message}${properties}`;
+  });
+  throw new Error(`Invalid tool arguments:\n${issues.join("\n")}`);
 }

@@ -15,7 +15,7 @@ export interface RunningSubagentHandle {
 export type RunningSubagentStartedCallback = (handle: RunningSubagentHandle) => void;
 
 export interface RunAgentOptions {
-  /** Working directory inherited by every subagent process. */
+  /** Caller working directory; saved-session resumes run in the saved project's cwd. */
   cwd: string;
   /** Effective trust for this cwd; absent SDK callers fail closed. */
   projectTrusted?: boolean;
@@ -56,7 +56,7 @@ export interface RunAgentOptions {
    * self-set env var would then masquerade as "inherited from a parent".
    */
   namesFile?: string;
-  /** Continue the most recent session in sessionDir instead of creating a new one. */
+  /** Select and pin the most recent saved session in sessionDir instead of creating a new one. */
   resumeSession?: boolean;
   /** Previously captured state for this same subagent, used to render resumed nested trees. */
   initialResult?: SingleResult;

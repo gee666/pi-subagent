@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test, after } from "node:test";
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -28,6 +28,11 @@ const script = `process.stdin.once("data", () => {
   console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" } }));
   console.log(JSON.stringify({ type: "agent_settled" }));
 });`;
+fs.mkdirSync("tmp", { recursive: true });
+const savedDir = fs.mkdtempSync(path.resolve("tmp/named-resume-runner-"));
+const savedFile = path.join(savedDir, "session.jsonl");
+fs.writeFileSync(savedFile, JSON.stringify({ type: "session", id: "saved" }));
+after(() => fs.rmSync(savedDir, { recursive: true, force: true }));
 const options: RunAgentOptions = {
   cwd: process.cwd(),
   agents: [agent],
@@ -40,7 +45,7 @@ const options: RunAgentOptions = {
   fallbackModel: "changed/parent",
   intelligencePresets: presets,
   resumeSession: true,
-  sessionDir: process.cwd(),
+  sessionDir: savedDir,
   resumeSettings: saved,
   makeDetails: (results) => buildSubagentDetails("single", "spawn", null, results),
   piCommandOverride: { command: process.execPath, argsPrefix: ["-e", script, "--"] },
@@ -58,7 +63,8 @@ test("named runner bypasses automatic/disabled presets and preserves pending and
       assert.equal(flag(args, "--provider"), "original");
       assert.equal(flag(args, "--model"), "org/model");
       assert.equal(flag(args, "--thinking"), "high");
-      assert.ok(args.includes("--continue"));
+      assert.equal(flag(args, "--session"), savedFile);
+      assert.equal(args.includes("--continue"), false);
       assert.equal(label, "removed-preset");
       const persisted = JSON.parse(JSON.stringify(options.makeDetails([result])));
       assert.equal(persisted.results[0].intelligence, "removed-preset");
@@ -111,7 +117,7 @@ test("named resumes retain same-provider CLI auth but strip conflicting or unkno
     const code = `
       process.argv = ["node", "pi", ...${JSON.stringify(cli)}];
       const { buildPiArgs } = await import("./runner/arguments.ts");
-      const build = (saved) => buildPiArgs(${JSON.stringify(agent)}, null, "continue", ".", true,
+      const build = (saved) => buildPiArgs(${JSON.stringify(agent)}, null, "continue", ${JSON.stringify(savedDir)}, true,
         "changed/parent", true, undefined, undefined, saved).args;
       const launch = buildPiArgs(${JSON.stringify(agent)}, null, "launch", ".", false, "parent/old-model").args;
       const matching = build({ model: "parent/old-model", thinking: "off" });
@@ -131,7 +137,8 @@ test("named resumes retain same-provider CLI auth but strip conflicting or unkno
     }
     assert.equal(flag(matching, "--model"), "old-model");
     assert.equal(flag(matching, "--thinking"), "off");
-    assert.ok(matching.includes("--continue"));
+    assert.equal(flag(matching, "--session"), savedFile);
+    assert.equal(matching.includes("--continue"), false);
     assert.equal(flag(pinned, "--provider"), "original");
     assert.equal(flag(pinned, "--model"), "org/model");
     assert.equal(flag(pinned, "--thinking"), "high");

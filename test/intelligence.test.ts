@@ -137,19 +137,21 @@ test("only launch schemas list intelligence choices; resumes reject any choice",
     ),
   );
   assert.ok(schemas.subagents.properties.tasks.items.required?.includes("intelligence"));
-  for (const alternative of schemas.resumes.properties.resumes.anyOf) {
-    const item = alternative.type === "array" ? alternative.items : alternative;
-    assert.equal(Object.hasOwn(item.properties, "intelligence"), false);
-  }
+  assert.equal(Object.hasOwn(schemas.resumes.properties.resumes.items.properties, "intelligence"), false);
   assert.deepEqual(validatePreparedArguments(schemas.subagents, { tasks: [task] }), { tasks: [task] });
   for (const resumes of [resume, [resume]])
-    assert.deepEqual(validatePreparedArguments(schemas.resumes, { resumes }), { resumes });
+    assert.deepEqual(validatePreparedArguments(schemas.resumes, prepareResumeArguments({ resumes })), {
+      resumes: [resume],
+    });
   assert.throws(() => validatePreparedArguments(schemas.subagents, { tasks: [{ ...task, intelligence: "missing" }] }));
   assert.throws(() => validatePreparedArguments(schemas.resumes, { resumes: { ...resume, intelligence: 7 } }));
   assert.throws(() => validatePreparedArguments(createIntelligenceSchemas().subagents, { tasks: [task] }));
-  assert.deepEqual(validatePreparedArguments(createIntelligenceSchemas().resumes, { resumes: resume }), {
-    resumes: resume,
-  });
+  assert.deepEqual(
+    validatePreparedArguments(createIntelligenceSchemas().resumes, prepareResumeArguments({ resumes: resume })),
+    {
+      resumes: [resume],
+    },
+  );
   assert.deepEqual(normalizeResumes([resume])[0], {
     name: "John",
     task: "follow up",

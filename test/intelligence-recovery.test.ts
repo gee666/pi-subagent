@@ -213,7 +213,8 @@ test("saved explicit choice recovers through the provider and tool with sole, ze
         assert.deepEqual(result.budget, saved.budget);
         assert.equal(readBudget(budget).remaining, remaining, "recovery must not reserve a fresh branch");
         const args = JSON.parse(getFinalOutput(result.messages, result.finalOutput)) as string[];
-        assert.ok(args.includes("--continue"));
+        assert.equal(args.includes("--continue"), false);
+        assert.equal(args[args.indexOf("--session") + 1], path.join(saved.sessionDir, "session.jsonl"));
         assert.equal(args[args.indexOf("--model") + 1], expected ? "new-model" : "parent/live");
         assert.equal(args.includes("--provider"), !!expected);
         if (expected) {

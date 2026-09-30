@@ -14,6 +14,8 @@ import { writePromptToTempFile, cleanupTempDir, sessionDirExists } from "./files
 import { appendBoundedStderr, priorDescendantUsage, endedWithSyntheticResumeFailure } from "./result.js";
 import { runAttempt } from "./attempt.js";
 import { selectIntelligence } from "../intelligence.js";
+import * as path from "node:path";
+import { resolveSessionTarget } from "./session-target.js";
 export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleResult> {
   const {
     agents,
@@ -114,7 +116,18 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
   }
 
   try {
-    const extensionArgs = await resolveChildExtensionArgs(opts.cwd, opts.projectTrusted);
+    if (opts.signal?.aborted) {
+      result.exitCode = 130;
+      result.stopReason = "aborted";
+      result.errorMessage = "Subagent was aborted.";
+      emitUpdate();
+      return result;
+    }
+    const target = resolveSessionTarget(opts.cwd, sessionDir, shouldContinueSession, !!opts.resumeSettings);
+    // Approval is scoped to the caller's project, never transferable to a saved project's cwd.
+    const projectTrusted = target.cwd === path.resolve(opts.cwd) ? opts.projectTrusted : false;
+    const childOpts = { ...opts, cwd: target.cwd, sessionDir: target.sessionDir, projectTrusted };
+    const extensionArgs = await resolveChildExtensionArgs(target.cwd, projectTrusted, !!target.sessionFile);
     if (opts.signal?.aborted) {
       result.exitCode = 130;
       result.stopReason = "aborted";
@@ -132,13 +145,14 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       agent,
       promptTmpPath,
       task,
-      sessionDir,
+      target.sessionDir,
       shouldContinueSession,
       fallbackModel,
       opts.rawPrompt === true,
       selection,
       extensionArgs,
       opts.resumeSettings,
+      target.sessionFile,
     );
     const prompt =
       result.budget && readBudget(result.budget).limit > 0
@@ -152,7 +166,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
     for (let attempt = 0; ; attempt++) {
       startupTimedOut = false;
       const outcome = await runAttempt(
-        opts.resumeSettings ? { ...opts, fallbackModel: settings.model } : opts,
+        opts.resumeSettings ? { ...childOpts, fallbackModel: settings.model } : childOpts,
         result,
         piArgs,
         prompt,
