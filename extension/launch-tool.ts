@@ -35,7 +35,7 @@ import { findRecoveryPlanIndex, prepareIntelligenceArguments, prepareRecoveryArg
 import type { ExtensionState } from "./state.js";
 
 export function registerSubagentsTool(state: ExtensionState) {
-  const parameters = createIntelligenceSchemas(state.intelligencePresets).subagents;
+  const parameters = createIntelligenceSchemas(state.intelligencePresets, state.settings).subagents;
   state.pi.registerTool({
     name: SUBAGENT_TOOL_NAME,
     label: "Subagents",
@@ -48,6 +48,7 @@ export function registerSubagentsTool(state: ExtensionState) {
           prepareIntelligenceArguments(args, "tasks"),
           state.pendingResumePlans,
           state.intelligencePresets,
+          state.settings,
         ),
       );
     },
@@ -55,9 +56,10 @@ export function registerSubagentsTool(state: ExtensionState) {
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const toolResult = await (async () => {
         try {
+          if (!state.canDelegate) throw new Error("Subagent delegation is disabled for this session.");
           recordToolCallStart(toolCallId);
           updateLatestBroadcastTargets(state, undefined);
-          const discovery = discoverAgents(ctx.cwd, "both");
+          const discovery = discoverAgents(ctx.cwd, "both", state.settings);
           const agents = filterAgentsForCurrentLayer(discovery.agents, state.currentDepth, state.maxDepth);
 
           const makeDetails = makeDetailsFactory(discovery.projectAgentsDir, DEFAULT_DELEGATION_MODE);
@@ -77,7 +79,7 @@ export function registerSubagentsTool(state: ExtensionState) {
           }
 
           for (const [index, task] of tasks.entries()) {
-            selectIntelligence(state.intelligencePresets, task.intelligence);
+            selectIntelligence(state.intelligencePresets, task.intelligence, state.settings);
             if (!isBranchBudgetAmount(task.max_subagents_allowed)) {
               throw new SubagentBudgetError(
                 `tasks[${index}].max_subagents_allowed is required. Use a non-negative safe integer below Number.MAX_SAFE_INTEGER, excluding the assigned agent. Use 0 for a direct worker.`,
@@ -112,7 +114,7 @@ export function registerSubagentsTool(state: ExtensionState) {
           });
 
           const requestedProjectAgents = getRequestedProjectAgents(agents, requested);
-          const projectAgentConfirmationSetting = getProjectAgentConfirmationSetting();
+          const projectAgentConfirmationSetting = getProjectAgentConfirmationSetting(state.settings);
           const projectAgentSessionKey = getProjectAgentSessionKey(discovery.projectAgentsDir);
           const shouldConfirmProjectAgents =
             requestedProjectAgents.length > 0 &&
@@ -155,7 +157,12 @@ export function registerSubagentsTool(state: ExtensionState) {
             }
           }
 
-          const resumePlanIndex = findRecoveryPlanIndex(tasks, state.pendingResumePlans, state.intelligencePresets);
+          const resumePlanIndex = findRecoveryPlanIndex(
+            tasks,
+            state.pendingResumePlans,
+            state.intelligencePresets,
+            state.settings,
+          );
           const resumePlan = resumePlanIndex >= 0 ? state.pendingResumePlans[resumePlanIndex] : null;
           if (launchGeneration !== state.lifecycleGeneration || signal?.aborted)
             throw new SubagentBudgetError("Launch canceled or session changed. No slots were reserved.");
@@ -214,7 +221,7 @@ export function registerSubagentsTool(state: ExtensionState) {
                   state.currentOwnerId,
                   pendingAllocation.map(({ task, index }) => {
                     const agentConfig = agents.find((agent) => agent.name === task.agent);
-                    const preset = selectIntelligence(state.intelligencePresets, task.intelligence);
+                    const preset = selectIntelligence(state.intelligencePresets, task.intelligence, state.settings);
                     return {
                       agent: task.agent,
                       task: task.task,
@@ -223,6 +230,7 @@ export function registerSubagentsTool(state: ExtensionState) {
                         agentConfig ?? {},
                         formatModelFlag(getParentModelForSubagent(state, ctx)),
                         preset,
+                        state.settings,
                       ),
                       tools: agentConfig?.tools,
                       sessionDir:

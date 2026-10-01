@@ -1,3 +1,5 @@
+import { configuredEnv, type SubagentSettings } from "../settings.js";
+import { subagentDisabled } from "../runner/extension-policy.js";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig } from "../agents.js";
 import type { SubagentBudget } from "../budget.js";
@@ -13,9 +15,15 @@ import { resolveDelegationDepthConfig, type DelegationDepthConfig } from "./poli
 
 export interface ExtensionState extends DelegationDepthConfig {
   pi: ExtensionAPI;
+  settings?: SubagentSettings;
+  disabled?: boolean;
+  toolsRegistered?: boolean;
+  registeredConfigKey?: string;
+  resumeToolRegistered?: boolean;
+  resumesEnabled?: boolean;
   configuredToolPrompts: Record<string, string>;
   intelligencePresets?: PiSubagentsConfig["intelligencePresets"];
-  refreshRegisteredToolPrompts?: (cwd: string, includeProject: boolean) => void;
+  refreshRegisteredToolPrompts?: (cwd: string, includeProject: boolean, config?: PiSubagentsConfig) => void;
   resumeModelRegistry?: ResumeModelRegistry;
   lastRestorableModel?: ResumeModel;
   latestSessionCtx?: SessionContext;
@@ -44,16 +52,24 @@ export interface ExtensionState extends DelegationDepthConfig {
 }
 
 export function createExtensionState(pi: ExtensionAPI): ExtensionState {
+  const config = loadPiSubagentsConfig();
+  const depth = resolveDelegationDepthConfig(pi, config.settings);
+  const disabled = subagentDisabled(process.env, config.settings);
   return {
+    settings: config.settings,
     pi,
-    ...resolveDelegationDepthConfig(pi),
-    configuredToolPrompts: loadPiSubagentsConfig().toolPrompts,
+    ...depth,
+    disabled,
+    canDelegate: !disabled && depth.canDelegate,
+    configuredToolPrompts: config.toolPrompts,
     pendingInteractiveResumePrompt: null,
     lifecycleGeneration: 0,
     sessionActive: false,
     scheduledTasks: new Set(),
     resumeState: { plans: [], phase: "tool", trigger: "resumePrompt" },
-    maxParallelTasks: parseNonNegativeInt(process.env[SUBAGENT_MAX_PARALLEL_TASKS_ENV]) ?? DEFAULT_MAX_PARALLEL_TASKS,
+    maxParallelTasks:
+      parseNonNegativeInt(configuredEnv(SUBAGENT_MAX_PARALLEL_TASKS_ENV, config.settings)) ??
+      DEFAULT_MAX_PARALLEL_TASKS,
     discoveredAgents: [],
     currentSessionId: "ephemeral",
     currentSubagentSessionRoot: "",

@@ -3,6 +3,16 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
+export function resolveExtensionArg(value: string): string {
+  if (!value) return value;
+  if (value.startsWith("npm:") || value.startsWith("git:")) return value;
+  if (value.startsWith("~/")) return path.join(os.homedir(), value.slice(2));
+  if (path.isAbsolute(value)) return value;
+
+  const resolved = path.resolve(process.cwd(), value);
+  return fs.existsSync(resolved) ? resolved : value;
+}
+
 /** Pin explicit filesystem resources before a resume switches the child to another project. */
 export function resolveInheritedResource(flag: string, value: string, startupCwd: string): string {
   if (path.isAbsolute(value)) return value;

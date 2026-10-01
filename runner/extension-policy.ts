@@ -1,3 +1,4 @@
+import { loadSubagentSettings, type SubagentSettings } from "../settings.js";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -8,21 +9,31 @@ import {
   type ResolvedResource,
 } from "@earendil-works/pi-coding-agent";
 
-export function excludedExtensions(env: NodeJS.ProcessEnv = process.env): string[] {
-  return [
-    ...new Set(
-      [env["PI-SUBAGENT-EXCLUDE-EXTENSIONS"], env.PI_SUBAGENT_EXCLUDE_EXTENSIONS]
-        .flatMap((value) => (value ?? "").split(","))
-        .map((value) => value.trim())
-        .filter(Boolean),
-    ),
-  ];
+export function excludedExtensions(
+  env: NodeJS.ProcessEnv = process.env,
+  settings: SubagentSettings = loadSubagentSettings(),
+): string[] {
+  const envValues = [env["PI-SUBAGENT-EXCLUDE-EXTENSIONS"], env.PI_SUBAGENT_EXCLUDE_EXTENSIONS];
+  let values: string[];
+  if (envValues.some((value) => value !== undefined)) {
+    values = envValues.flatMap((value) => (value ?? "").split(",")).map((value) => value.trim());
+  } else {
+    // JSON arrays are not CSV: one path can contain a literal comma.
+    const parsed: unknown = JSON.parse(settings.PI_SUBAGENT_EXCLUDE_EXTENSIONS ?? "[]");
+    if (!Array.isArray(parsed) || !parsed.every((value) => typeof value === "string"))
+      throw new Error("Invalid extension.exclude settings. Expected a JSON string array.");
+    values = parsed;
+  }
+  return [...new Set(values.filter(Boolean))];
 }
 
-export function subagentDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return [env.PI_SUBAGENT_DISABLED, env["PI-SUBAGENT-DISABLED"]].some(
-    (value) => value === "1" || value?.toLowerCase() === "true",
-  );
+export function subagentDisabled(
+  env: NodeJS.ProcessEnv = process.env,
+  settings: SubagentSettings = loadSubagentSettings(),
+): boolean {
+  const values = [env.PI_SUBAGENT_DISABLED, env["PI-SUBAGENT-DISABLED"]];
+  if (!values.some((value) => value !== undefined)) values.push(settings.PI_SUBAGENT_DISABLED);
+  return values.some((value) => value === "1" || value?.toLowerCase() === "true");
 }
 
 function resolvedPath(value: string, cwd: string): string {

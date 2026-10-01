@@ -2,7 +2,7 @@
 
 ## Agent allowances
 
-A new main session has 50 agent slots by default. Set `PI_SUBAGENT_MAX_TOTAL_AGENTS` before starting a new session to change this. `0` blocks new launches but permits named resumes. Invalid values block launches.
+A new main session has 50 agent slots by default. Set `limits.total` in either settings filename or `PI_SUBAGENT_MAX_TOTAL_AGENTS` before starting a new session to change this. The environment takes precedence. `0` blocks new launches but permits named resumes. Invalid values block launches.
 
 `max_subagents_allowed` caps all descendants a worker may launch, excluding the worker itself. Each task reserves `1 + max_subagents_allowed` slots from the caller. Two tasks with descendant caps of `3` and `0` reserve five slots. Use `0` for a direct worker; `1` lets the worker launch one subagent.
 
@@ -14,7 +14,7 @@ A new main session has 50 agent slots by default. Set `PI_SUBAGENT_MAX_TOTAL_AGE
 
 The main agent sees its remaining count only below 30, to avoid presenting larger caps as spending targets. Delegating workers see their branch allowance. Enforcement is the same regardless of prompt visibility.
 
-Budgets persist across reloads, restarts, compaction, and forks. Changing the environment does not enlarge an existing tree. Workers from older sessions without recorded reservations may resume but cannot launch new descendants.
+Budgets persist across reloads, restarts, compaction, and forks. Changing the environment or JSON settings does not enlarge an existing tree. Workers from older sessions without recorded reservations may resume but cannot launch new descendants.
 
 Older recorded calls and ledgers remain resumable. The extension converts their allowances to descendant caps without changing reserved or remaining slots. New calls use only `max_subagents_allowed`.
 
@@ -72,4 +72,4 @@ Interrupted `resume_subagents` calls are not replayed automatically. The model c
 | `PI_SUBAGENT_NAMES_FILE` | Internal | Shared registry path, propagated to children |
 | `PI_SUBAGENT_BUDGET_DIR` | Internal | Reserved branch ledger, propagated and saved in session metadata |
 
-Internal storage paths should normally be left to the extension.
+The recovery controls also have JSON settings: `resume.prompt`, `resume.disableAuto`, and `resume.disabled`, respectively. See [settings files](configuration.md#settings-files). Internal storage paths are managed by the extension and have no JSON counterpart.

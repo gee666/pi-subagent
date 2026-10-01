@@ -13,7 +13,9 @@ export { getSubagentsToolDescription } from "./extension/prompts.js";
 export { collectCombinedUsageStatusLine, collectLiveUsageSummary } from "./extension/usage.js";
 
 export default function (pi: ExtensionAPI): void {
-  if (subagentDisabled()) return;
+  // Only an environment disable can skip the lifecycle. Trusted project JSON may
+  // override personal JSON once the session's trust decision is available.
+  if (subagentDisabled(process.env, {})) return;
   pi.registerFlag("subagent-max-depth", {
     description: "Maximum allowed subagent delegation depth (default: 3).",
     type: "string",
@@ -27,6 +29,6 @@ export default function (pi: ExtensionAPI): void {
   registerSessionLifecycle(state);
   registerSessionEvents(state);
   registerPromptHook(state);
-  if (state.canDelegate) registerTools(state);
+  registerTools(state);
   registerSubagentExpandCommand(state);
 }

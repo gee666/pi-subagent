@@ -18,6 +18,20 @@ To remove it:
 pi remove npm:oira666_pi-subagent
 ```
 
+## Configuration
+
+Use either `pi-subagent.json` or `pi-subagents.json`. Both filenames are permanently supported. User-configurable extension options have grouped JSON settings, with precedence **environment > JSON > defaults**.
+
+```json
+{
+  "limits": { "total": 50, "parallel": 30, "concurrency": 8 },
+  "delegation": { "depth": 3, "preventCycles": true },
+  "runner": { "startupTimeoutMs": 120000 }
+}
+```
+
+See [settings files](docs/configuration.md#settings-files) for locations, all settings, environment mappings, and trust rules.
+
 ## Extension controls
 
 Exclude extensions from child agents without changing which extensions the parent loads:
@@ -32,7 +46,7 @@ The originally requested hyphenated name is also supported. Use `env` because mo
 env 'PI-SUBAGENT-EXCLUDE-EXTENSIONS=oira666_pi-free-swarm' pi
 ```
 
-Both variables accept comma-separated lists; whitespace and empty entries are ignored, and the two lists are combined. Entries match a package source, package name (including `npm:@scope/name@version`, ignoring the version), or an extension file/directory path. Automatic and settings-listed extension paths use the nearest owning `package.json` after resolving symlinks; loose hooks do not inherit the current workspace's or Pi configuration directory's package name. Relative paths resolve from the worker's working directory; `~/` and symlinks are supported. Commas inside paths are not supported. These variables are inherited by nested workers.
+Both variables accept comma-separated lists; whitespace and empty entries are ignored, and the two lists are combined. Entries match a package source, package name (including `npm:@scope/name@version`, ignoring the version), or an extension file/directory path. Automatic and settings-listed extension paths use the nearest owning `package.json` after resolving symlinks; loose hooks do not inherit the current workspace's or Pi configuration directory's package name. Relative paths resolve from the worker's working directory; `~/` and symlinks are supported. Commas inside paths are not supported in environment lists; use the JSON `extension.exclude` array for those paths. These variables are inherited by nested workers.
 
 When a list is nonempty, the runner discovers enabled extensions without executing them, then launches the child with `--no-extensions` and explicit paths for every remaining extension, including authentication providers. This covers automatic user/project extensions and forwarded `-e` sources. An original `--no-extensions` still suppresses automatic extensions. Project resources are included only when the parent's live context trusts that working directory; unknown trust fails closed. The same trust decision is passed to the child. With no exclusions, launch behavior is unchanged and no extra discovery runs.
 

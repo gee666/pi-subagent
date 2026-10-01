@@ -1,3 +1,4 @@
+import { configuredEnv, type SubagentSettings } from "./settings.js";
 import { parseBoolean } from "./shared.js";
 
 export const SUBAGENT_INTELLIGENCE_ENV = "PI_SUBAGENT_INTELLIGENCE";
@@ -54,16 +55,17 @@ export function parseIntelligencePresets(raw: unknown): IntelligencePreset[] {
   return presets;
 }
 
-export function intelligenceEnabled(presets: IntelligencePreset[]): boolean {
-  return presets.length > 0 && parseBoolean(process.env[SUBAGENT_INTELLIGENCE_ENV]) !== false;
+export function intelligenceEnabled(presets: IntelligencePreset[], settings?: SubagentSettings): boolean {
+  return presets.length > 0 && parseBoolean(configuredEnv(SUBAGENT_INTELLIGENCE_ENV, settings)) !== false;
 }
 
 /** A sole enabled preset is automatic; with multiple presets omission keeps existing defaults. */
 export function selectIntelligence(
   presets: IntelligencePreset[] | undefined,
   name: unknown,
+  settings?: SubagentSettings,
 ): IntelligencePreset | undefined {
-  if (!presets || !intelligenceEnabled(presets)) {
+  if (!presets || !intelligenceEnabled(presets, settings)) {
     if (name === undefined) return undefined;
     throw new Error("Subagent intelligence selection is disabled or no valid presets are configured.");
   }

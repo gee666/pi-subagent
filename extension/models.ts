@@ -1,3 +1,4 @@
+import { configuredEnv, type SubagentSettings } from "../settings.js";
 import { branchEntries, type ResumableSubagentCall } from "../resume.js";
 import { RESUME_MODEL_ID, RESUME_PROVIDER } from "../shared.js";
 import { isRecord, type ResumeModel, type SessionContext } from "./contracts.js";
@@ -60,8 +61,8 @@ export function findLastNonResumeModel(ctx: SessionContext): ResumeModel | undef
   return undefined;
 }
 
-export function getEnvFallbackModel(ctx: SessionContext): ResumeModel | undefined {
-  const raw = process.env[SUBAGENT_FALLBACK_MODEL_ENV];
+export function getEnvFallbackModel(ctx: SessionContext, settings?: SubagentSettings): ResumeModel | undefined {
+  const raw = configuredEnv(SUBAGENT_FALLBACK_MODEL_ENV, settings);
   if (!raw || !raw.includes("/")) return undefined;
   const [provider, ...idParts] = raw.split("/");
   const id = idParts.join("/");
@@ -69,9 +70,9 @@ export function getEnvFallbackModel(ctx: SessionContext): ResumeModel | undefine
   return ctx.modelRegistry?.find?.(provider, id);
 }
 
-export function getRestorableModel(ctx: SessionContext): ResumeModel | undefined {
+export function getRestorableModel(ctx: SessionContext, settings?: SubagentSettings): ResumeModel | undefined {
   if (ctx.model?.provider && ctx.model.provider !== RESUME_PROVIDER) return ctx.model;
-  return findLastNonResumeModel(ctx) ?? getEnvFallbackModel(ctx);
+  return findLastNonResumeModel(ctx) ?? getEnvFallbackModel(ctx, settings);
 }
 
 export function selectParentModelForSubagent<T extends { provider?: string }>(

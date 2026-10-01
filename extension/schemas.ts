@@ -1,3 +1,4 @@
+import type { SubagentSettings } from "../settings.js";
 import { Value } from "@sinclair/typebox/value";
 import type { Static, TSchema, TLiteral } from "@sinclair/typebox";
 import { Type } from "@sinclair/typebox";
@@ -66,7 +67,7 @@ export const ResumeSubagentsParams = Type.Object(
   { additionalProperties: false },
 );
 
-export function createIntelligenceSchemas(presets: IntelligencePreset[] = []) {
+export function createIntelligenceSchemas(presets: IntelligencePreset[] = [], settings?: SubagentSettings) {
   // Literal alternatives enforce validation; enum and descriptions advertise the caller's choices.
   // The tuple is non-empty whenever these dynamic schemas are exposed.
   const intelligence = {
@@ -91,7 +92,7 @@ export function createIntelligenceSchemas(presets: IntelligencePreset[] = []) {
     { additionalProperties: false },
   );
   const resumes = ResumeSubagentsParams;
-  return presets.length >= 2 && intelligenceEnabled(presets)
+  return presets.length >= 2 && intelligenceEnabled(presets, settings)
     ? { subagents, resumes }
     : {
         subagents: SubagentParams as unknown as typeof subagents,
@@ -141,8 +142,9 @@ export function prepareIntelligenceArguments(args: unknown, key: "tasks" | "resu
 export function normalizeRecoveryIntelligence(
   tasks: ResumableTask[],
   presets: IntelligencePreset[] = [],
+  settings?: SubagentSettings,
 ): ResumableTask[] {
-  const exposeChoice = presets.length >= 2 && intelligenceEnabled(presets);
+  const exposeChoice = presets.length >= 2 && intelligenceEnabled(presets, settings);
   return tasks.map((task) => {
     if (exposeChoice) return { ...task };
     const { intelligence: _intelligence, ...rest } = task;
@@ -155,11 +157,12 @@ export function findRecoveryPlanIndex(
   tasks: ResumableTask[],
   plans: ResumableSubagentCall[],
   presets: IntelligencePreset[] = [],
+  settings?: SubagentSettings,
 ): number {
   const exact = plans.findIndex((plan) => sameTasks(plan.tasks, tasks));
   return exact >= 0
     ? exact
-    : plans.findIndex((plan) => sameTasks(normalizeRecoveryIntelligence(plan.tasks, presets), tasks));
+    : plans.findIndex((plan) => sameTasks(normalizeRecoveryIntelligence(plan.tasks, presets, settings), tasks));
 }
 
 /** Legacy task arguments and hidden intelligence are accepted only for a matching crash-recovery plan. */
@@ -167,6 +170,7 @@ export function prepareRecoveryArguments(
   args: unknown,
   plans: ResumableSubagentCall[],
   presets: IntelligencePreset[] = [],
+  settings?: SubagentSettings,
 ): unknown {
   if (!isRecord(args) || !Array.isArray(args.tasks)) return args;
   const tasks: unknown[] = args.tasks;
@@ -177,10 +181,10 @@ export function prepareRecoveryArguments(
     ["max_agents_allowed", "max_agents_in_branch", "max_subagents_allowed"].every(
       (key) => task[key] === undefined || typeof task[key] === "number",
     );
-  if (!tasks.every(isTask) || findRecoveryPlanIndex(tasks, plans, presets) < 0) return args;
+  if (!tasks.every(isTask) || findRecoveryPlanIndex(tasks, plans, presets, settings) < 0) return args;
   return {
     ...args,
-    tasks: normalizeRecoveryIntelligence(tasks, presets).map((task) => {
+    tasks: normalizeRecoveryIntelligence(tasks, presets, settings).map((task) => {
       const { max_agents_allowed: _inclusive, max_agents_in_branch: _previous, ...rest } = task;
       return { ...rest, max_subagents_allowed: (getTaskBranchSize(task) ?? 1) - 1 };
     }),

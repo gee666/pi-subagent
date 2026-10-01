@@ -47,6 +47,7 @@ export async function executeSingle(
   try {
     result = await runAgentSubprocess({
       cwd: defaultCwd,
+      settings: state.settings,
       projectTrusted: state.latestSessionCtx?.cwd === defaultCwd && state.latestSessionCtx.isProjectTrusted(),
       agents,
       agentName,
@@ -159,6 +160,7 @@ export async function executeParallel(
       },
       {
         ...extras,
+        settings: state.settings,
         namesFile: state.currentNamesFile || undefined,
         intelligencePresets: state.intelligencePresets,
         projectTrusted: state.latestSessionCtx?.cwd === defaultCwd && state.latestSessionCtx.isProjectTrusted(),

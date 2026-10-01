@@ -77,14 +77,14 @@ test("caller preset reaches subprocess launches and resumes without mutation or 
   assert.equal(agent.thinking, "low");
 });
 
-test("omission preserves existing arguments even with presets configured", async () => {
+test("omission preserves model arguments and explicitly denies implicit child trust even with presets configured", async () => {
   const original = buildPiArgs(agent, null, options.task, undefined, false, options.fallbackModel).args;
   for (const intelligencePresets of [undefined, presets]) {
     const result = await runAgentSubprocess({ ...options, intelligencePresets });
     assert.equal(result.exitCode, 0, result.errorMessage);
     const args = JSON.parse(getFinalOutput(result.messages)) as string[];
     args.splice(args.indexOf("--append-system-prompt"), 2);
-    assert.deepEqual(args, original);
+    assert.deepEqual(args, [...original.slice(0, 2), "--no-approve", ...original.slice(2)]);
   }
 });
 

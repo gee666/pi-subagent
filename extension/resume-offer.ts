@@ -1,3 +1,4 @@
+import { configuredEnv } from "../settings.js";
 import { findLatestResumableSubagentCalls, parseBooleanEnv, SUBAGENT_RESUME_PROMPT_ENV } from "../resume.js";
 import { RESUME_MODEL_ID, RESUME_PROVIDER } from "../shared.js";
 import type { SessionContext } from "./contracts.js";
@@ -11,7 +12,7 @@ export async function maybeOfferSubagentResume(
   ctx: SessionContext,
   opts: { deferInteractivePrompt: boolean },
 ): Promise<void> {
-  const restorableModel = getRestorableModel(ctx);
+  const restorableModel = getRestorableModel(ctx, state.settings);
   if (restorableModel) {
     state.lastRestorableModel = restorableModel;
     state.resumeModelRegistry = ctx.modelRegistry;
@@ -22,7 +23,7 @@ export async function maybeOfferSubagentResume(
   const totalTaskCount = plans.reduce((sum, plan) => sum + plan.tasks.length, 0);
 
   let shouldResume = true;
-  const shouldPrompt = parseBooleanEnv(process.env[SUBAGENT_RESUME_PROMPT_ENV]) !== false;
+  const shouldPrompt = parseBooleanEnv(configuredEnv(SUBAGENT_RESUME_PROMPT_ENV, state.settings)) !== false;
   const rpcMode = isRpcMode(process.argv);
   if (ctx.hasUI && !rpcMode && shouldPrompt) {
     shouldResume = await ctx.ui.confirm(
@@ -64,7 +65,7 @@ export async function maybeOfferSubagentResume(
   state.resumeState.trigger = injectOnNextRequest ? "nextRequest" : "resumePrompt";
   state.modelToRestoreAfterResume = restorableModel ?? ctx.model;
   state.resumeModelRegistry = ctx.modelRegistry;
-  ensureSubagentToolActive(state.pi);
+  ensureSubagentToolActive(state.pi, state.settings);
   const resumeModel = ctx.modelRegistry.find(RESUME_PROVIDER, RESUME_MODEL_ID);
   if (!resumeModel || !(await state.pi.setModel(resumeModel))) {
     ctx.ui.notify("Failed to switch to synthetic subagent resume model.", "error");

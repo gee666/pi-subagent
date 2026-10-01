@@ -16,7 +16,7 @@ export function resolveDetailSessionDir(state: ExtensionState, record: SubagentN
 }
 
 export function readCurrentRegistry(state: ExtensionState): NamesRegistry | undefined {
-  if (!state.currentNamesFile) return undefined;
+  if (state.disabled || !state.currentNamesFile) return undefined;
   try {
     return readNamesRegistry(state.currentNamesFile);
   } catch {
@@ -50,6 +50,7 @@ export function registerSubagentExpandCommand(state: ExtensionState): void {
       return items.length > 0 ? items : null;
     },
     handler: async (args: string, ctx: SessionContext) => {
+      if (state.disabled) return;
       const name = (args ?? "").trim().split(/\s+/)[0] ?? "";
       const uiAvailable = ctx?.mode === "tui" && ctx?.ui && typeof ctx.ui.custom === "function";
       if (!uiAvailable) {

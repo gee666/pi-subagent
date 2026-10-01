@@ -1,39 +1,12 @@
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
-
 import { intelligenceEnabled, parseIntelligencePresets, type IntelligencePreset } from "./intelligence.js";
-
-export const PI_SUBAGENTS_CONFIG_FILE = "pi-subagents.json";
-export const PI_SUBAGENT_CONFIG_FILE = "pi-subagent.json";
+import { configPaths, readConfig } from "./storage/config-files.js";
+import { readSettings, type SubagentSettings } from "./settings.js";
+export { PI_SUBAGENTS_CONFIG_FILE, PI_SUBAGENT_CONFIG_FILE, findProjectConfig } from "./storage/config-files.js";
 
 export interface PiSubagentsConfig {
   toolPrompts: Record<string, string>;
   intelligencePresets: IntelligencePreset[];
-}
-
-function readConfig(filePath: string): Record<string, unknown> {
-  if (!fs.existsSync(filePath)) return {};
-
-  try {
-    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      console.warn(`[pi-subagent] Ignoring invalid config "${filePath}". Expected a JSON object.`);
-      return {};
-    }
-
-    return parsed as Record<string, unknown>;
-  } catch {
-    // Do not expose configuration contents in parser errors.
-    console.warn(`[pi-subagent] Failed to read config "${filePath}".`);
-    return {};
-  }
-}
-
-function configAtLocation(dir: string): string {
-  const singular = path.join(dir, PI_SUBAGENT_CONFIG_FILE);
-  return fs.existsSync(singular) ? singular : path.join(dir, PI_SUBAGENTS_CONFIG_FILE);
+  settings: SubagentSettings;
 }
 
 function readToolPrompts(config: Record<string, unknown>, filePath: string): Record<string, string> {
@@ -59,37 +32,17 @@ function readToolPrompts(config: Record<string, unknown>, filePath: string): Rec
   return result;
 }
 
-/** Find the nearest project-local config while walking up from cwd. */
-export function findProjectConfig(cwd: string): string | null {
-  let dir = path.resolve(cwd);
-  while (true) {
-    const candidate = configAtLocation(path.join(dir, ".pi"));
-    if (fs.existsSync(candidate)) return candidate;
-    const parent = path.dirname(dir);
-    if (parent === dir) return null;
-    dir = parent;
-  }
-}
-
-/**
- * Load configuration from lowest to highest priority:
- *   ~/.pi/pi-subagents.json
- *   $PI_CODING_AGENT_DIR/pi-subagents.json (normally ~/.pi/agent/pi-subagents.json)
- *   nearest project .pi/pi-subagents.json (trusted projects only)
- * pi-subagent.json replaces pi-subagents.json at each location when present.
- */
+/** Load personal settings, then the nearest project configuration when trusted. */
 export function loadPiSubagentsConfig(cwd?: string, includeProject = false): PiSubagentsConfig {
-  const paths = [configAtLocation(path.join(os.homedir(), ".pi")), configAtLocation(getAgentDir())];
-  if (cwd && includeProject) {
-    const projectConfig = findProjectConfig(cwd);
-    if (projectConfig) paths.push(projectConfig);
-  }
-
+  const paths = configPaths(cwd, includeProject);
+  const personalPaths = new Set(configPaths());
+  const settings: SubagentSettings = {};
   const toolPrompts: Record<string, string> = {};
   let intelligencePresets: IntelligencePreset[] = [];
   for (const filePath of new Set(paths)) {
     const config = readConfig(filePath);
     Object.assign(toolPrompts, readToolPrompts(config, filePath));
+    Object.assign(settings, readSettings(config, filePath, personalPaths.has(filePath)));
     if (Object.hasOwn(config, "subagents-models")) {
       intelligencePresets = [];
       try {
@@ -99,5 +52,9 @@ export function loadPiSubagentsConfig(cwd?: string, includeProject = false): PiS
       }
     }
   }
-  return { toolPrompts, intelligencePresets: intelligenceEnabled(intelligencePresets) ? intelligencePresets : [] };
+  return {
+    toolPrompts,
+    settings,
+    intelligencePresets: intelligenceEnabled(intelligencePresets, settings) ? intelligencePresets : [],
+  };
 }

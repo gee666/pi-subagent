@@ -15,6 +15,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseBoolean } from "./shared.js";
+import { configuredEnv, type SubagentSettings } from "./settings.js";
 
 export type AgentScope = "user" | "project" | "both";
 export type AgentSource = "user" | "project" | "builtin";
@@ -196,8 +197,8 @@ function dedupeAgents(...layers: AgentConfig[][]): AgentConfig[] {
   return Array.from(agentMap.values());
 }
 
-function hideBuiltinAgents(): boolean {
-  return parseBoolean(process.env[SUBAGENT_HIDE_BUILTIN_AGENTS_ENV]) === true;
+function hideBuiltinAgents(settings?: SubagentSettings): boolean {
+  return parseBoolean(configuredEnv(SUBAGENT_HIDE_BUILTIN_AGENTS_ENV, settings)) === true;
 }
 
 // ---------------------------------------------------------------------------
@@ -251,11 +252,11 @@ export function filterAdvertisedAgents(
  * PI_SUBAGENT_HIDE_BUILTIN_AGENTS is true. Custom agents with the same name
  * override their built-in counterpart.
  */
-export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryResult {
+export function discoverAgents(cwd: string, scope: AgentScope, settings?: SubagentSettings): AgentDiscoveryResult {
   const userDir = path.join(getAgentDir(), "agents");
   const projectAgentsDir = findNearestProjectAgentsDir(cwd);
 
-  const builtinAgents = hideBuiltinAgents() ? [] : loadAgentsFromDir(BUNDLED_AGENTS_DIR, "builtin");
+  const builtinAgents = hideBuiltinAgents(settings) ? [] : loadAgentsFromDir(BUNDLED_AGENTS_DIR, "builtin");
   const userAgents = loadAgentsFromDir(userDir, "user");
   const projectAgents = projectAgentsDir ? loadAgentsFromDir(projectAgentsDir, "project") : [];
 

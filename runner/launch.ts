@@ -1,3 +1,4 @@
+import { configuredEnv, type SubagentSettings } from "../settings.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -30,16 +31,19 @@ export function getCurrentRuntimeLaunch(
   return { command: execPath, argsPrefix: [entrypoint] };
 }
 
-export function getPiSpawnCommand(override?: { command: string; argsPrefix?: string[] }): {
+export function getPiSpawnCommand(
+  override?: { command: string; argsPrefix?: string[] },
+  settings?: SubagentSettings,
+): {
   command: string;
   argsPrefix: string[];
 } {
   if (override?.command) return { command: override.command, argsPrefix: override.argsPrefix ?? [] };
 
-  const overrideCommand = process.env[SUBAGENT_PI_COMMAND_ENV];
+  const overrideCommand = configuredEnv(SUBAGENT_PI_COMMAND_ENV, settings);
   if (overrideCommand) {
     let argsPrefix: string[] = [];
-    const rawPrefix = process.env[SUBAGENT_PI_ARGS_PREFIX_ENV];
+    const rawPrefix = configuredEnv(SUBAGENT_PI_ARGS_PREFIX_ENV, settings);
     if (rawPrefix) {
       try {
         const parsed = JSON.parse(rawPrefix);

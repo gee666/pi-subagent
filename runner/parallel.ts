@@ -1,3 +1,4 @@
+import { loadSubagentSettings } from "../settings.js";
 import type { AgentConfig } from "../agents.js";
 import { selectIntelligence } from "../intelligence.js";
 import { type SingleResult, type SubagentDetails, emptyUsage, isResultSuccess, getFinalOutput } from "../types.js";
@@ -43,14 +44,29 @@ export async function executeParallelSubprocess(
     intelligencePresets?: RunAgentOptions["intelligencePresets"];
     resumeSettings?: Array<NonNullable<RunAgentOptions["resumeSettings"]>>;
     projectTrusted?: boolean;
+    settings?: RunAgentOptions["settings"];
   },
 ): Promise<{
   content: Array<{ type: "text"; text: string }>;
   details: SubagentDetails;
   isError?: boolean;
 }> {
-  const maxParallelTasks = configuredNonNegativeInt(SUBAGENT_MAX_PARALLEL_TASKS_ENV, DEFAULT_MAX_PARALLEL_TASKS, true);
-  const maxConcurrency = configuredNonNegativeInt(SUBAGENT_MAX_CONCURRENCY_ENV, DEFAULT_MAX_CONCURRENCY, true);
+  extras = {
+    ...extras,
+    settings: extras?.settings ?? loadSubagentSettings(defaultCwd, extras?.projectTrusted === true),
+  };
+  const maxParallelTasks = configuredNonNegativeInt(
+    SUBAGENT_MAX_PARALLEL_TASKS_ENV,
+    DEFAULT_MAX_PARALLEL_TASKS,
+    true,
+    extras?.settings,
+  );
+  const maxConcurrency = configuredNonNegativeInt(
+    SUBAGENT_MAX_CONCURRENCY_ENV,
+    DEFAULT_MAX_CONCURRENCY,
+    true,
+    extras?.settings,
+  );
 
   if (tasks.length > maxParallelTasks) {
     return {
@@ -72,7 +88,7 @@ export async function executeParallelSubprocess(
     try {
       intelligence = extras?.resumeSettings
         ? extras.resumeSettings[index].intelligence
-        : selectIntelligence(extras?.intelligencePresets, t.intelligence)?.name;
+        : selectIntelligence(extras?.intelligencePresets, t.intelligence, extras?.settings)?.name;
     } catch {
       // Let the single runner report invalid selections as aligned task failures.
     }
@@ -139,6 +155,7 @@ export async function executeParallelSubprocess(
         result = await runAgentSubprocess({
           cwd: defaultCwd,
           projectTrusted: extras?.projectTrusted,
+          settings: extras?.settings,
           agents,
           agentName: t.agent,
           task: t.task,

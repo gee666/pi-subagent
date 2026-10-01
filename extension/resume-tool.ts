@@ -31,7 +31,9 @@ import { normalizeResumes } from "./schemas.js";
 import type { ExtensionState } from "./state.js";
 
 export function registerResumeSubagentsTool(state: ExtensionState) {
-  if (resumableSubagentsDisabled()) return;
+  const disabled = resumableSubagentsDisabled(state.settings);
+  if (disabled && !state.resumeToolRegistered) return;
+  state.resumeToolRegistered = true;
   const parameters = ResumeSubagentsParams;
   state.pi.registerTool({
     name: RESUME_SUBAGENTS_TOOL_NAME,
@@ -53,9 +55,11 @@ export function registerResumeSubagentsTool(state: ExtensionState) {
         const markedNames: string[] = [];
         const resumeGeneration = state.lifecycleGeneration;
         try {
+          if (!state.canDelegate || resumableSubagentsDisabled(state.settings))
+            throw new Error("Subagent resume is disabled for this session.");
           recordToolCallStart(toolCallId);
           updateLatestBroadcastTargets(state, undefined);
-          const discovery = discoverAgents(ctx.cwd, "both");
+          const discovery = discoverAgents(ctx.cwd, "both", state.settings);
           const makeDetails = makeDetailsFactory(discovery.projectAgentsDir, DEFAULT_DELEGATION_MODE);
           const fail = (text: string) => ({
             content: [{ type: "text" as const, text }],

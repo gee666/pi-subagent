@@ -1,7 +1,13 @@
+import { configuredEnv, type SubagentSettings } from "../settings.js";
 import { parseNonNegativeInt } from "../shared.js";
 
-export function configuredNonNegativeInt(name: string, fallback: number, warn = false): number {
-  const raw = process.env[name];
+export function configuredNonNegativeInt(
+  name: string,
+  fallback: number,
+  warn = false,
+  settings?: SubagentSettings,
+): number {
+  const raw = configuredEnv(name, settings);
   const parsed = parseNonNegativeInt(raw);
   if (warn && raw !== undefined && parsed === null) {
     console.warn(`[pi-subagent] Ignoring invalid ${name}="${raw}". Expected a non-negative integer.`);

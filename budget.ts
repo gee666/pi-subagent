@@ -1,3 +1,4 @@
+import { configuredEnv } from "./settings.js";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
 
@@ -25,7 +26,7 @@ export const SUBAGENT_BUDGET_DIR_ENV = "PI_SUBAGENT_BUDGET_DIR";
 export const SUBAGENT_BUDGET_CUSTOM_TYPE = "pi-subagent-budget";
 export const DEFAULT_MAX_TOTAL_AGENTS = 50;
 
-export function configuredTotalBudget(value = process.env[SUBAGENT_MAX_TOTAL_AGENTS_ENV]): number {
+export function configuredTotalBudget(value = configuredEnv(SUBAGENT_MAX_TOTAL_AGENTS_ENV)): number {
   if (value === undefined) return DEFAULT_MAX_TOTAL_AGENTS;
   if (!/^\d+$/.test(value.trim()) || !isBudgetAmount(Number(value))) {
     throw new SubagentBudgetError(

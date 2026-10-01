@@ -1,3 +1,4 @@
+import { configuredEnv } from "../settings.js";
 import { SUBAGENT_RESUME_DISABLE_ENV, parseBooleanEnv } from "../resume.js";
 import { RESUME_PROVIDER } from "../shared.js";
 import { isSubagentToolName, subagentDetailsHaveErrors } from "../types.js";
@@ -23,7 +24,7 @@ export function registerSessionEvents(state: ExtensionState): void {
       if (ctx.model?.provider === RESUME_PROVIDER) return;
       if (typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
 
-      const resumeDisabled = parseBooleanEnv(process.env[SUBAGENT_RESUME_DISABLE_ENV]) === true;
+      const resumeDisabled = parseBooleanEnv(configuredEnv(SUBAGENT_RESUME_DISABLE_ENV, state.settings)) === true;
       if (resumeDisabled) return;
 
       await maybeOfferSubagentResume(state, ctx, { deferInteractivePrompt: false });

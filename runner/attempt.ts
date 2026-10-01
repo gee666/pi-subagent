@@ -66,7 +66,7 @@ export async function runAttempt(
     // but shell:true splits arguments on whitespace — breaking task strings.
     // Fix: reuse the running node binary + the pi CLI script path directly,
     // so the child is spawned without a shell and args are passed safely.
-    const piSpawn = getPiSpawnCommand(piCommandOverride);
+    const piSpawn = getPiSpawnCommand(piCommandOverride, opts.settings);
     const spawnCmd = piSpawn.command;
     const spawnArgs = [...piSpawn.argsPrefix, ...piArgs];
     const proc = spawn(spawnCmd, spawnArgs, {
@@ -133,7 +133,8 @@ export async function runAttempt(
     // model-turn event. Once startup succeeds, the semantic-inactivity
     // watchdog below takes over.
     const startupTimeoutMs =
-      startupTimeoutMsOverride ?? configuredNonNegativeInt(SUBAGENT_STARTUP_TIMEOUT_ENV, DEFAULT_STARTUP_TIMEOUT_MS);
+      startupTimeoutMsOverride ??
+      configuredNonNegativeInt(SUBAGENT_STARTUP_TIMEOUT_ENV, DEFAULT_STARTUP_TIMEOUT_MS, false, opts.settings);
 
     const doResolve = (code: number) => {
       if (state.resolved) return;
@@ -174,7 +175,7 @@ export async function runAttempt(
     const idleTimeoutMs =
       idleTimeoutMsOverride !== undefined
         ? Math.max(0, idleTimeoutMsOverride)
-        : configuredNonNegativeInt(SUBAGENT_IDLE_TIMEOUT_ENV, DEFAULT_IDLE_TIMEOUT_MS);
+        : configuredNonNegativeInt(SUBAGENT_IDLE_TIMEOUT_ENV, DEFAULT_IDLE_TIMEOUT_MS, false, opts.settings);
 
     const noteSemanticActivity = (minimumQuietPeriodMs = 0) => {
       if (state.idleTimer) {

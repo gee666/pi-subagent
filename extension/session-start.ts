@@ -1,3 +1,8 @@
+import { loadPiSubagentsConfig } from "../config.js";
+import { configuredEnv } from "../settings.js";
+import { subagentDisabled } from "../runner/extension-policy.js";
+import { DEFAULT_MAX_PARALLEL_TASKS, parseNonNegativeInt, SUBAGENT_MAX_PARALLEL_TASKS_ENV } from "../shared.js";
+import { resolveDelegationDepthConfig } from "./policy.js";
 import { isRecord } from "./contracts.js";
 import { SUBAGENT_INTELLIGENCE_CUSTOM_TYPE, SUBAGENT_RUN_INTELLIGENCE_ENV } from "../intelligence.js";
 import * as path from "node:path";
@@ -45,7 +50,16 @@ export function registerSessionLifecycle(state: ExtensionState): void {
       }
     }
     const previouslyCouldDelegate = state.canDelegate;
-    state.canDelegate = state.currentDepth < state.maxDepth;
+    const previouslyResumable = state.resumesEnabled ?? !resumableSubagentsDisabled(state.settings);
+    const includeProjectConfig = typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted() === true;
+    const config = loadPiSubagentsConfig(ctx.cwd, includeProjectConfig);
+    state.settings = config.settings;
+    state.resumesEnabled = !resumableSubagentsDisabled(state.settings);
+    Object.assign(state, resolveDelegationDepthConfig(state.pi, state.settings));
+    state.disabled = subagentDisabled(process.env, state.settings);
+    state.canDelegate = !state.disabled && state.canDelegate;
+    state.maxParallelTasks =
+      parseNonNegativeInt(configuredEnv(SUBAGENT_MAX_PARALLEL_TASKS_ENV, state.settings)) ?? DEFAULT_MAX_PARALLEL_TASKS;
     state.currentBudget = undefined;
     state.budgetSetupError = undefined;
     try {
@@ -86,15 +100,21 @@ export function registerSessionLifecycle(state: ExtensionState): void {
       }
     }
     setHistoricalCallOrder(historicalCallIds);
-    const includeProjectConfig = typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted() === true;
-    state.refreshRegisteredToolPrompts?.(ctx.cwd, includeProjectConfig);
-    if (!state.canDelegate) {
-      // Documented Pi API: inactive tools are neither exposed nor callable.
-      const active = state.pi.getActiveTools();
-      const filtered = active.filter((name) => !isSubagentToolName(name));
-      if (filtered.length !== active.length) state.pi.setActiveTools(filtered);
-    } else if (!previouslyCouldDelegate) {
-      ensureSubagentToolActive(state.pi);
+    state.refreshRegisteredToolPrompts?.(ctx.cwd, includeProjectConfig, config);
+    // Inactive tools are neither exposed nor callable. Also withdraw a resume tool
+    // registered in an earlier session when that session's settings allowed resumes.
+    const active = state.pi.getActiveTools();
+    const filtered = active.filter(
+      (name) =>
+        !isSubagentToolName(name) ||
+        (state.canDelegate && (name !== "resume_subagents" || !resumableSubagentsDisabled(state.settings))),
+    );
+    if (filtered.length !== active.length) state.pi.setActiveTools(filtered);
+    if (
+      state.canDelegate &&
+      (!previouslyCouldDelegate || (!previouslyResumable && !resumableSubagentsDisabled(state.settings)))
+    ) {
+      ensureSubagentToolActive(state.pi, state.settings);
     }
     state.resumeModelRegistry = ctx.modelRegistry;
     clearSyntheticResumeState(state);
@@ -106,7 +126,7 @@ export function registerSessionLifecycle(state: ExtensionState): void {
       // Always repair sessions left on the synthetic resume model, even in
       // nested subagents that can no longer delegate. Those leaf processes
       // still need the real model to continue their own work.
-      const restorableModel = getRestorableModel(ctx);
+      const restorableModel = getRestorableModel(ctx, state.settings);
       if (restorableModel) {
         state.lastRestorableModel = restorableModel;
         state.resumeModelRegistry = ctx.modelRegistry;
@@ -117,7 +137,7 @@ export function registerSessionLifecycle(state: ExtensionState): void {
 
       if (!state.canDelegate) return;
 
-      const discovery = discoverAgents(ctx.cwd, "both");
+      const discovery = discoverAgents(ctx.cwd, "both", state.settings);
       state.discoveredAgents = filterAgentsForPrompt(
         discovery.agents,
         state.currentDepth,
@@ -127,7 +147,7 @@ export function registerSessionLifecycle(state: ExtensionState): void {
       );
       state.currentSessionId = ctx.sessionManager.getSessionId?.() ?? "ephemeral";
       state.currentSubagentSessionRoot = getDefaultSubagentSessionRoot(ctx);
-      if (resumableSubagentsDisabled()) {
+      if (resumableSubagentsDisabled(state.settings)) {
         state.currentNamesFile = "";
         state.currentOwnerId = state.currentSessionId;
       } else {
@@ -190,7 +210,7 @@ export function registerSessionLifecycle(state: ExtensionState): void {
         ctx.ui.notify(`Found ${state.discoveredAgents.length} subagent(s):\n${list}`, "info");
       }
 
-      const resumeDisabled = parseBooleanEnv(process.env[SUBAGENT_RESUME_DISABLE_ENV]) === true;
+      const resumeDisabled = parseBooleanEnv(configuredEnv(SUBAGENT_RESUME_DISABLE_ENV, state.settings)) === true;
       if (resumeDisabled || (event.reason !== "resume" && event.reason !== "startup")) return;
 
       await maybeOfferSubagentResume(state, ctx, { deferInteractivePrompt: true });

@@ -40,7 +40,7 @@ ${
     ? "- Agents already in this stack are intentionally omitted from the available list. Do not request omitted agent names."
     : "- Cyclic delegation is allowed by configuration."
 }`;
-      const resumeGuidance = resumableSubagentsDisabled()
+      const resumeGuidance = resumableSubagentsDisabled(state.settings)
         ? ""
         : (state.configuredToolPrompts[RESUME_SUBAGENTS_TOOL_NAME] ??
           `### Resumable subagents

@@ -17,6 +17,8 @@ export type RunningSubagentStartedCallback = (handle: RunningSubagentHandle) => 
 export interface RunAgentOptions {
   /** Caller working directory; saved-session resumes run in the saved project's cwd. */
   cwd: string;
+  /** Caller configuration snapshot. Project values have already passed the trust check. */
+  settings?: import("../settings.js").SubagentSettings;
   /** Effective trust for this cwd; absent SDK callers fail closed. */
   projectTrusted?: boolean;
   /** All available agent configs. */

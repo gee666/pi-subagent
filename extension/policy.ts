@@ -1,3 +1,4 @@
+import { configuredEnv, type SubagentSettings } from "../settings.js";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { type AgentConfig, filterAdvertisedAgents, isAgentEnabledAtLayer } from "../agents.js";
 import { parseBoolean, parseNonNegativeInt } from "../shared.js";
@@ -25,8 +26,8 @@ export type ProjectAgentApproval = "once" | "session" | "no";
 
 export const DISABLE_RESUMABLE_SUBAGENTS_ENV = "DISABLE_RESUMABLE_SUBAGENTS";
 
-export function resumableSubagentsDisabled(): boolean {
-  return parseBoolean(process.env[DISABLE_RESUMABLE_SUBAGENTS_ENV]) === true;
+export function resumableSubagentsDisabled(settings?: SubagentSettings): boolean {
+  return parseBoolean(configuredEnv(DISABLE_RESUMABLE_SUBAGENTS_ENV, settings)) === true;
 }
 
 export interface DelegationDepthConfig {
@@ -64,8 +65,8 @@ export function resolveProjectAgentConfirmationSetting(raw: unknown): ProjectAge
   return parsed ?? DEFAULT_PROJECT_AGENT_CONFIRMATION;
 }
 
-export function getProjectAgentConfirmationSetting(): ProjectAgentConfirmationSetting {
-  return resolveProjectAgentConfirmationSetting(process.env[SUBAGENT_CONFIRM_PROJECT_AGENTS_ENV]);
+export function getProjectAgentConfirmationSetting(settings?: SubagentSettings): ProjectAgentConfirmationSetting {
+  return resolveProjectAgentConfirmationSetting(configuredEnv(SUBAGENT_CONFIRM_PROJECT_AGENTS_ENV, settings));
 }
 
 export function parseAgentStack(raw: unknown): string[] | null {
@@ -116,7 +117,7 @@ export function getPreventCyclesFlagFromArgv(argv: string[]): string | boolean |
   return null;
 }
 
-export function resolveDelegationDepthConfig(pi: ExtensionAPI): DelegationDepthConfig {
+export function resolveDelegationDepthConfig(pi: ExtensionAPI, settings?: SubagentSettings): DelegationDepthConfig {
   const depthRaw = process.env[SUBAGENT_DEPTH_ENV];
   const parsedDepth = parseNonNegativeInt(depthRaw);
   if (depthRaw !== undefined && parsedDepth === null) {
@@ -132,7 +133,7 @@ export function resolveDelegationDepthConfig(pi: ExtensionAPI): DelegationDepthC
     console.warn(`[pi-subagent] Ignoring invalid ${SUBAGENT_STACK_ENV} value. Expected a JSON array of agent names.`);
   }
 
-  const envMaxDepthRaw = process.env[SUBAGENT_MAX_DEPTH_ENV];
+  const envMaxDepthRaw = configuredEnv(SUBAGENT_MAX_DEPTH_ENV, settings);
   const envMaxDepth = parseNonNegativeInt(envMaxDepthRaw);
   if (envMaxDepthRaw !== undefined && envMaxDepth === null) {
     console.warn(
@@ -156,7 +157,7 @@ export function resolveDelegationDepthConfig(pi: ExtensionAPI): DelegationDepthC
     );
   }
 
-  const envPreventCyclesRaw = process.env[SUBAGENT_PREVENT_CYCLES_ENV];
+  const envPreventCyclesRaw = configuredEnv(SUBAGENT_PREVENT_CYCLES_ENV, settings);
   const envPreventCycles = parseBoolean(envPreventCyclesRaw);
   if (envPreventCyclesRaw !== undefined && envPreventCycles === null) {
     console.warn(
@@ -182,9 +183,13 @@ export function resolveDelegationDepthConfig(pi: ExtensionAPI): DelegationDepthC
   }
 
   const flagMaxDepth = argvFlagMaxDepth ?? runtimeFlagMaxDepth;
-  const maxDepth = flagMaxDepth ?? envMaxDepth ?? DEFAULT_MAX_DELEGATION_DEPTH;
+  const requestedMaxDepth = flagMaxDepth ?? envMaxDepth ?? DEFAULT_MAX_DELEGATION_DEPTH;
+  // Child environment grants are authoritative even if a CLI flag tries to loosen them.
+  const maxDepth =
+    currentDepth > 0 && envMaxDepth !== null ? Math.min(requestedMaxDepth, envMaxDepth) : requestedMaxDepth;
   const preventCycles =
-    argvPreventCycles ?? runtimePreventCycles ?? envPreventCycles ?? DEFAULT_PREVENT_CYCLE_DELEGATION;
+    (currentDepth > 0 && envPreventCycles === true) ||
+    (argvPreventCycles ?? runtimePreventCycles ?? envPreventCycles ?? DEFAULT_PREVENT_CYCLE_DELEGATION);
 
   return {
     currentDepth,
@@ -247,9 +252,11 @@ export function getProjectAgentSessionKey(projectAgentsDir: string | null): stri
   return projectAgentsDir ?? "(unknown-project-agents-dir)";
 }
 
-export function ensureSubagentToolActive(pi: ExtensionAPI): void {
+export function ensureSubagentToolActive(pi: ExtensionAPI, settings?: SubagentSettings): void {
   const activeTools = pi.getActiveTools();
-  const wanted = resumableSubagentsDisabled() ? [SUBAGENT_TOOL_NAME] : [SUBAGENT_TOOL_NAME, RESUME_SUBAGENTS_TOOL_NAME];
+  const wanted = resumableSubagentsDisabled(settings)
+    ? [SUBAGENT_TOOL_NAME]
+    : [SUBAGENT_TOOL_NAME, RESUME_SUBAGENTS_TOOL_NAME];
   const missing = wanted.filter((tool) => !activeTools.includes(tool));
   if (missing.length > 0) {
     pi.setActiveTools([...activeTools, ...missing]);

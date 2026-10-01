@@ -1,3 +1,4 @@
+import { loadSubagentSettings } from "../settings.js";
 import { emptyUsage, extractToolCalls, getFinalOutput, isResultError, type SingleResult } from "../types.js";
 import { budgetPrompt, readBudget } from "../budget.js";
 import {
@@ -17,6 +18,7 @@ import { selectIntelligence } from "../intelligence.js";
 import * as path from "node:path";
 import { resolveSessionTarget } from "./session-target.js";
 export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleResult> {
+  opts = { ...opts, settings: opts.settings ?? loadSubagentSettings(opts.cwd, opts.projectTrusted === true) };
   const {
     agents,
     agentName,
@@ -125,9 +127,9 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
     }
     const target = resolveSessionTarget(opts.cwd, sessionDir, shouldContinueSession, !!opts.resumeSettings);
     // Approval is scoped to the caller's project, never transferable to a saved project's cwd.
-    const projectTrusted = target.cwd === path.resolve(opts.cwd) ? opts.projectTrusted : false;
+    const projectTrusted = target.cwd === path.resolve(opts.cwd) && opts.projectTrusted === true;
     const childOpts = { ...opts, cwd: target.cwd, sessionDir: target.sessionDir, projectTrusted };
-    const extensionArgs = await resolveChildExtensionArgs(target.cwd, projectTrusted, !!target.sessionFile);
+    const extensionArgs = await resolveChildExtensionArgs(target.cwd, projectTrusted, true, opts.settings);
     if (opts.signal?.aborted) {
       result.exitCode = 130;
       result.stopReason = "aborted";
@@ -135,8 +137,10 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       emitUpdate();
       return result;
     }
-    const selection = opts.resumeSettings ? undefined : selectIntelligence(opts.intelligencePresets, opts.intelligence);
-    const settings = opts.resumeSettings ?? resolveLaunchModelSettings(agent, fallbackModel, selection);
+    const selection = opts.resumeSettings
+      ? undefined
+      : selectIntelligence(opts.intelligencePresets, opts.intelligence, opts.settings);
+    const settings = opts.resumeSettings ?? resolveLaunchModelSettings(agent, fallbackModel, selection, opts.settings);
     result.intelligence = settings.intelligence;
     result.model = settings.model;
     result.thinking = settings.thinking;
@@ -153,13 +157,19 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       extensionArgs,
       opts.resumeSettings,
       target.sessionFile,
+      opts.settings,
     );
     const prompt =
       result.budget && readBudget(result.budget).limit > 0
         ? `${taskPrompt}\n\n${budgetPrompt(result.budget)}`
         : taskPrompt;
     let wasAborted = false;
-    const startupRetries = configuredNonNegativeInt(SUBAGENT_STARTUP_RETRIES_ENV, DEFAULT_STARTUP_RETRIES);
+    const startupRetries = configuredNonNegativeInt(
+      SUBAGENT_STARTUP_RETRIES_ENV,
+      DEFAULT_STARTUP_RETRIES,
+      false,
+      opts.settings,
+    );
     let startupTimedOut = false;
     let exitCode = -1;
 

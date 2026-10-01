@@ -1,3 +1,4 @@
+import { configuredEnv } from "../settings.js";
 import * as path from "node:path";
 import {
   configuredTotalBudget,
@@ -30,7 +31,7 @@ export function getParentModelForSubagent(state: ExtensionState, ctx: SessionCon
   return selectParentModelForSubagent(
     currentModel,
     state.modelToRestoreAfterResume,
-    findLastNonResumeModel(ctx) ?? getEnvFallbackModel(ctx),
+    findLastNonResumeModel(ctx) ?? getEnvFallbackModel(ctx, state.settings),
     state.lastRestorableModel,
   );
 }
@@ -73,7 +74,10 @@ export function ensureBudget(state: ExtensionState): SubagentBudget {
         "Session budget is not initialized. Start or reload the session before launching agents.",
       );
     // Older nested sessions without a recorded grant must not get a new root allowance.
-    const limit = state.currentDepth === 0 ? configuredTotalBudget() : 0;
+    const limit =
+      state.currentDepth === 0
+        ? configuredTotalBudget(configuredEnv("PI_SUBAGENT_MAX_TOTAL_AGENTS", state.settings))
+        : 0;
     state.currentBudget = createBudget(
       path.join(
         state.currentSubagentSessionRoot,
@@ -115,6 +119,10 @@ export function updateCombinedUsageStatus(state: ExtensionState, ctx?: SessionCo
   const targetCtx = ctx ?? state.latestSessionCtx;
   if (!targetCtx?.ui) return;
   try {
+    if (state.disabled) {
+      targetCtx.ui.setStatus?.("subagent-usage", undefined);
+      return;
+    }
     const line = collectCombinedUsageStatusLine(targetCtx, Array.from(state.activeSubagentUsageSummaries.values()));
     if (typeof targetCtx.ui.setStatus !== "function") return;
     targetCtx.ui.setStatus("subagent-usage", line ? formatFooterStatusText(targetCtx, line) : undefined);

@@ -35,15 +35,69 @@ second-layer: disabled
 
 At maximum depth 1, combining `first-layer: only` with `last-layer: disabled` blocks all launches of that definition.
 
+## Settings files
+
+`pi-subagent.json` and `pi-subagents.json` are both permanently supported filenames with the same format. Either name works at each location below:
+
+1. `~/.pi/`
+2. `$PI_CODING_AGENT_DIR/`, normally `~/.pi/agent/`
+3. The nearest trusted project `.pi/` containing either filename, walking upward from the working directory
+
+Later locations override earlier ones per setting. If both filenames exist at one location, only `pi-subagent.json` is read there. Use either name; no migration is needed.
+
+For each setting, an explicitly set environment variable wins over JSON, then the built-in default applies. Empty or invalid environment values still take precedence and use that variable's existing parsing rules. Explicit `false`, `0`, and empty arrays in JSON are not treated as missing. CLI delegation flags retain their existing priority; children cannot loosen inherited delegation limits. Existing session budgets are not reset by configuration changes.
+
+```json
+{
+  "extension": { "disabled": false, "exclude": [] },
+  "agents": { "hideBuiltins": false, "confirmProject": "ask" },
+  "limits": { "total": 50, "parallel": 30, "concurrency": 8 },
+  "delegation": { "depth": 3, "preventCycles": true },
+  "resume": { "disabled": false, "disableAuto": false, "prompt": true },
+  "models": { "intelligence": true },
+  "runner": {
+    "startupTimeoutMs": 120000,
+    "idleTimeoutMs": 1200000,
+    "startupRetries": 2
+  }
+}
+```
+
+| JSON setting | Environment variable | Default |
+| --- | --- | --- |
+| `extension.disabled` | `PI_SUBAGENT_DISABLED` / `PI-SUBAGENT-DISABLED` | `false` |
+| `extension.exclude` | `PI_SUBAGENT_EXCLUDE_EXTENSIONS` / `PI-SUBAGENT-EXCLUDE-EXTENSIONS` | `[]` |
+| `agents.hideBuiltins` | `PI_SUBAGENT_HIDE_BUILTIN_AGENTS` | `false` |
+| `agents.confirmProject` | `PI_SUBAGENT_CONFIRM_PROJECT_AGENTS` | `"ask"` |
+| `limits.total` | `PI_SUBAGENT_MAX_TOTAL_AGENTS` | `50` |
+| `limits.parallel` | `PI_SUBAGENT_MAX_PARALLEL_TASKS` | `30` |
+| `limits.concurrency` | `PI_SUBAGENT_MAX_CONCURRENCY` | `8` |
+| `delegation.depth` | `PI_SUBAGENT_MAX_DEPTH` | `3` |
+| `delegation.preventCycles` | `PI_SUBAGENT_PREVENT_CYCLES` | `true` |
+| `resume.disabled` | `DISABLE_RESUMABLE_SUBAGENTS` | `false` |
+| `resume.disableAuto` | `PI_SUBAGENT_DISABLE_RESUME` | `false` |
+| `resume.prompt` | `PI_SUBAGENT_RESUME_PROMPT` | `true` |
+| `models.intelligence` | `PI_SUBAGENT_INTELLIGENCE` | `true` |
+| `models.fallback` | `PI_SUBAGENT_FALLBACK_MODEL` | No configured fallback |
+| `runner.startupTimeoutMs` | `PI_SUBAGENT_STARTUP_TIMEOUT` | `120000` |
+| `runner.idleTimeoutMs` | `PI_SUBAGENT_IDLE_TIMEOUT` | `1200000` |
+| `runner.startupRetries` | `PI_SUBAGENT_STARTUP_RETRIES` | `2` |
+| `runner.command` | `PI_SUBAGENT_PI_COMMAND` | Current runtime |
+| `runner.argsPrefix` | `PI_SUBAGENT_PI_ARGS_PREFIX` | Current entrypoint |
+
+JSON switches require booleans; counts and timeouts require non-negative safe integers. `agents.confirmProject` accepts `true`, `false`, `"ask"`, `"never"`, or `"session"`. `models.fallback` and `runner.command` accept non-empty strings. `extension.exclude` and `runner.argsPrefix` accept arrays of strings. Invalid settings warn and are ignored, except an invalid `limits.total` blocks new launches.
+
+`extension.exclude` entries follow the matching rules in the README. JSON arrays preserve commas inside paths. Setting either environment alias replaces the JSON list; when both aliases are set, their CSV lists combine. Either disabling alias set to `1` or `true` disables the extension, regardless of JSON.
+
+`runner.command` and `runner.argsPrefix` are personal-only settings. Project files cannot change the executable or its startup arguments, even in trusted projects. The prefix applies only with an explicit command. For example, a personal file can contain `"runner": { "command": "node", "argsPrefix": ["/absolute/path/to/pi.js"] }`.
+
+JSON `extension.disabled` disables session features after project settings resolve, so a trusted project can override a personal value. Environment disabling prevents registration altogether. Reload Pi after changing settings.
+
+Only user-configurable extension variables have JSON counterparts. Inherited runtime metadata stays internal: `PI_SUBAGENT_DEPTH`, `PI_SUBAGENT_STACK`, `PI_SUBAGENT_BUDGET_DIR`, `PI_SUBAGENT_NAMES_FILE`, `PI_SUBAGENT_SESSION_ROOT`, and `PI_SUBAGENT_RUN_INTELLIGENCE`. OS and Pi SDK variables such as `HOME`, `PATH`, `PI_CODING_AGENT_DIR`, provider credentials, and proxy settings remain environment variables.
+
 ## Tool descriptions
 
-Use `pi-subagent.json` to configure model presets or replace either tool's full model-facing description. Files load in this order, with later values overriding earlier values per tool:
-
-1. `~/.pi/pi-subagent.json`
-2. `$PI_CODING_AGENT_DIR/pi-subagent.json`, normally `~/.pi/agent/pi-subagent.json`
-3. The nearest trusted `.pi/pi-subagent.json`, walking upward from the working directory
-
-The legacy filename `pi-subagents.json` is also supported. At each location, the singular filename takes precedence over the plural filename.
+In either settings filename, use `tool-prompts` to replace either tool's full model-facing description:
 
 ```json
 {
@@ -58,7 +112,7 @@ Missing descriptions retain their defaults. Overrides change written guidance, n
 
 ## Caller-selected intelligence
 
-Define named model presets in `pi-subagent.json`. With two or more enabled presets, the calling model must choose a configured `intelligence` preset for every launch item. With exactly one enabled preset, the launch tool hides the argument and automatically uses that preset. With no presets, the argument is absent and existing model/thinking defaults apply to launches. Named resumes never offer or accept an intelligence choice. No router or separate model-selection request is used.
+Define named model presets in `pi-subagent.json` or `pi-subagents.json`. With two or more enabled presets, the calling model must choose a configured `intelligence` preset for every launch item. With exactly one enabled preset, the launch tool hides the argument and automatically uses that preset. With no presets, the argument is absent and existing model/thinking defaults apply to launches. Named resumes never offer or accept an intelligence choice. No router or separate model-selection request is used.
 
 ```json
 {

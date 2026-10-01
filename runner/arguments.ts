@@ -1,22 +1,10 @@
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
+import { configuredEnv, type SubagentSettings } from "../settings.js";
 import type { AgentConfig } from "../agents.js";
 import type { SubagentModelSettings } from "../storage/name-records.js";
 import { latestSessionFile } from "../storage/session-fork.js";
 import { SUBAGENT_FALLBACK_MODEL_ENV } from "./constants.js";
 import { childExtensionArgs, excludedExtensions } from "./extension-policy.js";
-import { resolveInheritedResource } from "./resource-paths.js";
-function resolveExtensionArg(value: string): string {
-  if (!value) return value;
-  if (value.startsWith("npm:") || value.startsWith("git:")) return value;
-  if (value.startsWith("~/")) return path.join(os.homedir(), value.slice(2));
-  if (path.isAbsolute(value)) return value;
-
-  const resolved = path.resolve(process.cwd(), value);
-  return fs.existsSync(resolved) ? resolved : value;
-}
-
+import { resolveExtensionArg, resolveInheritedResource } from "./resource-paths.js";
 interface InheritedCliArgs {
   /** --extension/-e and --no-extensions/-ne args (with path resolution) */
   extensionArgs: string[];
@@ -227,8 +215,9 @@ export async function resolveChildExtensionArgs(
   cwd: string,
   projectTrusted?: boolean,
   forceTrustDecision = false,
+  settings?: SubagentSettings,
 ): Promise<string[] | undefined> {
-  const excludes = excludedExtensions();
+  const excludes = excludedExtensions(process.env, settings);
   if (excludes.length === 0)
     return forceTrustDecision
       ? [..._inheritedCliArgs.extensionArgs, projectTrusted ? "--approve" : "--no-approve"]
@@ -236,11 +225,18 @@ export async function resolveChildExtensionArgs(
   return childExtensionArgs(_inheritedCliArgs.extensionArgs, cwd, projectTrusted, excludes);
 }
 
-export function resolveSubagentModel(agentModel?: string, currentParentModel?: string): string | undefined {
+export function resolveSubagentModel(
+  agentModel?: string,
+  currentParentModel?: string,
+  settings?: SubagentSettings,
+): string | undefined {
   // The active parent model is authoritative. Agent frontmatter is retained as
   // a compatibility fallback only for callers that cannot supply live context.
   return (
-    currentParentModel ?? agentModel ?? process.env[SUBAGENT_FALLBACK_MODEL_ENV] ?? _inheritedCliArgs.fallbackModel
+    currentParentModel ??
+    agentModel ??
+    configuredEnv(SUBAGENT_FALLBACK_MODEL_ENV, settings) ??
+    _inheritedCliArgs.fallbackModel
   );
 }
 
@@ -248,9 +244,12 @@ export function resolveLaunchModelSettings(
   agent: Pick<AgentConfig, "model" | "thinking">,
   fallbackModel?: string,
   selection?: { name: string; provider: string; model: string; thinking: string },
+  settings?: SubagentSettings,
 ): SubagentModelSettings {
   return {
-    model: selection ? `${selection.provider}/${selection.model}` : resolveSubagentModel(agent.model, fallbackModel),
+    model: selection
+      ? `${selection.provider}/${selection.model}`
+      : resolveSubagentModel(agent.model, fallbackModel, settings),
     thinking: selection?.thinking ?? agent.thinking ?? _inheritedCliArgs.fallbackThinking,
     intelligence: selection?.name,
   };
@@ -268,6 +267,7 @@ export function buildPiArgs(
   extensionArgsOverride?: string[],
   resumeSettings?: SubagentModelSettings,
   savedSessionFile?: string | null,
+  settings?: SubagentSettings,
 ): { args: string[]; prompt: string } {
   const provider = resumeSettings?.model?.includes("/") ? resumeSettings.model.split("/", 1)[0] : selection?.provider;
   // Named resumes can reuse CLI-only auth, but only for the explicitly matching provider.
@@ -304,7 +304,7 @@ export function buildPiArgs(
   // Missing legacy settings are left to the saved session rather than replaced with current defaults.
   const model = resumeSettings
     ? resumeSettings.model
-    : (selection?.model ?? resolveSubagentModel(agent.model, fallbackModelOverride));
+    : (selection?.model ?? resolveSubagentModel(agent.model, fallbackModelOverride, settings));
   if (provider) args.push("--provider", provider);
   if (model) args.push("--model", resumeSettings && provider ? model.slice(provider.length + 1) : model);
 
