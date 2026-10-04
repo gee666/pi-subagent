@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { DEFAULT_AGENT } from "./agents.js";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { parseBoolean, RESUME_PROVIDER } from "./shared.js";
 import { isBudgetAmount } from "./budget.js";
@@ -99,11 +100,17 @@ function normalizeTasks(args: unknown): ResumableTask[] | null {
   if (!Array.isArray(rawTasks) || rawTasks.length === 0) return null;
   const tasks: ResumableTask[] = [];
   for (const task of rawTasks) {
-    if (!isRecord(task) || typeof task.agent !== "string" || typeof task.task !== "string") return null;
+    if (
+      !isRecord(task) ||
+      (task.agent !== undefined && typeof task.agent !== "string") ||
+      typeof task.task !== "string"
+    )
+      return null;
+    const agent = task.agent ?? DEFAULT_AGENT.name;
     const intelligence = task.intelligence ?? undefined;
     if (intelligence !== undefined && typeof intelligence !== "string") return null;
     const normalized: ResumableTask = {
-      agent: task.agent,
+      agent,
       task: task.task,
       intelligence,
     };
@@ -112,7 +119,7 @@ function normalizeTasks(args: unknown): ResumableTask[] | null {
     }
     const size = getTaskBranchSize(normalized);
     tasks.push({
-      agent: task.agent,
+      agent,
       task: task.task,
       ...(normalized.intelligence !== undefined ? { intelligence: normalized.intelligence } : {}),
       ...(size !== undefined ? { max_subagents_allowed: size - 1 } : {}),

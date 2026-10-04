@@ -205,11 +205,6 @@ export function registerSessionLifecycle(state: ExtensionState): void {
         }
       }
 
-      if (state.discoveredAgents.length > 0 && ctx.hasUI) {
-        const list = state.discoveredAgents.map((a) => `  - ${a.name} (${a.source})`).join("\n");
-        ctx.ui.notify(`Found ${state.discoveredAgents.length} subagent(s):\n${list}`, "info");
-      }
-
       const resumeDisabled = parseBooleanEnv(configuredEnv(SUBAGENT_RESUME_DISABLE_ENV, state.settings)) === true;
       if (resumeDisabled || (event.reason !== "resume" && event.reason !== "startup")) return;
 

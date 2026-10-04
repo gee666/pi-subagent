@@ -1,5 +1,5 @@
 import { sessionFilesIn, readSessionMessages } from "./session.js";
-import { displayIntelligence } from "../intelligence.js";
+import { formatSubagentLabel } from "./agent-label.js";
 import {
   type NestedSubagentResult,
   type SingleResult,
@@ -19,7 +19,7 @@ import type { TreeNode, NodeStatus } from "./tree-model.js";
 export const OUTPUT_PREVIEW_LINE_COUNT = 6;
 interface PendingSubagentCall {
   toolCallId: string;
-  tasks: Array<{ agent: string; task?: string }>;
+  tasks: Array<{ name?: string; agent: string; intelligence?: string; task?: string }>;
 }
 
 function splitOutputLines(text: unknown): string[] {
@@ -54,8 +54,13 @@ function extractPendingSubagentCalls(messages: SingleResult["messages"] | unknow
       if (Array.isArray(args.tasks)) {
         for (const raw of args.tasks) {
           const task = asRecord(raw);
-          if (typeof task.agent === "string") {
-            tasks.push({ agent: task.agent, task: typeof task.task === "string" ? task.task : undefined });
+          if (typeof task.agent === "string" || (task.agent === undefined && typeof task.task === "string")) {
+            tasks.push({
+              name: typeof task.name === "string" ? task.name : undefined,
+              agent: stringValue(task.agent),
+              intelligence: typeof task.intelligence === "string" ? task.intelligence : undefined,
+              task: typeof task.task === "string" ? task.task : undefined,
+            });
           }
         }
       } else if (args.resumes) {
@@ -91,7 +96,7 @@ function extractPendingSubagentCalls(messages: SingleResult["messages"] | unknow
 
 function buildPendingNodes(call: PendingSubagentCall): TreeNode[] {
   return call.tasks.map((task) => ({
-    label: task.agent,
+    label: formatSubagentLabel(task),
     status: "running",
     task: task.task,
     children: [],
@@ -283,14 +288,8 @@ function buildResultNode(rawResult: SingleResult, hydrateSessions: boolean): Tre
           result.startedAt ?? 0,
         );
   const descendantLastAction = children.reduce((latest, child) => Math.max(latest, child.lastActionAt ?? 0), 0);
-  const agentType = stringValue(result.agent, "unknown agent");
-  const humanName = typeof result.name === "string" && result.name ? result.name : undefined;
-  const agentLabel =
-    typeof result.intelligence === "string" && result.intelligence
-      ? `${displayIntelligence(result.intelligence)}/${agentType}`
-      : agentType;
   return {
-    label: humanName ? `${humanName} (${agentLabel})` : agentLabel,
+    label: formatSubagentLabel(result),
     status,
     meta: metaParts.join(" • "),
     task: typeof result.task === "string" ? result.task : undefined,

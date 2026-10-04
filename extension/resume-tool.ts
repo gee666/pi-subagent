@@ -230,7 +230,7 @@ export function registerResumeSubagentsTool(state: ExtensionState) {
                   systemPrompt: "",
                   model: target.model,
                   tools: target.tools,
-                  source: "builtin",
+                  source: "default",
                   filePath: "",
                 });
               }

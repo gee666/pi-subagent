@@ -1,4 +1,5 @@
 import { loadSubagentSettings } from "../settings.js";
+import { DEFAULT_AGENT } from "../agents.js";
 import { emptyUsage, extractToolCalls, getFinalOutput, isResultError, type SingleResult } from "../types.js";
 import { budgetPrompt, readBudget } from "../budget.js";
 import {
@@ -33,7 +34,9 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
     fallbackModel,
   } = opts;
 
-  const agent = agents.find((a) => a.name === agentName);
+  const agent =
+    agents.find((a) => a.name === agentName) ??
+    (agents.length === 0 && agentName === DEFAULT_AGENT.name ? DEFAULT_AGENT : undefined);
   if (!agent) {
     const available = agents.map((a) => `"${a.name}"`).join(", ") || "none";
     return {
@@ -98,7 +101,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
   // Enforce cycle prevention per task rather than rejecting an entire parallel
   // call. Legal siblings can still run while the cyclic task returns a normal
   // structured failure.
-  if (preventCycles && parentAgentStack.includes(agentName)) {
+  if (agent.source !== "default" && preventCycles && parentAgentStack.includes(agentName)) {
     const stackText = parentAgentStack.length > 0 ? parentAgentStack.join(" -> ") : "(root)";
     result.exitCode = 1;
     result.stopReason = "error";

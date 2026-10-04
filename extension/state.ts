@@ -41,6 +41,7 @@ export interface ExtensionState extends DelegationDepthConfig {
   currentBudget?: SubagentBudget;
   budgetSetupError?: unknown;
   pendingResumePlans: ResumableSubagentCall[];
+  recoveryPlansByToolCallId?: Map<string, ResumableSubagentCall>;
   modelToRestoreAfterResume?: ResumeModel;
   approvedProjectAgentDirsForSession: Set<string>;
   activeSubagents: Map<number, { agent: string; task: string; handle: RunningSubagentHandle; name?: string }>;

@@ -6,7 +6,6 @@ type SettingType = "boolean" | "integer" | "string" | "list" | "confirmation";
 export const SETTING_DEFINITIONS = [
   ["extension", "disabled", "PI_SUBAGENT_DISABLED", "boolean"],
   ["extension", "exclude", "PI_SUBAGENT_EXCLUDE_EXTENSIONS", "list"],
-  ["agents", "hideBuiltins", "PI_SUBAGENT_HIDE_BUILTIN_AGENTS", "boolean"],
   ["agents", "confirmProject", "PI_SUBAGENT_CONFIRM_PROJECT_AGENTS", "confirmation"],
   ["limits", "total", "PI_SUBAGENT_MAX_TOTAL_AGENTS", "integer"],
   ["limits", "parallel", "PI_SUBAGENT_MAX_PARALLEL_TASKS", "integer"],

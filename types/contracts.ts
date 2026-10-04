@@ -64,7 +64,7 @@ export const MAX_LIVE_LOG_ENTRIES = 6;
  * for crash-resume while omitting full transcripts and live-only state. */
 export interface SingleResult {
   agent: string;
-  agentSource: "user" | "project" | "builtin" | "unknown";
+  agentSource: "user" | "project" | "builtin" | "default" | "unknown";
   task: string;
   /** Unique resumable human name within the delegation tree (e.g. "John"). */
   name?: string;

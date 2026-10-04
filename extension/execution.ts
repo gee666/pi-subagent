@@ -3,13 +3,14 @@ import { type SubagentBudget } from "../budget.js";
 import { isFinishedResult } from "../resume.js";
 import { executeParallelSubprocess, runAgentSubprocess } from "../runner.js";
 import { type SingleResult, getFinalOutput, isResultError } from "../types.js";
+import { formatSubagentLabel } from "../ui/agent-label.js";
 import { updateLatestBroadcastTargets } from "./broadcast.js";
 import type { ProgressUpdate } from "./contracts.js";
 import { makeDetailsFactory } from "./details.js";
 import type { ExtensionState } from "./state.js";
 
 export function formatNameSuffix(result: SingleResult | undefined): string {
-  return result?.name ? `\n\n(subagent: ${result.name} (${result.agent}) — resume with the name ${result.name})` : "";
+  return result?.name ? `\n\n(subagent: ${formatSubagentLabel(result)} — resume with the name ${result.name})` : "";
 }
 
 export async function executeSingle(
@@ -89,7 +90,7 @@ export async function executeSingle(
       content: [
         {
           type: "text" as const,
-          text: `${result.name ? `${result.name} (${result.agent})` : `Agent ${result.agent}`} ${result.stopReason || "failed"}: ${errorMsg}`,
+          text: `${formatSubagentLabel(result)} ${result.stopReason || "failed"}: ${errorMsg}`,
         },
       ],
       details: makeDetails("single")([result]),

@@ -2,7 +2,7 @@ import { createIntelligenceSchemas, validatePreparedArguments } from "./schemas.
 import { selectIntelligence } from "../intelligence.js";
 import { resolveLaunchModelSettings } from "../runner/arguments.js";
 import * as path from "node:path";
-import { discoverAgents } from "../agents.js";
+import { DEFAULT_AGENT, discoverAgents } from "../agents.js";
 import {
   createBudget,
   isBranchBudgetAmount,
@@ -31,15 +31,21 @@ import {
 import { trackProgress } from "./progress.js";
 import { getSubagentsToolDescription } from "./prompts.js";
 import { ensureBudget, getParentModelForSubagent, getSessionDirForTask } from "./runtime.js";
-import { findRecoveryPlanIndex, prepareIntelligenceArguments, prepareRecoveryArguments } from "./schemas.js";
+import {
+  findRecoveryPlanIndex,
+  getPreparedRecoveryPlan,
+  prepareIntelligenceArguments,
+  prepareRecoveryArguments,
+} from "./schemas.js";
 import type { ExtensionState } from "./state.js";
 
 export function registerSubagentsTool(state: ExtensionState) {
-  const parameters = createIntelligenceSchemas(state.intelligencePresets, state.settings).subagents;
+  const hasAgentTypes = state.discoveredAgents.length > 0;
+  const parameters = createIntelligenceSchemas(state.intelligencePresets, state.settings, hasAgentTypes).subagents;
   state.pi.registerTool({
     name: SUBAGENT_TOOL_NAME,
     label: "Subagents",
-    description: state.configuredToolPrompts[SUBAGENT_TOOL_NAME] ?? getSubagentsToolDescription(),
+    description: state.configuredToolPrompts[SUBAGENT_TOOL_NAME] ?? getSubagentsToolDescription(hasAgentTypes),
     parameters,
     prepareArguments(args) {
       return validatePreparedArguments(
@@ -49,6 +55,7 @@ export function registerSubagentsTool(state: ExtensionState) {
           state.pendingResumePlans,
           state.intelligencePresets,
           state.settings,
+          hasAgentTypes,
         ),
       );
     },
@@ -60,11 +67,13 @@ export function registerSubagentsTool(state: ExtensionState) {
           recordToolCallStart(toolCallId);
           updateLatestBroadcastTargets(state, undefined);
           const discovery = discoverAgents(ctx.cwd, "both", state.settings);
-          const agents = filterAgentsForCurrentLayer(discovery.agents, state.currentDepth, state.maxDepth);
+          const agents = hasAgentTypes
+            ? filterAgentsForCurrentLayer(discovery.agents, state.currentDepth, state.maxDepth)
+            : [DEFAULT_AGENT];
 
           const makeDetails = makeDetailsFactory(discovery.projectAgentsDir, DEFAULT_DELEGATION_MODE);
 
-          const tasks = params.tasks ?? [];
+          const tasks = (params.tasks ?? []).map((task) => ({ ...task, agent: task.agent ?? DEFAULT_AGENT.name }));
           if (tasks.length === 0) {
             return {
               content: [
@@ -105,7 +114,7 @@ export function registerSubagentsTool(state: ExtensionState) {
           if (state.preventCycles) {
             const stack = new Set(state.ancestorAgentStack);
             tasks.forEach((task, index) => {
-              if (stack.has(task.agent)) cyclicTaskIndexes.add(index);
+              if (hasAgentTypes && stack.has(task.agent)) cyclicTaskIndexes.add(index);
             });
           }
           const requested = new Set<string>();
@@ -157,13 +166,32 @@ export function registerSubagentsTool(state: ExtensionState) {
             }
           }
 
-          const resumePlanIndex = findRecoveryPlanIndex(
-            tasks,
-            state.pendingResumePlans,
-            state.intelligencePresets,
-            state.settings,
-          );
+          const boundPlan = state.recoveryPlansByToolCallId?.get(toolCallId) ?? getPreparedRecoveryPlan(params);
+          const resumePlanIndex = boundPlan
+            ? state.pendingResumePlans.indexOf(boundPlan)
+            : findRecoveryPlanIndex(
+                tasks,
+                state.pendingResumePlans,
+                state.intelligencePresets,
+                state.settings,
+                hasAgentTypes,
+              );
+          if (
+            boundPlan &&
+            (resumePlanIndex < 0 ||
+              findRecoveryPlanIndex(tasks, [boundPlan], state.intelligencePresets, state.settings, hasAgentTypes) < 0)
+          ) {
+            throw new Error("Subagent recovery plan is no longer pending or its arguments have changed.");
+          }
           const resumePlan = resumePlanIndex >= 0 ? state.pendingResumePlans[resumePlanIndex] : null;
+          if (resumePlan) {
+            tasks.forEach((task, index) => {
+              if (!hasAgentTypes) task.agent = resumePlan.tasks[index].agent;
+              if (!agents.some((agent) => agent.name === task.agent)) {
+                agents.push({ ...DEFAULT_AGENT, name: task.agent });
+              }
+            });
+          }
           if (launchGeneration !== state.lifecycleGeneration || signal?.aborted)
             throw new SubagentBudgetError("Launch canceled or session changed. No slots were reserved.");
           const budgets: Array<SubagentBudget | undefined> = tasks.map(() => undefined);
@@ -204,6 +232,7 @@ export function registerSubagentsTool(state: ExtensionState) {
           }
 
           if (resumePlanIndex >= 0) state.pendingResumePlans.splice(resumePlanIndex, 1);
+          state.recoveryPlansByToolCallId?.delete(toolCallId);
 
           // Assign random durable human names unique across the whole tree. Resumed
           // runs keep the names already recorded in the previous results.

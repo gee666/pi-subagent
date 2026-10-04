@@ -335,10 +335,11 @@ export function buildPiArgs(
   if (systemPromptPath) args.push("--append-system-prompt", systemPromptPath);
   return {
     args,
-    prompt: rawPrompt
-      ? task
-      : resumeSession
-        ? `Continue the previous task from where you left off. Original task: ${task}`
-        : `Task: ${task}`,
+    prompt:
+      rawPrompt || agent.source === "default"
+        ? task
+        : resumeSession
+          ? `Continue the previous task from where you left off. Original task: ${task}`
+          : `Task: ${task}`,
   };
 }

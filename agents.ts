@@ -7,25 +7,21 @@
  * Lookup locations:
  *   - User agents:    ~/.pi/agent/agents/*.md  (or $PI_CODING_AGENT_DIR/agents/ when env var is set)
  *   - Project agents: .pi/agents/*.md  (walks up from cwd)
- *   - Bundled agents: ./agents/*.md    (included unless PI_SUBAGENT_HIDE_BUILTIN_AGENTS is true)
  */
 
 import { getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
-import { parseBoolean } from "./shared.js";
-import { configuredEnv, type SubagentSettings } from "./settings.js";
+import type { SubagentSettings } from "./settings.js";
 
 export type AgentScope = "user" | "project" | "both";
-export type AgentSource = "user" | "project" | "builtin";
+// "builtin" remains valid for historical session records, not discovery.
+export type AgentSource = "user" | "project" | "builtin" | "default";
 export type LayerSetting = boolean | "only";
 export interface LayerRule {
   layers: number[];
   setting: LayerSetting;
 }
-
-export const SUBAGENT_HIDE_BUILTIN_AGENTS_ENV = "PI_SUBAGENT_HIDE_BUILTIN_AGENTS";
 
 export interface AgentConfig {
   name: string;
@@ -48,7 +44,14 @@ export interface AgentDiscoveryResult {
   projectAgentsDir: string | null;
 }
 
-const BUNDLED_AGENTS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "agents");
+/** Internal fallback, never advertised as a user-defined agent type. */
+export const DEFAULT_AGENT: AgentConfig = {
+  name: "",
+  description: "",
+  systemPrompt: "",
+  source: "default",
+  filePath: "",
+};
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -197,10 +200,6 @@ function dedupeAgents(...layers: AgentConfig[][]): AgentConfig[] {
   return Array.from(agentMap.values());
 }
 
-function hideBuiltinAgents(settings?: SubagentSettings): boolean {
-  return parseBoolean(configuredEnv(SUBAGENT_HIDE_BUILTIN_AGENTS_ENV, settings)) === true;
-}
-
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -248,19 +247,17 @@ export function filterAdvertisedAgents(
 /**
  * Discover all available agents according to the requested scope.
  *
- * Built-in agents are included at the lowest priority unless
- * PI_SUBAGENT_HIDE_BUILTIN_AGENTS is true. Custom agents with the same name
- * override their built-in counterpart.
+ * Only user-created definitions count. Project definitions override user
+ * definitions with the same name.
  */
-export function discoverAgents(cwd: string, scope: AgentScope, settings?: SubagentSettings): AgentDiscoveryResult {
+export function discoverAgents(cwd: string, scope: AgentScope, _settings?: SubagentSettings): AgentDiscoveryResult {
   const userDir = path.join(getAgentDir(), "agents");
   const projectAgentsDir = findNearestProjectAgentsDir(cwd);
 
-  const builtinAgents = hideBuiltinAgents(settings) ? [] : loadAgentsFromDir(BUNDLED_AGENTS_DIR, "builtin");
   const userAgents = loadAgentsFromDir(userDir, "user");
   const projectAgents = projectAgentsDir ? loadAgentsFromDir(projectAgentsDir, "project") : [];
 
-  if (scope === "user") return { agents: dedupeAgents(builtinAgents, userAgents), projectAgentsDir };
-  if (scope === "project") return { agents: dedupeAgents(builtinAgents, projectAgents), projectAgentsDir };
-  return { agents: dedupeAgents(builtinAgents, userAgents, projectAgents), projectAgentsDir };
+  if (scope === "user") return { agents: dedupeAgents(userAgents), projectAgentsDir };
+  if (scope === "project") return { agents: dedupeAgents(projectAgents), projectAgentsDir };
+  return { agents: dedupeAgents(userAgents, projectAgents), projectAgentsDir };
 }

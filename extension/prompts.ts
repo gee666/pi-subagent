@@ -1,5 +1,5 @@
 export const BASE_SUBAGENTS_TOOL_DESCRIPTION =
-  "Run agents in separate processes. Pass { tasks: [{ agent, task, max_subagents_allowed }] }. Calls block until all tasks finish; put parallel tasks in one array.";
+  "Run agents in separate processes. Calls block until all tasks finish; put parallel tasks in one array.";
 
 export const SUBAGENT_USAGE_GUIDANCE = [
   "When to launch new subagents:",
@@ -9,8 +9,9 @@ export const SUBAGENT_USAGE_GUIDANCE = [
   "4. Delegate before deep research. Agents do not inherit your conversation. If you already gathered findings, share them in the task or a handoff file under the project's tmp/ directory, using its absolute path. Include scope, constraints, relevant files, decisions, completed checks, and expected output. Ask agents to check evidence and fill gaps, not repeat your research.",
 ].join("\n");
 
-export function getSubagentsToolDescription(): string {
-  return `${BASE_SUBAGENTS_TOOL_DESCRIPTION}\n\n${SUBAGENT_USAGE_GUIDANCE}`;
+export function getSubagentsToolDescription(hasAgentTypes = true): string {
+  const fields = hasAgentTypes ? "agent, task, max_subagents_allowed" : "task, max_subagents_allowed";
+  return `${BASE_SUBAGENTS_TOOL_DESCRIPTION} Pass { tasks: [{ ${fields} }] }.\n\n${SUBAGENT_USAGE_GUIDANCE}`;
 }
 
 export function sameToolPrompts(left: Record<string, string>, right: Record<string, string>): boolean {

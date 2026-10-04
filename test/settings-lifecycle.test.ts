@@ -18,7 +18,7 @@ test("project settings load after trust, refresh on session switches and can ena
     f.write(path.join(f.project, ".pi"), {
       delegation: { depth: 3 },
       limits: { parallel: 1, total: 0 },
-      agents: { hideBuiltins: true, confirmProject: "session" },
+      agents: { confirmProject: "session" },
       models: { intelligence: true },
       "subagents-models": [
         { cheap: { model: "small", provider: "local", "reasoning-level": "off" } },
@@ -35,13 +35,13 @@ test("project settings load after trust, refresh on session switches and can ena
     assert.ok(host.getActiveTools().includes("subagents"));
     // Pi maps TypeBox versions at load time. This harness stores our local schema unchanged.
     const params = host.tool("subagents").parameters as unknown as TSchema;
-    const task = { agent: "worker", task: "work", max_subagents_allowed: 0 };
+    const task = { task: "work", max_subagents_allowed: 0 };
     assert.equal(Value.Check(params, { tasks: [task] }), false);
     assert.equal(Value.Check(params, { tasks: [{ ...task, intelligence: "cheap" }] }), true);
     const prompt = (await host.emit("before_agent_start", {}, trusted)).at(-1) as { systemPrompt: string };
     assert.match(prompt.systemPrompt, /Technical batch capacity: 1/);
     assert.match(prompt.systemPrompt, /You cannot launch subagents/);
-    assert.match(prompt.systemPrompt, /No agents are available/);
+    assert.match(prompt.systemPrompt, /No agent types are available/);
     const budgetEntry = entries.find(
       (entry) => entry.type === "custom" && entry.customType === SUBAGENT_BUDGET_CUSTOM_TYPE,
     );

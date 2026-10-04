@@ -127,17 +127,20 @@ export function registerResumeProvider(state: ExtensionState): void {
         // `fauxToolCall`/`fauxAssistantMessage` as proper stream events.
         if (plans.length > 0 && phase === "tool" && triggerMatches) {
           resume.phase = "final";
-          const toolCalls = plans.map((plan, index) =>
-            fauxToolCall(
+          const recoveryPlans = (state.recoveryPlansByToolCallId ??= new Map());
+          const toolCalls = plans.map((plan, index) => {
+            const id = `resume_subagent_${Date.now()}_${index}`;
+            recoveryPlans.set(id, plan);
+            return fauxToolCall(
               SUBAGENT_TOOL_NAME,
               {
                 tasks: normalizeRecoveryIntelligence(plan.tasks, state.intelligencePresets).map((task) => ({
                   ...task,
                 })),
               },
-              { id: `resume_subagent_${Date.now()}_${index}` },
-            ),
-          );
+              { id },
+            );
+          });
           resumeCore.setResponses([() => fauxAssistantMessage(toolCalls, { stopReason: "toolUse" })]);
           const stream = resumeCore.streamSimple(model, context, options);
           // Restore the real model once the injected turn has fully streamed so

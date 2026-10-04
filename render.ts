@@ -3,6 +3,7 @@ import { Container, Spacer, Text, truncateToWidth, type Component } from "@earen
 const fitLine = (text: string, width: number) => truncateToWidth(text, width, "");
 
 import { MAX_LIVE_LOG_ENTRIES, isSubagentDetails, type SubagentDetails } from "./types.js";
+import { formatSubagentLabel } from "./ui/agent-label.js";
 import {
   type ThemeFg,
   type TreeNode,
@@ -229,14 +230,18 @@ export function renderResult(
   } catch {
     const lines: string[] = [];
     for (const item of details.results) {
-      const agent = typeof item?.agent === "string" ? item.agent : "unknown agent";
+      const label = formatSubagentLabel({
+        name: item?.name,
+        agent: typeof item?.agent === "string" ? item.agent : "unknown agent",
+        intelligence: item?.intelligence,
+      });
       const icon =
         item?.exitCode === -1
           ? theme.fg("warning", "⏳")
           : item?.exitCode === 0
             ? theme.fg("success", "✅")
             : theme.fg("error", "❌");
-      lines.push(`${icon} ${theme.fg("accent", agent)}`);
+      lines.push(`${icon} ${theme.fg("accent", label)}`);
       const liveLog = Array.isArray(item?.liveLog) ? item.liveLog.slice(-MAX_LIVE_LOG_ENTRIES) : [];
       for (const entry of liveLog) {
         lines.push(`  ${formatLiveLogEntry(entry, theme)}`);

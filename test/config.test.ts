@@ -1,13 +1,14 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
-import { discoverAgents, SUBAGENT_HIDE_BUILTIN_AGENTS_ENV } from "../agents.js";
+import { discoverAgents } from "../agents.js";
 import { findProjectConfig, loadPiSubagentsConfig } from "../config.js";
 
 function tempDir(prefix: string): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const root = path.join(process.cwd(), "tmp");
+  fs.mkdirSync(root, { recursive: true });
+  return fs.mkdtempSync(path.join(root, prefix));
 }
 
 describe("pi-subagents config", () => {
@@ -57,56 +58,37 @@ describe("pi-subagents config", () => {
   });
 });
 
-describe("built-in agent discovery", () => {
-  test("keeps built-ins with custom agents and supports hiding them by env", () => {
+describe("user-created agent discovery", () => {
+  test("has no bundled fallback and honors scopes and project overrides", () => {
     const root = tempDir("pi-subagent-agents-");
-    const previous = process.env[SUBAGENT_HIDE_BUILTIN_AGENTS_ENV];
+    const previous = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = path.join(root, "user");
     try {
-      const agentsDir = path.join(root, ".pi", "agents");
-      fs.mkdirSync(agentsDir, { recursive: true });
+      const user = path.join(root, "user/agents");
+      const project = path.join(root, ".pi/agents");
+      fs.mkdirSync(user, { recursive: true });
+      fs.mkdirSync(project, { recursive: true });
+      assert.deepEqual(discoverAgents(root, "both").agents, []);
+      fs.writeFileSync(path.join(project, "invalid.md"), "Not an agent definition.");
+      assert.deepEqual(discoverAgents(root, "both").agents, []);
+      fs.writeFileSync(path.join(user, "worker.md"), "---\nname: worker\ndescription: user worker\n---\nUser prompt.");
       fs.writeFileSync(
-        path.join(agentsDir, "custom.md"),
-        "---\nname: custom-agent\ndescription: custom\n---\nCustom prompt.\n",
+        path.join(project, "worker.md"),
+        "---\nname: worker\ndescription: project worker\n---\nProject prompt.",
       );
-
-      delete process.env[SUBAGENT_HIDE_BUILTIN_AGENTS_ENV];
-      const visible = discoverAgents(root, "both").agents;
-      assert.ok(visible.some((agent) => agent.name === "custom-agent" && agent.source === "project"));
-      assert.ok(visible.some((agent) => agent.source === "builtin"));
-
-      process.env[SUBAGENT_HIDE_BUILTIN_AGENTS_ENV] = "true";
-      const hidden = discoverAgents(root, "both").agents;
-      assert.ok(hidden.some((agent) => agent.name === "custom-agent"));
-      assert.equal(
-        hidden.some((agent) => agent.source === "builtin"),
-        false,
+      assert.deepEqual(
+        discoverAgents(root, "user").agents.map((a) => [a.name, a.source]),
+        [["worker", "user"]],
       );
+      for (const scope of ["both", "project"] as const) {
+        const found = discoverAgents(root, scope).agents;
+        assert.equal(found.length, 1);
+        assert.equal(found[0].source, "project");
+        assert.equal(found[0].systemPrompt, "Project prompt.");
+      }
     } finally {
-      if (previous === undefined) delete process.env[SUBAGENT_HIDE_BUILTIN_AGENTS_ENV];
-      else process.env[SUBAGENT_HIDE_BUILTIN_AGENTS_ENV] = previous;
-      fs.rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  test("lets a custom agent override a built-in with the same name", () => {
-    const root = tempDir("pi-subagent-agent-override-");
-    const previous = process.env[SUBAGENT_HIDE_BUILTIN_AGENTS_ENV];
-    try {
-      delete process.env[SUBAGENT_HIDE_BUILTIN_AGENTS_ENV];
-      const agentsDir = path.join(root, ".pi", "agents");
-      fs.mkdirSync(agentsDir, { recursive: true });
-      fs.writeFileSync(
-        path.join(agentsDir, "code-writer.md"),
-        "---\nname: code-writer\ndescription: project writer\n---\nProject prompt.\n",
-      );
-
-      const matches = discoverAgents(root, "both").agents.filter((agent) => agent.name === "code-writer");
-      assert.equal(matches.length, 1);
-      assert.equal(matches[0].source, "project");
-      assert.equal(matches[0].description, "project writer");
-    } finally {
-      if (previous === undefined) delete process.env[SUBAGENT_HIDE_BUILTIN_AGENTS_ENV];
-      else process.env[SUBAGENT_HIDE_BUILTIN_AGENTS_ENV] = previous;
+      if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previous;
       fs.rmSync(root, { recursive: true, force: true });
     }
   });

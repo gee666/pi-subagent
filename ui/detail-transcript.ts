@@ -71,6 +71,7 @@ function childrenFromDetails(details: SubagentDetails): DetailChildRef[] {
     children.push({
       name: typeof result.name === "string" && result.name ? result.name : undefined,
       agent: typeof result.agent === "string" ? result.agent : "unknown agent",
+      ...(typeof result.intelligence === "string" && result.intelligence ? { intelligence: result.intelligence } : {}),
       status: exitCode === -1 ? "running" : exitCode === 0 ? "success" : "error",
       task: typeof result.task === "string" ? result.task : "",
     });

@@ -1,5 +1,6 @@
 import { RESUME_SUBAGENTS_TOOL_NAME } from "../types.js";
 import { displayIntelligence } from "../intelligence.js";
+import { formatSubagentLabel } from "./agent-label.js";
 import { type ThemeFg, formatClockTime, formatTokens, truncate } from "./tree-format.js";
 import type { DetailBlock, DetailChildRef, DetailUsage, SubagentDetail } from "./detail-model.js";
 import {
@@ -134,7 +135,7 @@ export function renderTurnOverviewLines(
     out.section("CHILDREN (DIRECT)");
     children.forEach((child, index) => {
       const branch = index === children.length - 1 ? "└─" : "├─";
-      const label = child.name ? `${child.name} (${child.agent})` : child.agent;
+      const label = formatSubagentLabel(child);
       const task = child.task
         ? ` — ${truncate(child.task.replace(/\s+/g, " "), Math.max(24, width - label.length - 13))}`
         : "";
@@ -176,7 +177,7 @@ export function renderTurnToolListLines(
     }
     const siblings = rows.filter((other) => other.kind === "child" && other.toolIndex === row.toolIndex);
     const isLast = siblings[siblings.length - 1] === row;
-    const label = row.child.name ? `${row.child.name} (${row.child.agent})` : row.child.agent;
+    const label = formatSubagentLabel(row.child);
     const hint = row.child.name ? theme.fg("muted", " ← Enter to expand") : theme.fg("muted", " (no name)");
     out.push(
       `${marker}      ${isLast ? "└─" : "├─"} ${statusIcon(row.child.status)} ${theme.fg("accent", label)}${index === selectedRow ? hint : ""}`,
@@ -197,7 +198,7 @@ export function renderChildTreeLines(
   children.forEach((child, index) => {
     const marker = index === selectedIndex ? theme.fg("accent", ">") : " ";
     const branch = index === children.length - 1 ? "└─" : "├─";
-    const label = child.name ? `${child.name} (${child.agent})` : child.agent;
+    const label = formatSubagentLabel(child);
     const task = child.task
       ? ` — ${truncate(child.task.replace(/\s+/g, " "), Math.max(16, width - label.length - 12))}`
       : "";
@@ -233,7 +234,7 @@ export function renderToolDetailLines(
     out.push();
     out.section("CHILDREN");
     for (const child of event.children) {
-      const label = child.name ? `${child.name} (${child.agent})` : child.agent;
+      const label = formatSubagentLabel(child);
       out.push(`  ${statusIcon(child.status)} ${theme.fg("accent", label)}`);
       if (child.task) out.wrap(child.task, "     ", "toolOutput");
       if (child.name) out.push(`     ${theme.fg("muted", `/subagent-expand ${child.name}`)}`);

@@ -16,6 +16,7 @@ import type { ExtensionState } from "./state.js";
 import { collectCombinedUsageStatusLine } from "./usage.js";
 
 export function clearSyntheticResumeState(state: ExtensionState): void {
+  state.recoveryPlansByToolCallId?.clear();
   state.resumeState.plans = [];
   state.resumeState.phase = "tool";
   state.resumeState.trigger = "resumePrompt";

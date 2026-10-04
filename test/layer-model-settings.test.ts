@@ -55,10 +55,8 @@ describe("agent layer settings", () => {
     }
   });
 
-  test("bundled team-of-subagents is available only to the main agent", () => {
-    const teamLead = parseAgentFile(path.join(process.cwd(), "agents", "team-of-subagents.md"), "builtin");
-    assert.ok(teamLead);
-    assert.equal(teamLead.firstLayer, "only");
+  test("user-defined first-layer-only agents are available only to the main agent", () => {
+    const teamLead = agent({ firstLayer: "only" });
     assert.equal(isAgentEnabledAtLayer(teamLead, 1, 3), true);
     assert.equal(isAgentEnabledAtLayer(teamLead, 2, 3), false);
     assert.equal(isAgentEnabledAtLayer(teamLead, 3, 3), false);
@@ -248,33 +246,5 @@ describe("subagent usage guidance", () => {
     assert.match(description, /When to launch new subagents/);
     assert.doesNotMatch(description, /team-lead|code-writer|code-architect|code-reviwer/);
     assert.ok(description.split(/\s+/).length < 450);
-  });
-
-  test("specialists weigh delegation costs without mentioning team-lead", () => {
-    for (const name of ["code-writer", "code-architect", "code-reviwer"]) {
-      const specialist = parseAgentFile(path.join(process.cwd(), "agents", `${name}.md`), "builtin");
-      assert.ok(specialist);
-      assert.match(specialist.systemPrompt, /independent review/);
-      assert.doesNotMatch(specialist.systemPrompt, /only when independent review/);
-      assert.match(specialist.systemPrompt, /outweighs startup and handoff costs/);
-      assert.match(specialist.systemPrompt, /Launch new subagents/);
-      assert.doesNotMatch(specialist.systemPrompt, /ask your caller/i);
-      assert.doesNotMatch(specialist.description + specialist.systemPrompt, /team.?lead/i);
-      assert.match(specialist.systemPrompt, /handoff file/);
-    }
-  });
-
-  test("team-of-subagents requires a bounded scope and coordinates independent slices", () => {
-    const lead = parseAgentFile(path.join(process.cwd(), "agents", "team-of-subagents.md"), "builtin");
-    assert.ok(lead);
-    assert.match(lead.description, /Use (?:(?:extremely|very) )?rarely/);
-    assert.doesNotMatch(lead.systemPrompt, /ask your caller|ask for it/i);
-    assert.match(lead.systemPrompt, /Define a bounded scope and expected output/);
-    assert.match(lead.systemPrompt, /Run independent slices together/);
-    assert.match(lead.systemPrompt, /Avoid overlapping edits/);
-    assert.doesNotMatch(
-      lead.systemPrompt,
-      /substantial follow-up|Fix small integration issues yourself|repeated review rounds|Do small tasks/,
-    );
   });
 });

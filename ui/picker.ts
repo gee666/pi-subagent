@@ -1,5 +1,5 @@
 import { overlayFrame } from "./frame.js";
-import { displayIntelligence } from "../intelligence.js";
+import { formatSubagentLabel } from "./agent-label.js";
 import { Key, matchesKey, fuzzyFilter } from "@earendil-works/pi-tui";
 import type { DetailTheme } from "../detail.js";
 export interface PickerItem {
@@ -103,8 +103,7 @@ export class SubagentPicker {
       }
       const isSelected = this.scroll + index === this.selected;
       const marker = isSelected ? theme.fg("accent", ">") : " ";
-      const agent = item.intelligence ? `${displayIntelligence(item.intelligence)}/${item.agent}` : item.agent;
-      const label = `${item.name} (${agent})`;
+      const label = formatSubagentLabel(item);
       const task = item.task ? ` — ${item.task.replace(/\s+/g, " ")}` : "";
       out.push(frame.row(`${marker} ${theme.fg("accent", label)}${theme.fg("dim", task)}`));
     }

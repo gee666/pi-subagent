@@ -1,6 +1,7 @@
 export interface DetailChildRef {
   name?: string;
   agent: string;
+  intelligence?: string;
   status: "running" | "success" | "error";
   task: string;
 }

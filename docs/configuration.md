@@ -50,7 +50,7 @@ For each setting, an explicitly set environment variable wins over JSON, then th
 ```json
 {
   "extension": { "disabled": false, "exclude": [] },
-  "agents": { "hideBuiltins": false, "confirmProject": "ask" },
+  "agents": { "confirmProject": "ask" },
   "limits": { "total": 50, "parallel": 30, "concurrency": 8 },
   "delegation": { "depth": 3, "preventCycles": true },
   "resume": { "disabled": false, "disableAuto": false, "prompt": true },
@@ -67,7 +67,6 @@ For each setting, an explicitly set environment variable wins over JSON, then th
 | --- | --- | --- |
 | `extension.disabled` | `PI_SUBAGENT_DISABLED` / `PI-SUBAGENT-DISABLED` | `false` |
 | `extension.exclude` | `PI_SUBAGENT_EXCLUDE_EXTENSIONS` / `PI-SUBAGENT-EXCLUDE-EXTENSIONS` | `[]` |
-| `agents.hideBuiltins` | `PI_SUBAGENT_HIDE_BUILTIN_AGENTS` | `false` |
 | `agents.confirmProject` | `PI_SUBAGENT_CONFIRM_PROJECT_AGENTS` | `"ask"` |
 | `limits.total` | `PI_SUBAGENT_MAX_TOTAL_AGENTS` | `50` |
 | `limits.parallel` | `PI_SUBAGENT_MAX_PARALLEL_TASKS` | `30` |
@@ -156,7 +155,7 @@ A selected or automatic preset overrides the parent model and agent model/thinki
 
 `resume_subagents` retains the original effective model, thinking level, and intelligence label. This also applies to private forks and after restart, preset changes, disabling intelligence, changing the parent model, or editing/deleting the agent definition. A worker launched without a preset remains unlabelled. Pass only `{ subagent, task }` and an optional `max_subagents_allowed`; any `intelligence` argument, including `null`, rejects the resume batch.
 
-Tool result rows show the selected preset, for example `Nicolas (Junior/code-writer)`. Display names capitalize only the first character; configured spelling and argument values otherwise stay unchanged. Runs without a preset show `Nicolas (code-writer)`. Durable results retain their own preset name, and the name registry retains the initial choice. The `/subagent-expand` picker shows the initial preset beside each agent type and lets you search by preset name. Its transcript view shows each task's or resume's recorded intelligence alongside its actual transcript model and thinking level. Later resumes do not relabel earlier work. Missing model or thinking metadata remains `unknown`, even when a preset name is known.
+Tool result rows show the selected preset, for example `Nicolas (Junior/code-writer)`. Display names capitalize only the first character; configured spelling and argument values otherwise stay unchanged. Runs without a preset show `Nicolas (code-writer)`. Runs without an agent type show `Nicolas (Junior)`, or just `Nicolas` when neither qualifier exists. Agent types come only from user-created definitions. With no available types, the launch schema omits `agent` and uses a default worker without agent-specific instructions. Durable results retain their own preset name, and the name registry retains the initial choice. The `/subagent-expand` picker shows the initial preset beside each agent type and lets you search by preset name. Its transcript view shows each task's or resume's recorded intelligence alongside its actual transcript model and thinking level. Later resumes do not relabel earlier work. Missing model or thinking metadata remains `unknown`, even when a preset name is known.
 
 `PI_SUBAGENT_INTELLIGENCE=true` enables presets when they exist, which is the default. Set it to `false` or `0` to treat the configuration as having no presets for new launches: the launch tool hides the argument and no automatic preset applies. Named resumes still retain their original settings. Unknown choices or attempts to pass a named hidden argument fail before launching workers. When the argument is hidden, omission or `null` still uses the automatic sole preset or existing defaults.
 
@@ -173,7 +172,6 @@ The old `smart-decision` block is ignored. Remove it and its router credentials 
 | `PI_SUBAGENT_MAX_CONCURRENCY` | `8` | Simultaneously running workers per call |
 | `PI_SUBAGENT_MAX_DEPTH` / `--subagent-max-depth` | `3` | Maximum delegation depth; `0` blocks delegation |
 | `PI_SUBAGENT_PREVENT_CYCLES` / `--subagent-prevent-cycles` | `true` | Block agent types already in the delegation stack |
-| `PI_SUBAGENT_HIDE_BUILTIN_AGENTS` | `false` | Hide bundled definitions when set to `true`, `on`, `yes`, or `1` |
 | `PI_SUBAGENT_CONFIRM_PROJECT_AGENTS` | `ask` | `true` / `ask` prompts for approval; `false` / `never` trusts projects; `session` remembers approval |
 | `PI_CODING_AGENT_DIR` | `~/.pi/agent` | Agent definitions and configuration directory |
 

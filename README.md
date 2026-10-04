@@ -65,13 +65,13 @@ PI_SUBAGENT_DISABLED=1 pi
 ```json
 {
   "tasks": [
-    { "agent": "code-writer", "task": "Implement the API", "max_subagents_allowed": 0 },
-    { "agent": "code-reviwer", "task": "Review the design", "max_subagents_allowed": 0 }
+    { "task": "Implement the API", "max_subagents_allowed": 0 },
+    { "task": "Review the design", "max_subagents_allowed": 0 }
   ]
 }
 ```
 
-Call `subagents` with one or more tasks. Tasks run in parallel, subject to the concurrency limit. Every task requires an agent type, task text, and a descendant allowance. Use `0` for a worker that will not delegate, or `1` to let it launch one subagent. The caller reserves one slot for the worker plus its descendant allowance.
+Call `subagents` with one or more tasks. Tasks run in parallel, subject to the concurrency limit. Every task requires task text and a descendant allowance. The `agent` argument exists only when user-created agent definitions are available. The `intelligence` argument exists only when two or more enabled presets are configured. These choices are independent; with neither, task items contain only `task` and `max_subagents_allowed`. Use `0` for a worker that will not delegate, or `1` to let it launch one subagent. The caller reserves one slot for the worker plus its descendant allowance.
 
 Workers with zero descendant allowance receive neither active delegation tools nor added delegation guidance. Raising `max_subagents_allowed` on resume restores the tools, subject to the depth limit. This uses Pi's documented `getActiveTools()` and `setActiveTools()` APIs during `session_start`. Workers that spent a positive allowance keep their tools so they can resume existing children.
 
@@ -87,12 +87,7 @@ Delegate only when parallel work or context isolation saves enough effort to cov
 
 ## Agent definitions
 
-Bundled agents:
-
-- `code-writer`: implementation and refactoring.
-- `code-reviwer`: code review. The spelling is retained for compatibility.
-- `code-architect`: technical design.
-- `team-lead`: coordination of a large subproject, launchable only by the main agent.
+There are no bundled agents. Without user-created definitions, every task uses the same default worker, with no agent-specific system prompt or instructions. It receives the parent's task text unchanged. Pi's normal system prompt and delegation limits still apply.
 
 Create Markdown files in `~/.pi/agent/agents/`, `$PI_CODING_AGENT_DIR/agents/`, or the project's `.pi/agents/` directory:
 
@@ -109,7 +104,7 @@ tools: read,write
 Write clear, concise technical documentation.
 ```
 
-The body is appended to Pi's system prompt. Project definitions override user/environment definitions, which override bundled definitions of the same name. Custom definitions replace the bundled instructions too.
+The body is appended to Pi's system prompt. Project definitions override user/environment definitions of the same name.
 
 See [configuration](docs/configuration.md) for frontmatter, layer restrictions, prompt overrides, and environment settings.
 
@@ -119,7 +114,7 @@ Collapsed results show each child's name, task, status, and most recent activity
 
 `/subagent-expand <name>` opens a saved worker transcript. With no name, it opens a searchable picker. Name completion is fuzzy. Each task or resume shows its actual provider/model and thinking level from the worker's session, not the parent's settings. Selected presets also appear as an intelligence label, kept separately for each run. Missing historical model/thinking metadata appears as `unknown`.
 
-[Model presets](docs/configuration.md#caller-selected-intelligence) show labels such as `Nicolas (Junior/code-writer)` in regular tool results. One enabled preset applies automatically to new launches without exposing an `intelligence` argument. Two or more require an explicit `intelligence` choice on every launch item. Omitted or `null` choices reject the whole launch batch before any worker starts. Zero or disabled presets keep the existing launch defaults and show no intelligence label. Named resumes do not accept `intelligence`; they retain the original effective model, thinking, and label, even after configuration or parent settings change.
+[Model presets](docs/configuration.md#caller-selected-intelligence) show labels such as `Nicolas (Junior/code-writer)` in regular tool results. One enabled preset applies automatically to new launches without exposing an `intelligence` argument. Two or more require an explicit `intelligence` choice on every launch item. Omitted or `null` choices reject the whole launch batch before any worker starts. Zero or disabled presets keep the existing launch defaults and show no intelligence label. Without an agent type, labels show `Nicolas (Junior)`; without either qualifier, they show just `Nicolas`. Named resumes do not accept `intelligence`; they retain the original effective model, thinking, and label, even after configuration or parent settings change.
 
 | Key | Action |
 | --- | --- |

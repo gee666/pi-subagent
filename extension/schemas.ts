@@ -1,4 +1,5 @@
 import type { SubagentSettings } from "../settings.js";
+import { DEFAULT_AGENT } from "../agents.js";
 import { Value } from "@sinclair/typebox/value";
 import type { Static, TSchema, TLiteral } from "@sinclair/typebox";
 import { Type } from "@sinclair/typebox";
@@ -31,7 +32,7 @@ export const SubagentParams = Type.Object(
     tasks: Type.Array(TaskItem, {
       minItems: 1,
       description:
-        "Array of {agent, task} objects. One task behaves like a single-agent delegation; multiple tasks run concurrently.",
+        "One task runs a single worker; multiple tasks run concurrently. Set max_subagents_allowed on every task.",
     }),
   },
   { additionalProperties: false },
@@ -67,7 +68,11 @@ export const ResumeSubagentsParams = Type.Object(
   { additionalProperties: false },
 );
 
-export function createIntelligenceSchemas(presets: IntelligencePreset[] = [], settings?: SubagentSettings) {
+export function createIntelligenceSchemas(
+  presets: IntelligencePreset[] = [],
+  settings?: SubagentSettings,
+  hasAgentTypes = true,
+) {
   // Literal alternatives enforce validation; enum and descriptions advertise the caller's choices.
   // The tuple is non-empty whenever these dynamic schemas are exposed.
   const intelligence = {
@@ -86,18 +91,29 @@ export function createIntelligenceSchemas(presets: IntelligencePreset[] = [], se
       },
     ),
   };
-  const task = Type.Object({ ...TaskItem.properties, ...intelligence }, { additionalProperties: false });
+  const { agent, ...baseFields } = TaskItem.properties;
+  // Share an execution type while independently exposing each choice in the schema.
+  const executionTask = Type.Object({
+    ...baseFields,
+    agent: Type.Optional(agent),
+    ...intelligence,
+  });
+  const task = Type.Object(
+    {
+      ...baseFields,
+      ...(hasAgentTypes ? { agent } : {}),
+      ...(presets.length >= 2 && intelligenceEnabled(presets, settings) ? intelligence : {}),
+    },
+    { additionalProperties: false },
+  ) as unknown as typeof executionTask;
   const subagents = Type.Object(
     { tasks: Type.Array(task, { minItems: 1, description: SubagentParams.properties.tasks.description }) },
     { additionalProperties: false },
   );
   const resumes = ResumeSubagentsParams;
-  return presets.length >= 2 && intelligenceEnabled(presets, settings)
-    ? { subagents, resumes }
-    : {
-        subagents: SubagentParams as unknown as typeof subagents,
-        resumes: ResumeSubagentsParams as unknown as typeof resumes,
-      };
+  return hasAgentTypes && !(presets.length >= 2 && intelligenceEnabled(presets, settings))
+    ? { subagents: SubagentParams as unknown as typeof subagents, resumes }
+    : { subagents, resumes };
 }
 
 export function normalizeResumes(raw: unknown): Array<{ name: string; task: string; max_subagents_allowed?: number }> {
@@ -152,17 +168,47 @@ export function normalizeRecoveryIntelligence(
   });
 }
 
+// Direct execution can retain prepared object identity. Pi also clones validated
+// arguments, so synthetic calls bind their plan separately by tool-call id.
+const preparedRecoveryPlans = new WeakMap<object, ResumableSubagentCall>();
+
+export function getPreparedRecoveryPlan(args: object): ResumableSubagentCall | undefined {
+  return preparedRecoveryPlans.get(args);
+}
+
+function matchingRecoveryPlanIndexes(
+  tasks: ResumableTask[],
+  plans: ResumableSubagentCall[],
+  presets: IntelligencePreset[] = [],
+  settings?: SubagentSettings,
+  hasAgentTypes = true,
+): number[] {
+  const exact = plans.flatMap((plan, index) => (sameTasks(plan.tasks, tasks) ? [index] : []));
+  const normalize = (items: ResumableTask[]) =>
+    normalizeRecoveryIntelligence(items, presets, settings).map((task) =>
+      hasAgentTypes ? task : { ...task, agent: DEFAULT_AGENT.name },
+    );
+  const requested = tasks.map((task) => (hasAgentTypes ? task : { ...task, agent: DEFAULT_AGENT.name }));
+  if (exact.length > 0) return exact;
+  return plans.flatMap((plan, index) =>
+    sameTasks(normalize(plan.tasks), requested) &&
+    tasks.every((task, index) => task.agent === DEFAULT_AGENT.name || task.agent === plan.tasks[index].agent)
+      ? [index]
+      : [],
+  );
+}
+
 /** Keep the saved plan intact so recovery reuses its call id, budgets, names, and sessions. */
 export function findRecoveryPlanIndex(
   tasks: ResumableTask[],
   plans: ResumableSubagentCall[],
   presets: IntelligencePreset[] = [],
   settings?: SubagentSettings,
+  hasAgentTypes = true,
 ): number {
-  const exact = plans.findIndex((plan) => sameTasks(plan.tasks, tasks));
-  return exact >= 0
-    ? exact
-    : plans.findIndex((plan) => sameTasks(normalizeRecoveryIntelligence(plan.tasks, presets, settings), tasks));
+  const matches = matchingRecoveryPlanIndexes(tasks, plans, presets, settings, hasAgentTypes);
+  if (matches.length > 1) throw new Error("Ambiguous subagent recovery: a saved tool-call identity is required.");
+  return matches[0] ?? -1;
 }
 
 /** Legacy task arguments and hidden intelligence are accepted only for a matching crash-recovery plan. */
@@ -171,9 +217,12 @@ export function prepareRecoveryArguments(
   plans: ResumableSubagentCall[],
   presets: IntelligencePreset[] = [],
   settings?: SubagentSettings,
+  hasAgentTypes = true,
 ): unknown {
   if (!isRecord(args) || !Array.isArray(args.tasks)) return args;
-  const tasks: unknown[] = args.tasks;
+  const tasks: unknown[] = args.tasks.map((task) =>
+    !hasAgentTypes && isRecord(task) && task.agent === undefined ? { ...task, agent: DEFAULT_AGENT.name } : task,
+  );
   const isTask = (task: unknown): task is ResumableTask =>
     isRecord(task) &&
     typeof task.agent === "string" &&
@@ -181,14 +230,23 @@ export function prepareRecoveryArguments(
     ["max_agents_allowed", "max_agents_in_branch", "max_subagents_allowed"].every(
       (key) => task[key] === undefined || typeof task[key] === "number",
     );
-  if (!tasks.every(isTask) || findRecoveryPlanIndex(tasks, plans, presets, settings) < 0) return args;
-  return {
+  if (!tasks.every(isTask)) return args;
+  const matches = matchingRecoveryPlanIndexes(tasks, plans, presets, settings, hasAgentTypes);
+  if (matches.length === 0) return args;
+  const prepared = {
     ...args,
     tasks: normalizeRecoveryIntelligence(tasks, presets, settings).map((task) => {
-      const { max_agents_allowed: _inclusive, max_agents_in_branch: _previous, ...rest } = task;
-      return { ...rest, max_subagents_allowed: (getTaskBranchSize(task) ?? 1) - 1 };
+      const { agent, max_agents_allowed: _inclusive, max_agents_in_branch: _previous, ...rest } = task;
+      return {
+        ...rest,
+        ...(hasAgentTypes ? { agent } : {}),
+        max_subagents_allowed: (getTaskBranchSize(task) ?? 1) - 1,
+      };
     }),
   };
+  // Colliding public payloads need the synthetic provider's tool-call binding.
+  if (matches.length === 1) preparedRecoveryPlans.set(prepared, plans[matches[0]]);
+  return prepared;
 }
 
 /** SDK argument preparation must return a schema-validated value. */

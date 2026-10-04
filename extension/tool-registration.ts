@@ -1,4 +1,6 @@
 import { loadPiSubagentsConfig, type PiSubagentsConfig } from "../config.js";
+import { discoverAgents } from "../agents.js";
+import { filterAgentsForPrompt } from "./policy.js";
 import { configuredEnv, SETTING_DEFINITIONS } from "../settings.js";
 import { registerSubagentsTool } from "./launch-tool.js";
 import { sameToolPrompts } from "./prompts.js";
@@ -12,9 +14,17 @@ export function registerToolsWithConfig(
   force = false,
   config: PiSubagentsConfig = loadPiSubagentsConfig(cwd, includeProject),
 ): void {
+  state.discoveredAgents = filterAgentsForPrompt(
+    discoverAgents(cwd ?? process.cwd(), "both").agents,
+    state.currentDepth,
+    state.maxDepth,
+    state.ancestorAgentStack,
+    state.preventCycles,
+  );
   const configKey = JSON.stringify([
     SETTING_DEFINITIONS.map(([, , env]) => configuredEnv(env, config.settings)),
     state.canDelegate,
+    state.discoveredAgents,
   ]);
   const settingsChanged = state.registeredConfigKey !== configKey;
   state.registeredConfigKey = configKey;

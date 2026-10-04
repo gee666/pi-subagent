@@ -1,6 +1,7 @@
 import { loadSubagentSettings } from "../settings.js";
 import type { AgentConfig } from "../agents.js";
 import { selectIntelligence } from "../intelligence.js";
+import { formatSubagentLabel } from "../ui/agent-label.js";
 import { type SingleResult, type SubagentDetails, emptyUsage, isResultSuccess, getFinalOutput } from "../types.js";
 import type { SubagentBudget } from "../budget.js";
 import {
@@ -202,9 +203,10 @@ export async function executeParallelSubprocess(
     const output = succeeded
       ? getFinalOutput(r.messages, r.finalOutput)
       : r.errorMessage || r.stderr || getFinalOutput(r.messages, r.finalOutput);
-    const identity = r.name ? `${r.name} (${r.agent})` : r.agent;
+    const label = formatSubagentLabel(r);
+    const identity = r.name || r.agent || r.intelligence ? `[${label}]` : label;
     const status = succeeded ? "completed" : r.exitCode === -1 ? "unfinished" : "failed";
-    return `[${identity}] ${status}: ${output || "(no output)"}`;
+    return `${identity} ${status}: ${output || "(no output)"}`;
   });
 
   return {

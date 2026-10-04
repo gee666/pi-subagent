@@ -28,7 +28,7 @@ test("every user setting maps to its env counterpart with typed JSON and env pri
               : "some value";
   }
   const settings = readSettings(config, "test");
-  assert.equal(Object.keys(settings).length, 19);
+  assert.equal(Object.keys(settings).length, SETTING_DEFINITIONS.length);
   for (const [, , env, type] of SETTING_DEFINITIONS) {
     const encoded =
       type === "boolean"
@@ -155,7 +155,6 @@ test("settings are read at use time, not import time, and do not mutate env or c
   try {
     const value = {
       runner: { startupTimeoutMs: 0, startupRetries: 4, command: "test-command", argsPrefix: ["a b", "--"] },
-      agents: { hideBuiltins: true },
     };
     f.write(f.agent, value, "pi-subagents.json");
     const source = fs.readFileSync(path.join(f.agent, "pi-subagents.json"), "utf8");
@@ -165,11 +164,6 @@ test("settings are read at use time, not import time, and do not mutate env or c
     assert.equal(
       discoverAgents(f.project, "both").agents.some((a) => a.source === "builtin"),
       false,
-    );
-    process.env.PI_SUBAGENT_HIDE_BUILTIN_AGENTS = "false";
-    assert.equal(
-      discoverAgents(f.project, "both").agents.some((a) => a.source === "builtin"),
-      true,
     );
     assert.equal(process.env.PI_SUBAGENT_PI_COMMAND, undefined);
     assert.equal(fs.readFileSync(path.join(f.agent, "pi-subagents.json"), "utf8"), source);

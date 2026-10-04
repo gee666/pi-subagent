@@ -60,7 +60,7 @@ test("runner command and argsPrefix are personal-only even when config-only SDK 
         "subagents",
         "personal-command",
         {
-          tasks: [{ agent: "code-writer", task: "work", max_subagents_allowed: 0 }],
+          tasks: [{ task: "work", max_subagents_allowed: 0 }],
         },
         ctx,
       );
