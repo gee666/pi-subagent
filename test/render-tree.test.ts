@@ -246,7 +246,7 @@ describe("renderTreeLines live activity", () => {
       lines = renderTreeLines(buildTopLevelNodes(details), theme, false).join("\n");
     });
     assert.equal(
-      lines.split("\n").filter((line) => line.includes("❌ unknown agent")).length,
+      lines.split("\n").filter((line) => line.includes("✗ unknown agent")).length,
       2,
       `expected malformed entries to render as errors:\n${lines}`,
     );

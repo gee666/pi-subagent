@@ -1,6 +1,17 @@
-import { Container, Spacer, Text, truncateToWidth, type Component } from "@earendil-works/pi-tui";
+import {
+  Container,
+  Spacer,
+  Text,
+  sliceByColumn,
+  truncateToWidth,
+  visibleWidth,
+  type Component,
+} from "@earendil-works/pi-tui";
 
-const fitLine = (text: string, width: number) => truncateToWidth(text, width, "");
+// Truncation emits SGR 0, which clears the enclosing toolbox's background.
+// Reset text styling only; the parent owns the background and its right padding.
+const fitLine = (text: string, width: number) =>
+  truncateToWidth(text, width, "").replace(/\u001b\[0m/g, "\u001b[22;23;24;25;27;28;29;39m");
 
 import { MAX_LIVE_LOG_ENTRIES, isSubagentDetails, type SubagentDetails } from "./types.js";
 import { formatSubagentLabel } from "./ui/agent-label.js";
@@ -127,9 +138,10 @@ function compactText(text: string, maxLength = 240): string {
 function takePromptLine(text: string, width: number): { line: string; rest: string } {
   const normalized = text.replace(/\s+/g, " ").trim();
   if (!normalized || width <= 0) return { line: "", rest: normalized };
-  if (normalized.length <= width) return { line: normalized, rest: "" };
-  let split = normalized.lastIndexOf(" ", width);
-  if (split < Math.max(1, Math.floor(width / 2))) split = width;
+  if (visibleWidth(normalized) <= width) return { line: normalized, rest: "" };
+  const prefix = sliceByColumn(normalized, 0, width, true);
+  let split = prefix.lastIndexOf(" ");
+  if (split < 1 || visibleWidth(prefix.slice(0, split)) < Math.floor(width / 2)) split = prefix.length;
   return { line: normalized.slice(0, split), rest: normalized.slice(split).trimStart() };
 }
 
@@ -144,16 +156,18 @@ class CollapsedSubagentComponent implements Component {
     const nodes = buildTopLevelNodes(this.details, { hydrateSessions: false });
     const lines: string[] = [];
     for (const node of nodes) {
-      const rawPrefix = `  ${node.status === "running" ? "⏳" : node.status === "error" ? "❌" : "✅"} ${node.label} `;
-      const firstWidth = Math.max(8, width - rawPrefix.length);
+      const prefix = `  ${statusEmoji(node.status, this.theme)} ${this.theme.fg("accent", node.label)} `;
+      const prefixWidth = visibleWidth(prefix);
+      const firstWidth = Math.max(0, width - prefixWidth);
       const first = takePromptLine(node.task ?? "", firstWidth);
-      const continuationIndent = " ".repeat(Math.min(rawPrefix.length, Math.max(2, width - 8)));
-      const second = takePromptLine(first.rest, Math.max(8, width - continuationIndent.length));
-      const firstLine = `  ${statusEmoji(node.status, this.theme)} ${this.theme.fg("accent", node.label)}${first.line ? ` ${this.theme.fg("dim", first.line)}` : ""}`;
+      const continuationIndent = " ".repeat(Math.min(prefixWidth, Math.max(0, width - 8)));
+      const secondWidth = Math.max(0, width - continuationIndent.length);
+      const second = takePromptLine(first.rest, secondWidth);
+      const firstLine = `${prefix}${this.theme.fg("dim", first.line)}`;
       lines.push(fitLine(firstLine, width));
       if (first.rest) {
         const hasMore = second.rest.length > 0;
-        const secondText = `${second.line}${hasMore ? "..." : ""}`;
+        const secondText = hasMore ? truncateToWidth(first.rest, secondWidth) : second.line;
         lines.push(fitLine(`${continuationIndent}${this.theme.fg("dim", secondText)}`, width));
       }
       const actionAt = node.lastActionAt ?? node.startedAt;
@@ -203,12 +217,7 @@ export function renderResult(
     const nodes = expandedNodes(details);
     const counts = countNodes(nodes);
     const showOutputPreview = verbose && !hasNestedChildren(nodes);
-    const icon =
-      counts.running > 0
-        ? theme.fg("warning", "⏳")
-        : counts.error > 0
-          ? theme.fg("error", "❌")
-          : theme.fg("success", "✅");
+    const icon = statusEmoji(counts.running > 0 ? "running" : counts.error > 0 ? "error" : "success", theme);
 
     const container = new Container();
     container.addChild(
@@ -235,12 +244,7 @@ export function renderResult(
         agent: typeof item?.agent === "string" ? item.agent : "unknown agent",
         intelligence: item?.intelligence,
       });
-      const icon =
-        item?.exitCode === -1
-          ? theme.fg("warning", "⏳")
-          : item?.exitCode === 0
-            ? theme.fg("success", "✅")
-            : theme.fg("error", "❌");
+      const icon = statusEmoji(item?.exitCode === -1 ? "running" : item?.exitCode === 0 ? "success" : "error", theme);
       lines.push(`${icon} ${theme.fg("accent", label)}`);
       const liveLog = Array.isArray(item?.liveLog) ? item.liveLog.slice(-MAX_LIVE_LOG_ENTRIES) : [];
       for (const entry of liveLog) {

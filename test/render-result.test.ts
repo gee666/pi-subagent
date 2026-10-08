@@ -93,8 +93,8 @@ describe("renderResult collapsed/expanded views", () => {
     const mixedCollapsed = renderResult({ ...result, details: mixedDetails }, false, theme)
       .render(120)
       .join("\n");
-    assert.match(mixedCollapsed, /✅ John \(code-writer\)/);
-    assert.match(mixedCollapsed, /⏳ Maria \(code-reviwer\)/);
+    assert.match(mixedCollapsed, /✓ John \(code-writer\)/);
+    assert.match(mixedCollapsed, /… Maria \(code-reviwer\)/);
 
     const nestedWriter = {
       ...result.details.results[0],

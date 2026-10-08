@@ -62,14 +62,15 @@ export function truncate(text: unknown, maxLen: number): string {
   return safeText.length > maxLen ? `${safeText.slice(0, maxLen)}...` : safeText;
 }
 
+// Avoid emoji: some terminal fonts display them in one cell while Pi measures two.
 export function statusEmoji(status: NodeStatus, theme: { fg: ThemeFg }): string {
   switch (status) {
     case "running":
-      return theme.fg("warning", "⏳");
+      return theme.fg("warning", "…");
     case "error":
-      return theme.fg("error", "❌");
+      return theme.fg("error", "✗");
     default:
-      return theme.fg("success", "✅");
+      return theme.fg("success", "✓");
   }
 }
 

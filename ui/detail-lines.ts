@@ -1,7 +1,8 @@
+import { visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { RESUME_SUBAGENTS_TOOL_NAME } from "../types.js";
 import { displayIntelligence } from "../intelligence.js";
 import { formatSubagentLabel } from "./agent-label.js";
-import { type ThemeFg, formatClockTime, formatTokens, truncate } from "./tree-format.js";
+import { type ThemeFg, formatClockTime, formatTokens, statusEmoji, truncate } from "./tree-format.js";
 import type { DetailBlock, DetailChildRef, DetailUsage, SubagentDetail } from "./detail-model.js";
 import {
   getTurnTools,
@@ -18,28 +19,12 @@ export interface DetailTheme {
 const PLAIN_THEME: DetailTheme = { fg: (_color, text) => text, bold: (text) => text };
 
 export function wrapPlain(text: string, width: number): string[] {
-  const usable = Math.max(8, width);
-  const out: string[] = [];
-  for (const rawLine of text.replace(/\r\n?/g, "\n").split("\n")) {
-    const line = rawLine.replace(/\t/g, "  ");
-    if (line.length <= usable) {
-      out.push(line);
-      continue;
-    }
-    let rest = line;
-    while (rest.length > usable) {
-      let cut = rest.lastIndexOf(" ", usable);
-      if (cut < Math.floor(usable / 2)) cut = usable;
-      out.push(rest.slice(0, cut).trimEnd());
-      rest = rest.slice(cut).trimStart();
-    }
-    if (rest) out.push(rest);
-  }
-  return out.length > 0 ? out : [""];
+  if (width <= 0) return [""];
+  return wrapTextWithAnsi(text.replace(/\r\n?/g, "\n").replace(/\t/g, "  "), width);
 }
 
 function statusIcon(status: DetailChildRef["status"]): string {
-  return status === "running" ? "⏳" : status === "error" ? "❌" : "✅";
+  return statusEmoji(status, PLAIN_THEME);
 }
 
 function usageLine(usage: DetailUsage): string {
@@ -137,7 +122,7 @@ export function renderTurnOverviewLines(
       const branch = index === children.length - 1 ? "└─" : "├─";
       const label = formatSubagentLabel(child);
       const task = child.task
-        ? ` — ${truncate(child.task.replace(/\s+/g, " "), Math.max(24, width - label.length - 13))}`
+        ? ` — ${truncate(child.task.replace(/\s+/g, " "), Math.max(24, width - visibleWidth(label) - 13))}`
         : "";
       out.push(`  ${branch} ${statusIcon(child.status)} ${theme.fg("accent", label)}${theme.fg("dim", task)}`);
     });
@@ -200,7 +185,7 @@ export function renderChildTreeLines(
     const branch = index === children.length - 1 ? "└─" : "├─";
     const label = formatSubagentLabel(child);
     const task = child.task
-      ? ` — ${truncate(child.task.replace(/\s+/g, " "), Math.max(16, width - label.length - 12))}`
+      ? ` — ${truncate(child.task.replace(/\s+/g, " "), Math.max(16, width - visibleWidth(label) - 12))}`
       : "";
     out.push(`${marker} ${branch} ${statusIcon(child.status)} ${theme.fg("accent", label)}${theme.fg("dim", task)}`);
   });
