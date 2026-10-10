@@ -7,6 +7,7 @@ import {
   isSubagentToolName,
 } from "../types.js";
 import { isRecord } from "../types/records.js";
+import { appendUniqueMessage } from "./message-index.js";
 
 const SEMANTIC_EVENT_TYPES = new Set([
   "message_end",
@@ -39,26 +40,6 @@ function pushLiveLog(result: SingleResult, entry: LiveLogEntry): void {
   if (result.liveLog.length > MAX_LIVE_LOG_ENTRIES) result.liveLog.shift();
 }
 
-function messageDedupKey(value: unknown): string {
-  const message = isRecord(value) ? value : {};
-  if (typeof message.id === "string") return `id:${message.id}`;
-  return JSON.stringify({
-    role: message.role,
-    provider: message.provider,
-    model: message.model,
-    stopReason: message.stopReason,
-    toolCallId: message.toolCallId,
-    toolName: message.toolName,
-    content: message.content,
-    usage: message.usage,
-  });
-}
-
-function hasMessage(result: SingleResult, message: TranscriptMessage): boolean {
-  const key = messageDedupKey(message);
-  return result.messages.some((existing) => messageDedupKey(existing) === key);
-}
-
 function clearNestedProgress(result: SingleResult, message: TranscriptMessage): void {
   if (isSubagentToolName(message.toolName) && typeof message.toolCallId === "string") {
     delete result.liveNestedSubagents?.[message.toolCallId];
@@ -85,9 +66,8 @@ export function processRpcEvent(event: Record<string, unknown>, result: SingleRe
     // Current RPC emits tool results as message_end; retain tool_result_end below
     // only for older child streams. Both must retire transient nested snapshots.
     if (msg.role === "toolResult") clearNestedProgress(result, msg);
-    if (hasMessage(result, msg)) return true;
     // Preserve legacy and extension message shapes, not just current SDK roles.
-    result.messages.push(msg);
+    if (!appendUniqueMessage(result.messages, msg)) return true;
 
     if (msg.role === "assistant") {
       result.usage.turns++;
@@ -112,7 +92,7 @@ export function processRpcEvent(event: Record<string, unknown>, result: SingleRe
 
   if (event.type === "tool_result_end" && isTranscriptMessage(event.message)) {
     const msg = event.message;
-    if (!hasMessage(result, msg)) result.messages.push(msg);
+    appendUniqueMessage(result.messages, msg);
     clearNestedProgress(result, msg);
     return true;
   }

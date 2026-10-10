@@ -204,7 +204,7 @@ test("a sole preset is automatic for launch and recovery while disabled presets 
   }
 });
 
-test("parallel initial and queued updates label pending launches and named resumes without relabeling reused results", async () => {
+test("parallel initial and coalesced updates label pending launches and named resumes without relabeling reused results", async () => {
   const variables = {
     PI_SUBAGENT_PI_COMMAND: process.execPath,
     PI_SUBAGENT_PI_ARGS_PREFIX: JSON.stringify(["-e", script, "--"]),
@@ -253,17 +253,27 @@ test("parallel initial and queued updates label pending launches and named resum
         { intelligencePresets: [...intelligencePresets], names: ["Reused", "Ada", "Grace"], rawPrompts: true },
       );
       assert.equal(result.isError, undefined);
-      assert.ok(updates.length > 2);
+      assert.ok(updates.length >= 2, "initial and flushed final updates must survive coalescing");
       for (const index of [1, 2]) {
         assert.equal(updates[0][index].intelligence, expected, "initial update includes pending selections");
       }
       assert.equal(updates[0][1].name, "Ada");
       assert.equal(updates[0][2].name, "Grace");
-      const queued = updates.find((results) => results[1].exitCode === -1 && results[2].messages.length === 0);
-      assert.ok(queued, "second worker dispatch emits an update while the third is still queued");
-      assert.equal(queued[2].intelligence, expected);
-      assert.equal(queued[2].name, "Grace");
-      for (const update of updates) assert.equal(update[0].intelligence, "historic");
+      // Fast workers may finish inside one limiter interval. Any pending snapshots
+      // that are emitted must still carry the selection, and the final one must be current.
+      for (const update of updates) {
+        assert.equal(update[0].intelligence, "historic");
+        for (const index of [1, 2]) {
+          if (update[index].messages.length === 0) {
+            assert.equal(update[index].intelligence, expected);
+            assert.equal(update[index].name, index === 1 ? "Ada" : "Grace");
+          }
+        }
+      }
+      assert.deepEqual(
+        updates.at(-1)!.map((item) => item.exitCode),
+        [0, 0, 0],
+      );
       assert.equal(result.details.results[0], completed, "completed recovery result is reused unchanged");
       assert.equal(interrupted.intelligence, "old", "pending labels must not mutate saved results");
     }

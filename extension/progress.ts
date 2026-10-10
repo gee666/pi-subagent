@@ -1,52 +1,11 @@
-import { type SingleResult, type SubagentDetails, isSubagentDetails, isSubagentToolName } from "../types.js";
+import { type SubagentDetails, isSubagentDetails } from "../types.js";
+import { slimDetailsForProgress } from "./progress-details.js";
+export { slimDetailsForProgress } from "./progress-details.js";
 import { updateLatestBroadcastTargets } from "./broadcast.js";
 import type { ProgressUpdate, SessionContext } from "./contracts.js";
 import { updateCombinedUsageStatus } from "./runtime.js";
 import type { ExtensionState } from "./state.js";
 import { collectLiveUsageSummary } from "./usage.js";
-
-export function slimDetailsForProgress(details: SubagentDetails): SubagentDetails {
-  const slimResult = (result: SingleResult): SingleResult => {
-    const slimMessages = result.messages
-      .map((message) => {
-        if (message?.role === "assistant" && Array.isArray(message.content)) {
-          const subagentCalls = message.content.filter(
-            (part) => part?.type === "toolCall" && isSubagentToolName(part?.name),
-          );
-          return subagentCalls.length > 0 ? { ...message, content: subagentCalls } : null;
-        }
-        if (message?.role === "toolResult" && isSubagentToolName(message.toolName)) {
-          return isSubagentDetails(message.details)
-            ? { ...message, details: slimDetailsForProgress(message.details) }
-            : message;
-        }
-        return null;
-      })
-      .filter(Boolean) as SingleResult["messages"];
-
-    const liveNestedSubagents = result.liveNestedSubagents
-      ? Object.fromEntries(
-          Object.entries(result.liveNestedSubagents).map(([nestedToolCallId, nested]) => [
-            nestedToolCallId,
-            slimDetailsForProgress(nested),
-          ]),
-        )
-      : undefined;
-
-    return {
-      ...result,
-      messages: slimMessages,
-      stderr: result.stderr ? result.stderr.slice(-1000) : "",
-      liveLog: [...(result.liveLog ?? [])],
-      liveNestedSubagents,
-    };
-  };
-
-  return {
-    ...details,
-    results: details.results.map(slimResult),
-  };
-}
 
 export function emitNestedProgressToParent(state: ExtensionState, toolCallId: string, details: SubagentDetails): void {
   if (state.currentDepth <= 0) return;

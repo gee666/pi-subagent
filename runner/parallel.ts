@@ -16,6 +16,7 @@ import type { DetailsFactory, OnUpdateCallback, RunningSubagentHandle, RunAgentO
 import { configuredNonNegativeInt } from "./constants.js";
 import { sessionDirExists } from "./files.js";
 import { runAgentSubprocess } from "./single.js";
+import { ProgressCoalescer } from "./progress-coalescer.js";
 export async function executeParallelSubprocess(
   tasks: Array<{ agent: string; task: string; intelligence?: string }>,
   agents: AgentConfig[],
@@ -111,6 +112,9 @@ export async function executeParallelSubprocess(
         liveLog: [],
       }),
       intelligence,
+      ...(extras?.resumeSettings
+        ? { model: extras.resumeSettings[index].model, thinking: extras.resumeSettings[index].thinking }
+        : {}),
     };
   });
 
@@ -129,21 +133,31 @@ export async function executeParallelSubprocess(
     });
   };
 
+  const progress = onUpdate ? new ProgressCoalescer(emitProgress) : undefined;
   let heartbeat: NodeJS.Timeout | undefined;
-  if (onUpdate) {
-    emitProgress();
-    heartbeat = setInterval(() => {
-      if (allResults.some((r) => r.exitCode === -1)) emitProgress();
-    }, PARALLEL_HEARTBEAT_MS);
-  }
+  const stopProgress = () => {
+    if (heartbeat) clearInterval(heartbeat);
+    heartbeat = undefined;
+    progress?.dispose();
+  };
 
   let results: SingleResult[];
   try {
+    if (progress) {
+      progress.request(); // Initial snapshot is immediate, including already-aborted calls.
+      if (signal?.aborted) stopProgress();
+      else {
+        heartbeat = setInterval(() => {
+          if (allResults.some((r) => r.exitCode === -1)) progress.request();
+        }, PARALLEL_HEARTBEAT_MS);
+        signal?.addEventListener("abort", stopProgress, { once: true });
+      }
+    }
     results = await mapConcurrent(tasks, maxConcurrency, async (t, index) => {
       const previousResult = resumeResults?.[index];
       if (previousResult && isResultSuccess(previousResult)) {
         allResults[index] = previousResult;
-        emitProgress();
+        progress?.request();
         return previousResult;
       }
       const savedSessionDir = previousResult?.sessionDir;
@@ -181,7 +195,7 @@ export async function executeParallelSubprocess(
           onUpdate: (partial) => {
             if (partial.details?.results[0]) {
               allResults[index] = partial.details.results[0];
-              emitProgress();
+              progress?.request();
             }
           },
           makeDetails,
@@ -190,11 +204,13 @@ export async function executeParallelSubprocess(
         onTaskDone?.(index, t);
       }
       allResults[index] = result;
-      emitProgress();
+      progress?.request();
       return result;
     });
+    progress?.flush(); // Publish final results before disposing the limiter.
   } finally {
-    if (heartbeat) clearInterval(heartbeat);
+    signal?.removeEventListener("abort", stopProgress);
+    stopProgress();
   }
 
   const successCount = results.filter(isResultSuccess).length;

@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { StringDecoder } from "node:string_decoder";
+import { JsonlFramer } from "./jsonl-framer.js";
 import { isResultError, type SingleResult } from "../types.js";
 import { SUBAGENT_SESSION_ROOT_ENV } from "../resume.js";
 import { SUBAGENT_NAMES_FILE_ENV } from "../names.js";
@@ -93,8 +93,6 @@ export async function runAttempt(
       }),
     });
 
-    let buffer = "";
-    const stdoutDecoder = new StringDecoder("utf8");
     let abortHandler: (() => void) | undefined;
     const promptRequestId = `pi-subagent-${process.pid}-${Date.now()}-${attempt}`;
     let steeringRequest = 0;
@@ -230,18 +228,9 @@ export async function runAttempt(
       }, startupTimeoutMs);
     }
 
-    proc.stdout.on("data", (chunk: Buffer) => {
-      buffer += stdoutDecoder.write(chunk);
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-      for (let line of lines) {
-        if (line.endsWith("\r")) line = line.slice(0, -1);
-        flushLine(line);
-      }
-    });
-    proc.stdout.on("end", () => {
-      buffer += stdoutDecoder.end();
-    });
+    const stdoutFramer = new JsonlFramer(flushLine);
+    proc.stdout.on("data", (chunk: Buffer) => stdoutFramer.write(chunk));
+    proc.stdout.on("end", () => stdoutFramer.end());
 
     let stderrBuffer = "";
     const flushStderrLine = (line: string) => {
@@ -288,15 +277,8 @@ export async function runAttempt(
       return code !== null && code !== 0 ? code : 1;
     };
 
-    const flushRemainingStdout = () => {
-      if (!buffer.trim()) return;
-      const line = buffer.endsWith("\r") ? buffer.slice(0, -1) : buffer;
-      buffer = "";
-      flushLine(line);
-    };
-
     proc.on("close", (code, exitSignal) => {
-      flushRemainingStdout();
+      stdoutFramer.end();
       flushRemainingStderr();
       if (!state.resolved) doResolve(classifyUnexpectedExit(code, exitSignal));
     });
