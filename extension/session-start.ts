@@ -1,3 +1,4 @@
+import { stopBackgroundJobs } from "./async-jobs.js";
 import { loadPiSubagentsConfig } from "../config.js";
 import { configuredEnv } from "../settings.js";
 import { subagentDisabled } from "../runner/extension-policy.js";
@@ -33,7 +34,10 @@ import type { ExtensionState } from "./state.js";
 
 export function registerSessionLifecycle(state: ExtensionState): void {
   state.pi.on("session_start", async (event, ctx) => {
+    state.sessionActive = false;
     state.lifecycleGeneration += 1;
+    state.pendingCompletionDeliveries.clear();
+    await stopBackgroundJobs(state);
     state.sessionActive = true;
     state.latestSessionCtx = ctx;
     // Record this invocation before its first user message, including on leaf workers.
@@ -107,7 +111,7 @@ export function registerSessionLifecycle(state: ExtensionState): void {
     const filtered = active.filter(
       (name) =>
         !isSubagentToolName(name) ||
-        (state.canDelegate && (name !== "resume_subagents" || !resumableSubagentsDisabled(state.settings))),
+        (state.canDelegate && (name !== "message_subagent" || !resumableSubagentsDisabled(state.settings))),
     );
     if (filtered.length !== active.length) state.pi.setActiveTools(filtered);
     if (
@@ -135,7 +139,7 @@ export function registerSessionLifecycle(state: ExtensionState): void {
         await state.pi.setModel(restorableModel);
       }
 
-      if (!state.canDelegate) return;
+      if (state.disabled) return;
 
       const discovery = discoverAgents(ctx.cwd, "both", state.settings);
       state.discoveredAgents = filterAgentsForPrompt(
@@ -206,7 +210,7 @@ export function registerSessionLifecycle(state: ExtensionState): void {
       }
 
       const resumeDisabled = parseBooleanEnv(configuredEnv(SUBAGENT_RESUME_DISABLE_ENV, state.settings)) === true;
-      if (resumeDisabled || (event.reason !== "resume" && event.reason !== "startup")) return;
+      if (!state.canDelegate || resumeDisabled || (event.reason !== "resume" && event.reason !== "startup")) return;
 
       await maybeOfferSubagentResume(state, ctx, { deferInteractivePrompt: true });
     } catch (err) {
@@ -215,9 +219,11 @@ export function registerSessionLifecycle(state: ExtensionState): void {
     }
   });
 
-  state.pi.on("session_shutdown", () => {
+  state.pi.on("session_shutdown", async () => {
     state.sessionActive = false;
     state.lifecycleGeneration += 1;
+    state.pendingCompletionDeliveries.clear();
+    await stopBackgroundJobs(state);
     for (const timer of state.scheduledTasks) clearTimeout(timer);
     state.scheduledTasks.clear();
     clearSyntheticResumeState(state);

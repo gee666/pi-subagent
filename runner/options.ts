@@ -9,7 +9,10 @@ export type DetailsFactory = ((results: SingleResult[]) => SubagentDetails) & {
 };
 
 export interface RunningSubagentHandle {
-  steer(message: string): void;
+  isSettling?(): boolean;
+  isIdle?(): boolean;
+  /** True acknowledges RPC acceptance, not just a stdin write. False means acceptance was not confirmed. */
+  steer(message: string): boolean | void | Promise<boolean>;
 }
 
 export type RunningSubagentStartedCallback = (handle: RunningSubagentHandle) => void;
@@ -45,6 +48,8 @@ export interface RunAgentOptions {
   signal?: AbortSignal;
   /** Streaming update callback. */
   onUpdate?: OnUpdateCallback;
+  /** Immediate-child notifications. Invoked in arrival order, never awaited by the runner. */
+  onLeadMessage?: (message: string) => void | Promise<void>;
   /** Factory to wrap results into durable SubagentDetails. Optional .live keeps transient TUI state. */
   makeDetails: DetailsFactory;
   /** Dedicated session directory for this subagent process. */
@@ -76,6 +81,8 @@ export interface RunAgentOptions {
   startupTimeoutMsOverride?: number;
   /** Test/debug override for post-startup semantic inactivity timeout. */
   idleTimeoutMsOverride?: number;
+  /** Test/debug override for the steering acknowledgment timeout. Defaults to 30 seconds. */
+  steeringTimeoutMsOverride?: number;
   /** Test/debug override for graceful-stop to SIGKILL escalation. */
   terminationTimeoutMsOverride?: number;
   /** Called once the child RPC process is ready to receive steering messages. */

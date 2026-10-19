@@ -1,6 +1,8 @@
 # Pi subagent
 
-Delegate tasks to agents running in separate Pi processes. Each worker has its own context and saved session. The parent receives its final text and usage statistics, not its reasoning or tool transcript.
+Delegate tasks to agents running in separate Pi processes. Each worker has its own context and saved session. The lead receives completion text and usage statistics, not the worker's reasoning or tool transcript.
+
+Launches return immediately. Completion and worker messages arrive as steering that wakes an idle lead.
 
 Requires Pi 0.87.1 or newer, using the `@earendil-works` SDK packages.
 
@@ -60,7 +62,7 @@ PI_SUBAGENT_DISABLED=1 pi
 
 `true` (case-insensitive) also disables it; `PI-SUBAGENT-DISABLED` is an equivalent alias. Other values leave it enabled. The setting applies to the current process and is inherited by children. It is separate from child-extension exclusions, which do not disable anything in the parent. Restart Pi or reload extensions after changing the process environment.
 
-## Launch and resume
+## Launch and message workers
 
 ```json
 {
@@ -71,17 +73,29 @@ PI_SUBAGENT_DISABLED=1 pi
 }
 ```
 
-Call `subagents` with one or more tasks. Tasks run in parallel, subject to the concurrency limit. Every task requires task text and a descendant allowance. The `agent` argument exists only when user-created agent definitions are available. The `intelligence` argument exists only when two or more enabled presets are configured. These choices are independent; with neither, task items contain only `task` and `max_subagents_allowed`. Use `0` for a worker that will not delegate, or `1` to let it launch one subagent. The caller reserves one slot for the worker plus its descendant allowance.
+Call `subagents` with one or more tasks. It returns `started` immediately, without waiting for worker completion. Tasks run in the background, subject to the concurrency limit. Each completion arrives separately as lead steering, including when the lead is idle. The lead can continue other work after launching workers.
 
-Workers with zero descendant allowance receive neither active delegation tools nor added delegation guidance. Raising `max_subagents_allowed` on resume restores the tools, subject to the depth limit. This uses Pi's documented `getActiveTools()` and `setActiveTools()` APIs during `session_start`. Workers that spent a positive allowance keep their tools so they can resume existing children.
+Every task requires task text and a descendant allowance. The `agent` argument exists only when user-created agent definitions are available. The `intelligence` argument exists only when two or more enabled presets are configured. These choices are independent; with neither, task items contain only `task` and `max_subagents_allowed`. Use `0` for a worker that will not delegate, or `1` to let it launch one subagent. The caller reserves one slot for the worker plus its descendant allowance.
 
-Workers receive durable human names. Call `resume_subagents` to continue one with its previous context:
+Workers with zero descendant allowance receive no delegation tools or added delegation guidance. They still have `message_lead_agent` to contact the lead. Raising `max_subagents_allowed` through `message_subagent` restores delegation tools, subject to the depth limit. Workers that spent a positive allowance keep their tools so they can message existing children.
+
+Workers receive durable human names. Call `message_subagent(name, message, max_subagents_allowed?)` to contact one:
 
 ```json
-{ "resumes": [{ "subagent": "John", "task": "Now update the tests." }] }
+{ "name": "John", "message": "Now update the tests." }
 ```
 
-`agent` selects a definition; `subagent` identifies an existing worker. Resumes do not consume new slots. See [sessions and budgets](docs/sessions.md) for budget overrides, forks, and crash recovery.
+A message steers a running worker or resumes an idle worker with its saved context. It does not wait for the worker to finish. `agent` selects a definition at launch; `name` identifies an existing worker. Messaging or resuming a named worker consumes no new worker slot. An optional budget increase can reserve additional descendant slots. See [sessions and budgets](docs/sessions.md) for cap overrides, forks, and crash recovery.
+
+A child calls `message_lead_agent(message)` to send nonblocking steering to its lead:
+
+```json
+{ "message": "The API change needs a migration. Should I include it?" }
+```
+
+Subagent notifications use Pi's theme-aware custom-message box, distinct from human user messages. Completion and idle reports use the same message styling.
+
+The child continues without waiting for a reply. The steering wakes an idle lead; the lead can reply with `message_subagent`. Worker completion uses the same lead-steering delivery path, so no polling or blocking wait tool is needed.
 
 Delegate only when parallel work or context isolation saves enough effort to cover worker startup and coordination. Pass existing findings with the task so workers do not repeat your research.
 
@@ -112,9 +126,11 @@ See [configuration](docs/configuration.md) for frontmatter, layer restrictions, 
 
 Collapsed results show each child's name, task, status, and most recent activity anywhere in its subtree. `Ctrl+O` expands the newest call from memory without reading historical transcripts.
 
-`/subagent-expand <name>` opens a saved worker transcript. With no name, it opens a searchable picker. Name completion is fuzzy. Each task or resume shows its actual provider/model and thinking level from the worker's session, not the parent's settings. Selected presets also appear as an intelligence label, kept separately for each run. Missing historical model/thinking metadata appears as `unknown`.
+A live single line above the editor shows `Running N: Name elapsed · Name elapsed`, with `+N` for names that do not fit and a separate idle count. It uses live handles and snapshots, not session metadata or disk reads on timer ticks.
 
-[Model presets](docs/configuration.md#caller-selected-intelligence) show labels such as `Nicolas (Junior/code-writer)` in regular tool results. One enabled preset applies automatically to new launches without exposing an `intelligence` argument. Two or more require an explicit `intelligence` choice on every launch item. Omitted or `null` choices reject the whole launch batch before any worker starts. Zero or disabled presets keep the existing launch defaults and show no intelligence label. Without an agent type, labels show `Nicolas (Junior)`; without either qualifier, they show just `Nicolas`. Named resumes do not accept `intelligence`; they retain the original effective model, thinking, and label, even after configuration or parent settings change.
+`/subagent-expand <name>` opens a saved worker transcript. With no name, it opens a searchable picker. Running workers come first in depth order, with top-level workers before nested workers. Live idle parents waiting for children come next; completed or stopped history comes last. Name completion is fuzzy. Each task or resumed turn shows its actual provider/model and thinking level from the worker's session, not the parent's settings. Selected presets also appear as an intelligence label, kept separately for each run. Missing historical model/thinking metadata appears as `unknown`.
+
+[Model presets](docs/configuration.md#caller-selected-intelligence) show labels such as `Nicolas (Junior/code-writer)` in regular tool results. One enabled preset applies automatically to new launches without exposing an `intelligence` argument. Two or more require an explicit `intelligence` choice on every launch item. Omitted or `null` choices reject the whole launch batch before any worker starts. Zero or disabled presets keep the existing launch defaults and show no intelligence label. Without an agent type, labels show `Nicolas (Junior)`; without either qualifier, they show just `Nicolas`. `message_subagent` does not accept `intelligence`; workers retain the original effective model, thinking, and label, even after configuration or parent settings change.
 
 | Key | Action |
 | --- | --- |
@@ -126,7 +142,9 @@ Collapsed results show each child's name, task, status, and most recent activity
 | /, n, N | Search, next match, previous match |
 | q | Close from any transcript view |
 
-While workers run, steering input can be broadcast to selected names, including nested paths such as `John > Maria`. Only inputs marked as streaming `steer` open the routing prompt. Idle prompts and queued follow-ups remain with the parent.
+`/message_subagent` is the human command for steering live workers. Choose `All (+nested)` for the whole live tree, `All` for top-level workers, `Youngest` for live workers with no running descendants, or `Names (e.g. John, Maria)` for comma-separated names or paths such as `John > Maria`. Then enter the message. There is no `No` choice; Esc cancels. The command does not resume completed workers. Automatic broadcast interception has been removed, so ordinary user input stays with the lead and never opens a routing prompt.
+
+A worker that has settled its own turn but still has descendants reports `Idle, waiting for children.` to the lead via steering, followed by its own last answer. Its process stays alive for child messages and completions. `Finished` means the whole subtree has settled, not just the worker's own turn.
 
 The `WITH SUBS` footer includes recursive worker usage. Resuming or privately forking a named worker adds usage without increasing the unique-worker count. See [usage accounting](docs/usage.md) for programmatic results.
 
@@ -149,7 +167,9 @@ Source organization:
 | `types/` | Runtime contracts, transcript parsing, outcomes, usage aggregation |
 | `ui/` | Transcript views, trees, navigation and overlays |
 
-Root entry points preserve existing imports. `config.ts` and `agents.ts` discover configuration and definitions. Runtime and test files stay below 350 lines; the name list is static data.
+Root entry points preserve existing imports. The main `index.ts` entry keeps its default extension registration export and the named exports `selectParentModelForSubagent`, `getSubagentsToolDescription`, `collectCombinedUsageStatusLine`, and `collectLiveUsageSummary`. `config.ts` and `agents.ts` discover configuration and definitions. Runtime and test files stay below 350 lines; the name list is static data.
+
+See [async performance and memory](docs/async-performance.md) for cache behavior, test evidence, and remaining limits.
 
 ## Attribution and license
 

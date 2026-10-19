@@ -2,7 +2,7 @@ import { configuredEnv, type SubagentSettings } from "../settings.js";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { type AgentConfig, filterAdvertisedAgents, isAgentEnabledAtLayer } from "../agents.js";
 import { parseBoolean, parseNonNegativeInt } from "../shared.js";
-import { RESUME_SUBAGENTS_TOOL_NAME, SUBAGENT_TOOL_NAME } from "../types.js";
+import { MESSAGE_SUBAGENT_TOOL_NAME, SUBAGENT_TOOL_NAME } from "../types.js";
 
 export const DEFAULT_MAX_DELEGATION_DEPTH = 3;
 
@@ -256,7 +256,7 @@ export function ensureSubagentToolActive(pi: ExtensionAPI, settings?: SubagentSe
   const activeTools = pi.getActiveTools();
   const wanted = resumableSubagentsDisabled(settings)
     ? [SUBAGENT_TOOL_NAME]
-    : [SUBAGENT_TOOL_NAME, RESUME_SUBAGENTS_TOOL_NAME];
+    : [SUBAGENT_TOOL_NAME, MESSAGE_SUBAGENT_TOOL_NAME];
   const missing = wanted.filter((tool) => !activeTools.includes(tool));
   if (missing.length > 0) {
     pi.setActiveTools([...activeTools, ...missing]);

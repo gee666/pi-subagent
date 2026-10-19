@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
+import { parseLeadMessageStderrLine } from "./lead-message.js";
 import { JsonlFramer } from "./jsonl-framer.js";
 import { isResultError, type SingleResult } from "../types.js";
 import { SUBAGENT_SESSION_ROOT_ENV } from "../resume.js";
@@ -22,7 +24,7 @@ import {
 import { getPiSpawnCommand, buildChildProcessEnv, stopProcessTree } from "./launch.js";
 import { appendBoundedStderr } from "./result.js";
 import { isProgressOnlyEvent } from "./events.js";
-import { createProtocolHandler } from "./protocol.js";
+import { createProtocolHandler, createSteeringHandle } from "./protocol.js";
 import type { AttemptState } from "./attempt-state.js";
 import type { RunAgentOptions } from "./options.js";
 
@@ -57,15 +59,13 @@ export async function runAttempt(
     startupTimedOut: false,
     wasAborted: false,
     activeToolCallIds: new Set(),
+    pendingSteeringRequests: new Map(),
   };
   const exitCode = await new Promise<number>((resolve) => {
     const nextDepth = Math.max(0, Math.floor(parentDepth)) + 1;
     const propagatedMaxDepth = Math.max(0, Math.floor(maxDepth));
     const propagatedStack = [...parentAgentStack, agentName];
-    // On Windows, `pi` is a .CMD shim that requires the shell to execute,
-    // but shell:true splits arguments on whitespace — breaking task strings.
-    // Fix: reuse the running node binary + the pi CLI script path directly,
-    // so the child is spawned without a shell and args are passed safely.
+    // Use node + CLI directly on Windows; shell:true corrupts spaced arguments.
     const piSpawn = getPiSpawnCommand(piCommandOverride, opts.settings);
     const spawnCmd = piSpawn.command;
     const spawnArgs = [...piSpawn.argsPrefix, ...piArgs];
@@ -95,7 +95,6 @@ export async function runAttempt(
 
     let abortHandler: (() => void) | undefined;
     const promptRequestId = `pi-subagent-${process.pid}-${Date.now()}-${attempt}`;
-    let steeringRequest = 0;
 
     const sendRpc = (command: Record<string, unknown>): boolean => {
       try {
@@ -109,23 +108,9 @@ export async function runAttempt(
       }
     };
 
-    opts.onHandle?.({
-      steer(message: string) {
-        // Use "prompt" with streamingBehavior "steer" instead of the raw
-        // "steer" RPC command. Pi's `session.steer()` bypasses the `input`
-        // extension hook entirely, so the child's pi-subagent extension would
-        // never see encoded nested-broadcast messages and could not forward
-        // them to its own (grand)children. `session.prompt()` emits the
-        // `input` event first and still queues the message as a steering
-        // message while the child is streaming.
-        sendRpc({
-          id: `${promptRequestId}-steer-${++steeringRequest}`,
-          type: "prompt",
-          message,
-          streamingBehavior: "steer",
-        });
-      },
-    });
+    const failPendingSteering = () => {
+      for (const complete of state.pendingSteeringRequests!.values()) complete(false);
+    };
 
     // Startup timeout: kill the process if it never produces its first
     // model-turn event. Once startup succeeds, the semantic-inactivity
@@ -137,6 +122,7 @@ export async function runAttempt(
     const doResolve = (code: number) => {
       if (state.resolved) return;
       state.resolved = true;
+      failPendingSteering();
       if (state.startupTimer) {
         clearTimeout(state.startupTimer);
         state.startupTimer = undefined;
@@ -150,12 +136,19 @@ export async function runAttempt(
         state.killTimer = undefined;
       }
       if (signal && abortHandler) signal.removeEventListener("abort", abortHandler);
+      // Rejection/spawn-error paths can settle before close. Stop draining and
+      // release stream buffers there too; normal close has already been flushed.
+      proc.stdin?.destroy();
+      proc.stdout?.destroy();
+      proc.stderr?.destroy();
       resolve(code);
     };
 
     const stopChild = (force: boolean) => stopProcessTree(proc, force);
 
     const forceStopAndSettle = (settleCode = state.forcedExitCode ?? 1) => {
+      state.stopping = true;
+      failPendingSteering();
       stopChild(false);
       if (state.killTimer) clearTimeout(state.killTimer);
       state.killTimer = setTimeout(() => {
@@ -180,7 +173,7 @@ export async function runAttempt(
         clearTimeout(state.idleTimer);
         state.idleTimer = undefined;
       }
-      if (!state.receivedFirstEvent || idleTimeoutMs === 0 || state.resolved) return;
+      if (!state.receivedFirstEvent || idleTimeoutMs === 0 || state.resolved || state.waitingForChildren) return;
       // The idle timeout measures the agent itself, not tools it has invoked.
       // A tool may legitimately be silent for longer than the configured
       // timeout, so leave the watchdog disarmed until every concurrent tool
@@ -204,6 +197,7 @@ export async function runAttempt(
       state,
       result,
       promptRequestId,
+      onLeadMessage: opts.onLeadMessage,
       emitUpdate,
       noteSemanticActivity,
       stopChild,
@@ -211,10 +205,8 @@ export async function runAttempt(
       forceStopAndSettle,
     });
 
-    // Start the startup timer — if the child process never reaches the
-    // LLM-call phase (hung during init, broken binary, slow MCP adapter, etc.),
-    // kill it. The idle watchdog replaces it after the first turn_start or
-    // completed assistant turn.
+    // The startup deadline covers initialization. The idle watchdog takes over
+    // after the first turn_start or completed assistant turn.
     if (startupTimeoutMs > 0) {
       state.startupTimer = setTimeout(() => {
         if (state.resolved || state.receivedFirstEvent) return;
@@ -232,9 +224,15 @@ export async function runAttempt(
     proc.stdout.on("data", (chunk: Buffer) => stdoutFramer.write(chunk));
     proc.stdout.on("end", () => stdoutFramer.end());
 
+    const stderrDecoder = new StringDecoder("utf8");
     let stderrBuffer = "";
     const flushStderrLine = (line: string) => {
-      if (!line) return;
+      if (!line || state.resolved) return;
+      const leadMessage = parseLeadMessageStderrLine(line);
+      if (leadMessage) {
+        flushLine(JSON.stringify(leadMessage));
+        return;
+      }
       if (isProgressOnlyEvent(line, result)) {
         emitUpdate();
         return;
@@ -243,7 +241,7 @@ export async function runAttempt(
     };
 
     proc.stderr.on("data", (chunk: Buffer) => {
-      stderrBuffer += chunk.toString();
+      stderrBuffer += stderrDecoder.write(chunk);
       const lines = stderrBuffer.split("\n");
       stderrBuffer = lines.pop() || "";
       for (const line of lines) flushStderrLine(line);
@@ -254,6 +252,7 @@ export async function runAttempt(
     });
 
     const flushRemainingStderr = () => {
+      stderrBuffer += stderrDecoder.end();
       if (!stderrBuffer) return;
       flushStderrLine(stderrBuffer);
       stderrBuffer = "";
@@ -261,11 +260,8 @@ export async function runAttempt(
 
     const classifyUnexpectedExit = (code: number | null, exitSignal: NodeJS.Signals | null): number => {
       if (state.forcedExitCode !== undefined) return state.forcedExitCode;
-      // Once Pi emitted agent_settled, the semantic run is complete and this
-      // runner deliberately terminates the still-listening RPC process. Some
-      // launchers translate that expected SIGTERM into exit code 143 rather
-      // than reporting a signal. Do not turn our own cleanup status into a
-      // failed subagent; only the settled model result determines success.
+      // Some launchers translate our expected SIGTERM into code 143. After
+      // agent_settled, only the model result determines success.
       if (state.agentSettled) return isResultError({ ...result, exitCode: 0 }) ? 1 : 0;
 
       const message = exitSignal
@@ -318,7 +314,31 @@ export async function runAttempt(
       else signal.addEventListener("abort", abortHandler, { once: true });
     }
 
-    if (!state.wasAborted && !state.resolved && !sendRpc({ id: promptRequestId, type: "prompt", message: prompt })) {
+    try {
+      opts.onHandle?.(
+        createSteeringHandle({
+          state,
+          result,
+          promptRequestId,
+          sendRpc,
+          noteSemanticActivity,
+          timeoutMs: opts.steeringTimeoutMsOverride,
+          settleDeferred: () => flushLine(JSON.stringify({ type: "agent_settled" })),
+        }),
+      );
+    } catch (error) {
+      state.forcedExitCode = 1;
+      result.stopReason = "error";
+      result.errorMessage = `Subagent handle callback failed: ${error instanceof Error ? error.message : String(error)}`;
+      forceStopAndSettle(1);
+    }
+
+    if (
+      !state.wasAborted &&
+      !state.resolved &&
+      !state.stopping &&
+      !sendRpc({ id: promptRequestId, type: "prompt", message: prompt })
+    ) {
       state.forcedExitCode = 1;
       result.stopReason = "error";
       result.errorMessage = "Failed to write the initial prompt to the subagent RPC process.";

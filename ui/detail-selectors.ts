@@ -1,6 +1,16 @@
 import type { DetailBlock, DetailEvent, DetailChildRef, SubagentDetail } from "./detail-model.js";
 export type TurnToolEvent = Extract<DetailEvent, { type: "tool" | "children" }>;
 
+// Keep per-message metadata in the parsed blocks, but inspect tools for the whole agent.
+export function getActivityBlock(detail: SubagentDetail): DetailBlock {
+  return {
+    kind: "task",
+    index: 0,
+    prompt: "",
+    events: detail.blocks.flatMap((block) => block.events),
+  };
+}
+
 export function getTurnTools(block: DetailBlock | undefined): TurnToolEvent[] {
   return (
     block?.events.filter((event): event is TurnToolEvent => event.type === "tool" || event.type === "children") ?? []
@@ -10,9 +20,9 @@ export function getTurnTools(block: DetailBlock | undefined): TurnToolEvent[] {
 export function getDetailChildren(detail: SubagentDetail): DetailChildRef[] {
   const children = new Map<string, DetailChildRef>();
   for (const block of detail.blocks) {
-    for (const event of getTurnTools(block)) {
-      if (event.type !== "children") continue;
-      for (const child of event.children) {
+    for (const event of block.events) {
+      if (event.type !== "children" && event.type !== "message") continue;
+      for (const child of event.children ?? []) {
         const key = child.name
           ? `name:${child.name.toLowerCase()}`
           : `agent:${child.agent.toLowerCase()}:${child.task}`;

@@ -115,16 +115,16 @@ test("expand view backs through nested children to the filtered list, while q cl
   view.handleInput("Olg");
   assert.match(screen(), /Expand subagent \(1\/2\)/);
   view.handleInput("\r");
-  assert.match(screen(), /Olga \(writer\).*turn 1\/1/);
+  assert.match(screen(), /Olga \(writer\).*activity/);
   view.handleInput("C");
   view.handleInput("\r"); // Maria
   view.handleInput("C");
   view.handleInput("\r"); // Nina
-  assert.match(screen(), /Nina \(writer\).*turn 1\/1/);
+  assert.match(screen(), /Nina \(writer\).*activity/);
   view.handleInput("\u001b"); // Maria
-  assert.match(screen(), /Maria \(writer\).*turn 1\/1/);
+  assert.match(screen(), /Maria \(writer\).*activity/);
   view.handleInput("\u001b"); // Olga
-  assert.match(screen(), /Olga \(writer\).*turn 1\/1/);
+  assert.match(screen(), /Olga \(writer\).*activity/);
   view.handleInput("\u001b"); // filtered picker
   assert.match(screen(), /Expand subagent \(1\/2\)/);
   assert.match(screen(), /Search:.*Olg/);

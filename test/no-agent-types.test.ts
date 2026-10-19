@@ -111,7 +111,7 @@ test("untyped workers retain task-only prompts, budgets, names, models, and name
     assert.doesNotMatch(prompt.systemPrompt, /code-writer|code-architect|code-reviwer|agent TYPE|Do not call/);
     assert.doesNotMatch(host.tool("subagents").description, /\{ agent,/);
     const budget = findPersistedBudget(entries)!;
-    const first = await host.call(
+    const first = await host.callAndWait(
       "subagents",
       "single",
       { tasks: [{ task: "Only my task.", max_subagents_allowed: 0 }] },
@@ -127,17 +127,12 @@ test("untyped workers retain task-only prompts, budgets, names, models, and name
     assert.equal(readBudget({ directory: calls()[0].budget }).limit, 0);
     const name = first.details.results[0].name!;
     assert.ok(name);
-    const resumed = await host.call(
-      "resume_subagents",
-      "resume",
-      { resumes: [{ subagent: name, task: "Follow up." }] },
-      ctx,
-    );
+    const resumed = await host.callAndWait("message_subagent", "resume", { name, message: "Follow up." }, ctx);
     assert.equal(resumed.isError, false, JSON.stringify(resumed.content));
     assert.equal(calls().at(-1)!.prompt, "Follow up.");
     assert.ok(calls().at(-1)!.args.includes("--session"));
     assert.equal(readBudget(budget).remaining, 9, "resuming does not reserve another slot");
-    const parallel = await host.call(
+    const parallel = await host.callAndWait(
       "subagents",
       "parallel",
       {
@@ -154,7 +149,7 @@ test("untyped workers retain task-only prompts, budgets, names, models, and name
     const namesFile = findPersistedNamesIdentity(entries)!.namesFile;
     assert.equal(readNamesRegistry(namesFile).agents[name].agent, "");
 
-    const branch = await host.call(
+    const branch = await host.callAndWait(
       "subagents",
       "branch",
       { tasks: [{ task: "May launch one child.", max_subagents_allowed: 1 }] },
@@ -172,7 +167,7 @@ test("untyped workers retain task-only prompts, budgets, names, models, and name
     const childCtx = child.makeCtx([], { cwd: f.project, hasUI: false });
     try {
       await child.emit("session_start", {}, childCtx);
-      const leaf = await child.call(
+      const leaf = await child.callAndWait(
         "subagents",
         "leaf",
         { tasks: [{ task: "Nested neutral worker.", max_subagents_allowed: 0 }] },
@@ -203,8 +198,8 @@ test("untyped workers retain task-only prompts, budgets, names, models, and name
       });
       await host.emit("session_start", {}, ctx);
       const task = { task: "Selected model.", max_subagents_allowed: 0 };
-      if (choices.length > 1) await assert.rejects(host.call("subagents", "missing", { tasks: [task] }, ctx));
-      const selected = await host.call(
+      if (choices.length > 1) await assert.rejects(host.callAndWait("subagents", "missing", { tasks: [task] }, ctx));
+      const selected = await host.callAndWait(
         "subagents",
         `preset-${choices.length}`,
         { tasks: [{ ...task, ...(choices.length > 1 ? { intelligence: "cheap" } : {}) }] },
@@ -231,7 +226,7 @@ test("untyped workers retain task-only prompts, budgets, names, models, and name
     );
     await host.emit("session_start", {}, ctx);
     assert.equal(Object.hasOwn(itemFields(), "agent"), false);
-    const neutral = await host.call(
+    const neutral = await host.callAndWait(
       "subagents",
       "restricted-type",
       { tasks: [{ task: "No role instructions.", max_subagents_allowed: 0, intelligence: "cheap" }] },

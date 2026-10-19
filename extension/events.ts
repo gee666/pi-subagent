@@ -1,15 +1,17 @@
+import { refreshWorkerAllowance } from "./tool-registration.js";
+import { registerAsyncDeliveryEvents } from "./async-jobs.js";
 import { configuredEnv } from "../settings.js";
 import { SUBAGENT_RESUME_DISABLE_ENV, parseBooleanEnv } from "../resume.js";
 import { RESUME_PROVIDER } from "../shared.js";
 import { isSubagentToolName, subagentDetailsHaveErrors } from "../types.js";
-import { askBroadcastForSteering, decodeNestedBroadcast } from "./broadcast.js";
+import { decodeNestedBroadcast, forwardNestedBroadcast } from "./broadcast.js";
 import { RESUME_INTERACTIVE_DELAY_MS } from "./models.js";
-import { isStreamingSteerInput } from "./policy.js";
 import { maybeOfferSubagentResume } from "./resume-offer.js";
 import { restoreModelAfterResumeFailure, scheduleSessionTask, updateCombinedUsageStatus } from "./runtime.js";
 import type { ExtensionState } from "./state.js";
 
 export function registerSessionEvents(state: ExtensionState): void {
+  registerAsyncDeliveryEvents(state);
   state.pi.on("session_tree", async (event, ctx) => {
     state.latestSessionCtx = ctx;
     updateCombinedUsageStatus(state, ctx);
@@ -55,7 +57,7 @@ export function registerSessionEvents(state: ExtensionState): void {
   state.pi.on("tool_execution_end", (event, ctx) => {
     state.latestSessionCtx = ctx;
     if (isSubagentToolName(event.toolName)) {
-      state.activeSubagentUsageSummaries.delete(event.toolCallId);
+      if (!state.backgroundJobs.has(event.toolCallId)) state.activeSubagentUsageSummaries.delete(event.toolCallId);
       updateCombinedUsageStatus(state, ctx);
       scheduleSessionTask(state, () => updateCombinedUsageStatus(state, ctx), 0);
     }
@@ -80,25 +82,16 @@ export function registerSessionEvents(state: ExtensionState): void {
   });
 
   state.pi.on("input", async (event, ctx) => {
+    const isEnvelope = decodeNestedBroadcast(event.text) !== null;
     try {
-      // Encoded nested-broadcast envelopes must never leak into this agent's
-      // conversation as literal text. Intercept them unconditionally: if the
-      // target subagent is gone, the message is dropped (best effort).
-      if (decodeNestedBroadcast(event.text)) {
-        await askBroadcastForSteering(state, event.text, ctx);
-        return { action: "handled" as const };
-      }
-      // Pi emits this before it applies the built-in streaming behavior. When a
-      // subagent tool is running, only mid-stream steering messages should be
-      // candidates for child broadcast. Idle prompts and queued follow-ups must
-      // continue normally so they reach the parent conversation as intended.
-      if (state.activeSubagents.size === 0) return { action: "continue" as const };
-      if (!isStreamingSteerInput(event, ctx)) return { action: "continue" as const };
-      const result = await askBroadcastForSteering(state, event.text, ctx);
-      return result === "handled" ? { action: "handled" as const } : { action: "continue" as const };
+      refreshWorkerAllowance(state, ctx);
+      // Only explicit nested routing is intercepted. Human input and messages
+      // from children always reach the lead without prompting or broadcasting.
+      if (isEnvelope) await forwardNestedBroadcast(state, event.text, ctx);
     } catch (err) {
-      console.error("[pi-subagent] Error while handling steering broadcast:", err);
-      return { action: "continue" as const };
+      console.error("[pi-subagent] Error while forwarding subagent message:", err);
     }
+    // Even failed or stale routing must not leak its envelope into the model.
+    return isEnvelope ? { action: "handled" as const } : { action: "continue" as const };
   });
 }

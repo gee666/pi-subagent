@@ -36,7 +36,7 @@ test("leaf workers persist per-run preset metadata, including explicit omission 
         (entry) => entry.type === "custom" && entry.customType === SUBAGENT_INTELLIGENCE_CUSTOM_TYPE,
       );
       assert.deepEqual(recorded.at(-1)?.data, { intelligence });
-      assert.deepEqual(host.getActiveTools(), ["read", "bash"]);
+      assert.deepEqual(host.getActiveTools(), ["read", "bash", "message_lead_agent"]);
     }
     const persisted: Array<{ customType?: string; data?: { intelligence?: string | null } }> = JSON.parse(
       JSON.stringify(entries),

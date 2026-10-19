@@ -27,7 +27,7 @@ test("zero-allowance workers hide tools and guidance, then regain them on resume
     const entries = [customEntry(SUBAGENT_BUDGET_CUSTOM_TYPE, budget)];
     const ctx = host.makeCtx(entries, { cwd: dir, hasUI: false });
     await host.emit("session_start", { reason: "startup" }, ctx);
-    assert.deepEqual(host.getActiveTools(), ["read", "bash"]);
+    assert.deepEqual(host.getActiveTools(), ["read", "bash", "message_lead_agent"]);
     const prompts = await host.emit("before_agent_start", { systemPrompt: "base" }, ctx);
     assert.ok(prompts.every((result) => result === undefined));
 
@@ -37,7 +37,7 @@ test("zero-allowance workers hide tools and guidance, then regain them on resume
     const resumedCtx = resumed.makeCtx(entries, { cwd: dir, hasUI: false });
     await resumed.emit("session_start", { reason: "startup" }, resumedCtx);
     assert.ok(resumed.getActiveTools().includes("subagents"));
-    assert.ok(resumed.getActiveTools().includes("resume_subagents"));
+    assert.ok(resumed.getActiveTools().includes("message_subagent"));
     const guidance = (await resumed.emit("before_agent_start", {}, resumedCtx)).at(-1);
     assert.ok(isRecord(guidance) && typeof guidance.systemPrompt === "string");
     assert.match(guidance.systemPrompt, /Available Subagents/);
@@ -45,12 +45,12 @@ test("zero-allowance workers hide tools and guidance, then regain them on resume
     // The documented activation API also works in the same runtime.
     await host.emit("session_start", { reason: "resume" }, ctx);
     assert.ok(host.getActiveTools().includes("subagents"));
-    assert.ok(host.getActiveTools().includes("resume_subagents"));
+    assert.ok(host.getActiveTools().includes("message_subagent"));
 
     // Spending a positive allowance must not remove access to existing children.
     reserveSubagentBudgets(budget, "child", [task]);
     await host.emit("session_start", { reason: "reload" }, ctx);
-    assert.ok(host.getActiveTools().includes("resume_subagents"));
+    assert.ok(host.getActiveTools().includes("message_subagent"));
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key];

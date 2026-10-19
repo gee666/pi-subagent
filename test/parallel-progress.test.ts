@@ -63,6 +63,8 @@ const childCode = `
     buffer = lines.pop() || "";
     for (const line of lines) {
       const command = JSON.parse(line);
+      if (command.type !== "prompt") continue;
+      console.log(JSON.stringify({type: "response", command: "prompt", id: command.id, success: true}));
       if (command.message === "finish") {
         console.log(JSON.stringify({type: "message_end", message: {role: "assistant", content: [{type: "text", text: "done"}], stopReason: "stop"}}));
         console.log(JSON.stringify({type: "agent_settled"}));
@@ -136,7 +138,7 @@ test(
         { at: 1000, counts: [100, 100], codes: [-1, -1] },
         "heartbeat still emits when quiet",
       );
-      for (const handle of handles) handle.steer("finish");
+      assert.deepEqual(await Promise.all(handles.map((handle) => handle.steer("finish"))), [true, true]);
       const result = await operation;
       assert.equal(result.isError, undefined);
       assert.deepEqual(
@@ -281,11 +283,11 @@ test("late sibling updates after a map rejection cannot recreate queued progress
   const rejected = assert.rejects(operation, /task cleanup failed/);
   try {
     await readyPromise;
-    handles[0].steer("finish");
+    assert.equal(await handles[0].steer("finish"), true);
     await rejected;
     assert.equal(updates, 1);
     assert.equal(snapshots, 1);
-    handles[1].steer("finish");
+    assert.equal(await handles[1].steer("finish"), true);
     await siblingDonePromise;
     assert.equal(partials.get("second")?.messages.length, 101, "late child state still accumulates");
     t.mock.timers.tick(10000);

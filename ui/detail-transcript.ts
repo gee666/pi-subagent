@@ -3,13 +3,9 @@ import { SUBAGENT_INTELLIGENCE_CUSTOM_TYPE } from "../intelligence.js";
 export { sessionFilesIn, readSessionMessages } from "./session.js";
 import * as os from "node:os";
 import type { NamesRegistry, SubagentNameRecord } from "../names.js";
-import {
-  type SubagentDetails,
-  isSubagentDetails,
-  isSubagentLaunchToolName,
-  RESUME_SUBAGENTS_TOOL_NAME,
-} from "../types.js";
-import type { DetailBlock, DetailUsage, DetailEvent, DetailChildRef, SubagentDetail } from "./detail-model.js";
+import { isSubagentDetails, isSubagentLaunchToolName, RESUME_SUBAGENTS_TOOL_NAME } from "../types.js";
+import type { DetailBlock, DetailUsage, DetailEvent, SubagentDetail } from "./detail-model.js";
+import { reconcileTranscriptChildren } from "./detail-async.js";
 import { asRecord } from "./value.js";
 function textOf(content: unknown): string {
   if (typeof content === "string") return content;
@@ -43,6 +39,10 @@ export function describeToolArgs(toolName: string, rawArgs: unknown): string {
     return text.length > n ? `${text.slice(0, n)}…` : text;
   };
   switch (toolName) {
+    case "message_subagent":
+      return `${clip(args.name, 40)}: ${clip(args.message, 120)}`;
+    case "message_lead_agent":
+      return clip(args.message, 120);
     case "bash":
       return clip(args.command, 120);
     case "read":
@@ -61,22 +61,6 @@ export function describeToolArgs(toolName: string, rawArgs: unknown): string {
       return `${key}: ${clip(JSON.stringify(value), 100)}`;
     }
   }
-}
-
-function childrenFromDetails(details: SubagentDetails): DetailChildRef[] {
-  const children: DetailChildRef[] = [];
-  for (const raw of details.results ?? []) {
-    const result = asRecord(raw);
-    const exitCode = typeof result.exitCode === "number" ? result.exitCode : 1;
-    children.push({
-      name: typeof result.name === "string" && result.name ? result.name : undefined,
-      agent: typeof result.agent === "string" ? result.agent : "unknown agent",
-      ...(typeof result.intelligence === "string" && result.intelligence ? { intelligence: result.intelligence } : {}),
-      status: exitCode === -1 ? "running" : exitCode === 0 ? "success" : "error",
-      task: typeof result.task === "string" ? result.task : "",
-    });
-  }
-  return children;
 }
 
 export function findNameRecord(registry: NamesRegistry, name: string): SubagentNameRecord | undefined {
@@ -105,7 +89,13 @@ export function parseTranscriptMessages(messages: unknown[]): ParsedTranscript {
   let toolCallCount = 0;
   let model: string | undefined;
   let thinkingLevel: string | undefined;
-  const pendingTools = new Map<string, Extract<DetailEvent, { type: "tool" }>>();
+  const pendingTools = new Map<string, { block: DetailBlock; event: Extract<DetailEvent, { type: "tool" }> }>();
+  const asyncTranscript = reconcileTranscriptChildren(
+    messages.map((entry) => {
+      const wrapper = asRecord(entry);
+      return asRecord(wrapper.message ?? wrapper);
+    }),
+  );
   const observedModels = new Set<DetailBlock>();
   let pendingIntelligence: string | undefined;
 
@@ -136,9 +126,20 @@ export function parseTranscriptMessages(messages: unknown[]): ParsedTranscript {
       if (typeof wrapper.thinkingLevel === "string" && wrapper.thinkingLevel) thinkingLevel = wrapper.thinkingLevel;
       continue;
     }
-    const message = asRecord(wrapper.message);
+    const message = asRecord(wrapper.message ?? wrapper);
     const at = parseTimestamp(wrapper.timestamp ?? message.timestamp);
     const role = message.role;
+
+    if (role === "custom") {
+      if (message.customType === "subagent_message") {
+        const text = textOf(message.content).trim();
+        if (text) currentBlock().events.push({ type: "message", label: "SUBAGENT", text, at });
+        continue;
+      }
+      const event = asyncTranscript.completion(message, textOf(message.content).trim(), at);
+      if (event) currentBlock().events.push(event);
+      continue;
+    }
 
     if (role === "user") {
       const prompt = textOf(message.content).trim();
@@ -200,7 +201,7 @@ export function parseTranscriptMessages(messages: unknown[]): ParsedTranscript {
             arguments: JSON.stringify(asRecord(part.arguments), null, 2),
           };
           block.events.push(event);
-          if (typeof part.id === "string") pendingTools.set(part.id, event);
+          if (typeof part.id === "string") pendingTools.set(part.id, { block, event });
         }
       }
       continue;
@@ -214,10 +215,11 @@ export function parseTranscriptMessages(messages: unknown[]): ParsedTranscript {
         isSubagentDetails(message.details)
       ) {
         const call = typeof message.toolCallId === "string" ? pendingTools.get(message.toolCallId) : undefined;
-        const children = childrenFromDetails(message.details);
+        const children = asyncTranscript.children(message, message.details);
         if (call) {
-          const at = block.events.indexOf(call);
-          if (at >= 0) block.events.splice(at, 1, { type: "children", toolName, children });
+          // Steering may have opened another message block while this tool was running.
+          const at = call.block.events.indexOf(call.event);
+          if (at >= 0) call.block.events.splice(at, 1, { type: "children", toolName, children });
           else block.events.push({ type: "children", toolName, children });
         } else {
           block.events.push({ type: "children", toolName, children });
@@ -225,7 +227,7 @@ export function parseTranscriptMessages(messages: unknown[]): ParsedTranscript {
         continue;
       }
 
-      const call = typeof message.toolCallId === "string" ? pendingTools.get(message.toolCallId) : undefined;
+      const call = typeof message.toolCallId === "string" ? pendingTools.get(message.toolCallId)?.event : undefined;
       if (!call) continue;
       const output = textOf(message.content).replace(/\r\n?/g, "\n").trim();
       call.isError = Boolean(message.isError);

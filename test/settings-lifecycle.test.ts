@@ -53,12 +53,12 @@ test("project settings load after trust, refresh on session switches and can ena
       resume: { disabled: true },
     });
     await host.emit("session_start", {}, trusted);
-    assert.equal(host.getActiveTools().includes("resume_subagents"), false);
+    assert.equal(host.getActiveTools().includes("message_subagent"), false);
     await host.emit("before_agent_start", {}, trusted);
     assert.equal(readBudget(budgetEntry.data as { directory: string }).limit, 0, "existing allowance never resets");
     f.write(path.join(f.project, ".pi"), { delegation: { depth: 3 }, resume: { disabled: false } });
     await host.emit("session_start", {}, trusted);
-    assert.ok(host.getActiveTools().includes("resume_subagents"));
+    assert.ok(host.getActiveTools().includes("message_subagent"));
     await host.emit("session_start", {}, untrusted);
     assert.equal(host.getActiveTools().includes("subagents"), false);
     const result = await host.call("subagents", "disabled", { tasks: [task] }, untrusted);
@@ -83,7 +83,7 @@ test("disabled setting respects startup env precedence and trusted project disab
     const ctx = host.makeCtx([], { cwd: f.project, isProjectTrusted: () => true });
     await host.emit("session_start", {}, ctx);
     assert.equal(host.getActiveTools().includes("subagents"), false);
-    assert.equal(host.getActiveTools().includes("resume_subagents"), false);
+    assert.equal(host.getActiveTools().includes("message_subagent"), false);
     await host.emit("session_shutdown", {}, ctx);
   } finally {
     f.close();
@@ -104,7 +104,7 @@ test("trusted project JSON can re-enable a personally disabled extension but env
     const trusted = host.makeCtx(entries, { cwd: f.project, hasUI: false, isProjectTrusted: () => true });
     await host.emit("session_start", {}, trusted);
     assert.ok(host.getActiveTools().includes("subagents"));
-    assert.ok(host.getActiveTools().includes("resume_subagents"));
+    assert.ok(host.getActiveTools().includes("message_subagent"));
     const prompt = (await host.emit("before_agent_start", {}, trusted)).at(-1) as { systemPrompt: string };
     assert.match(prompt.systemPrompt, /Available Subagents/);
     await host.emit("session_start", {}, untrusted);
@@ -192,18 +192,18 @@ test("resume env changes refresh registration and activation on the next session
   try {
     process.env.DISABLE_RESUMABLE_SUBAGENTS = "true";
     const host = createExtensionHarness();
-    assert.equal(host.tools.has("resume_subagents"), false);
+    assert.equal(host.tools.has("message_subagent"), false);
     const ctx = host.makeCtx([], { cwd: f.project, hasUI: false });
     await host.emit("session_start", {}, ctx);
     process.env.DISABLE_RESUMABLE_SUBAGENTS = "false";
     await host.emit("session_start", {}, ctx);
-    assert.ok(host.getActiveTools().includes("resume_subagents"));
+    assert.ok(host.getActiveTools().includes("message_subagent"));
     process.env.DISABLE_RESUMABLE_SUBAGENTS = "true";
     await host.emit("session_start", {}, ctx);
-    assert.equal(host.getActiveTools().includes("resume_subagents"), false);
+    assert.equal(host.getActiveTools().includes("message_subagent"), false);
     process.env.DISABLE_RESUMABLE_SUBAGENTS = "false";
     await host.emit("session_start", {}, ctx);
-    assert.ok(host.getActiveTools().includes("resume_subagents"));
+    assert.ok(host.getActiveTools().includes("message_subagent"));
     await host.emit("session_shutdown", {}, ctx);
   } finally {
     f.close();

@@ -2,7 +2,16 @@ import { loadSubagentSettings } from "../settings.js";
 import type { AgentConfig } from "../agents.js";
 import { selectIntelligence } from "../intelligence.js";
 import { formatSubagentLabel } from "../ui/agent-label.js";
-import { type SingleResult, type SubagentDetails, emptyUsage, isResultSuccess, getFinalOutput } from "../types.js";
+import {
+  type SingleResult,
+  type SubagentDetails,
+  emptyUsage,
+  isResultSuccess,
+  getFinalOutput,
+  compactSingleResultForDurableDetails,
+  isResultError,
+  usageSummaryToUsageStats,
+} from "../types.js";
 import type { SubagentBudget } from "../budget.js";
 import {
   DEFAULT_MAX_PARALLEL_TASKS,
@@ -47,6 +56,13 @@ export async function executeParallelSubprocess(
     resumeSettings?: Array<NonNullable<RunAgentOptions["resumeSettings"]>>;
     projectTrusted?: boolean;
     settings?: RunAgentOptions["settings"];
+    onResult?: (index: number, result: SingleResult) => void;
+    /** Async owners persist each completion; release its transcript before slower siblings finish. */
+    compactCompletedResults?: boolean;
+    /** Background owners must not drop tracking while sibling subprocesses still run. */
+    cancelOnError?: boolean;
+    /** Immediate-child notifications with task identity; never awaited. */
+    onLeadMessage?: (index: number, task: { agent: string; task: string }, message: string) => void | Promise<void>;
   },
 ): Promise<{
   content: Array<{ type: "text"; text: string }>;
@@ -83,9 +99,28 @@ export async function executeParallelSubprocess(
     };
   }
 
+  const completed = (result: SingleResult): SingleResult => {
+    if (!extras?.compactCompletedResults) return result;
+    const compact = compactSingleResultForDurableDetails(result);
+    // stderr is transient, but stderr-only failures must retain their explanation.
+    if (!compact.errorMessage && isResultError(result)) compact.errorMessage = result.stderr || undefined;
+    return compact;
+  };
+  const childDetails: DetailsFactory = extras?.compactCompletedResults
+    ? (results) => ({
+        mode: "single",
+        delegationMode: "spawn",
+        projectAgentsDir: null,
+        results,
+        aggregatedUsage: emptyUsage(),
+        aggregatedToolCalls: {},
+        usageTree: [],
+      })
+    : makeDetails;
+
   const allResults: SingleResult[] = tasks.map((t, index) => {
     const previous = resumeResults?.[index];
-    if (previous && isResultSuccess(previous)) return previous;
+    if (previous && isResultSuccess(previous)) return completed(previous);
     let intelligence: string | undefined;
     try {
       intelligence = extras?.resumeSettings
@@ -118,6 +153,28 @@ export async function executeParallelSubprocess(
     };
   });
 
+  const batchDetails = (results: SingleResult[], live = false): SubagentDetails => {
+    const details = (live ? (makeDetails.live ?? makeDetails) : makeDetails)(results);
+    if (!extras?.compactCompletedResults) return details;
+    // Legacy aggregate fields still include completed descendants, even though
+    // their transcripts are gone. Keep the factory's property enumerability.
+    const aggregatedUsage = details.usageSummary
+      ? usageSummaryToUsageStats(details.usageSummary)!
+      : { ...details.aggregatedUsage };
+    if (!details.usageSummary)
+      results.forEach((result, index) => {
+        const node = details.usageTree?.[index];
+        if (!node || result.exitCode === -1 || !result.subtreeUsageSummary || result.messages?.length) return;
+        const subtree = usageSummaryToUsageStats(result.subtreeUsageSummary)!;
+        for (const key of ["input", "output", "cacheRead", "cacheWrite", "cost", "turns"] as const) {
+          aggregatedUsage[key] += subtree[key] - node.aggregatedUsage[key];
+        }
+      });
+    const descriptors = Object.getOwnPropertyDescriptors(details);
+    descriptors.aggregatedUsage = { ...descriptors.aggregatedUsage, value: aggregatedUsage };
+    return Object.create(Object.getPrototypeOf(details), descriptors) as SubagentDetails;
+  };
+
   const emitProgress = () => {
     if (!onUpdate) return;
     const running = allResults.filter((r) => r.exitCode === -1).length;
@@ -129,7 +186,7 @@ export async function executeParallelSubprocess(
           text: `Parallel: ${done}/${allResults.length} done, ${running} running...`,
         },
       ],
-      details: (makeDetails.live ?? makeDetails)([...allResults]),
+      details: batchDetails([...allResults], true),
     });
   };
 
@@ -141,6 +198,13 @@ export async function executeParallelSubprocess(
     progress?.dispose();
   };
 
+  const cancellation = extras?.cancelOnError ? new AbortController() : undefined;
+  const batchSignal = cancellation
+    ? signal
+      ? AbortSignal.any([signal, cancellation.signal])
+      : cancellation.signal
+    : signal;
+  const running = new Set<Promise<SingleResult>>();
   let results: SingleResult[];
   try {
     if (progress) {
@@ -153,12 +217,13 @@ export async function executeParallelSubprocess(
         signal?.addEventListener("abort", stopProgress, { once: true });
       }
     }
-    results = await mapConcurrent(tasks, maxConcurrency, async (t, index) => {
+    const runTask = async (t: (typeof tasks)[number], index: number): Promise<SingleResult> => {
       const previousResult = resumeResults?.[index];
       if (previousResult && isResultSuccess(previousResult)) {
-        allResults[index] = previousResult;
+        extras?.onResult?.(index, previousResult);
+        const result = allResults[index];
         progress?.request();
-        return previousResult;
+        return result;
       }
       const savedSessionDir = previousResult?.sessionDir;
       const savedSessionDirExists = sessionDirExists(savedSessionDir);
@@ -166,6 +231,7 @@ export async function executeParallelSubprocess(
         resumeExistingSessions && (!previousResult || !savedSessionDir || savedSessionDirExists);
       const sessionDir = shouldResumeThisSession && savedSessionDirExists ? savedSessionDir : getSessionDir?.(index, t);
       let result: SingleResult;
+      const onLeadMessage = extras?.onLeadMessage;
       try {
         result = await runAgentSubprocess({
           cwd: defaultCwd,
@@ -182,7 +248,9 @@ export async function executeParallelSubprocess(
           parentAgentStack,
           maxDepth,
           preventCycles,
-          signal,
+          // Composite signals use weak dependencies rather than N listeners on
+          // one caller signal when concurrency is configured into the hundreds.
+          signal: batchSignal ? AbortSignal.any([batchSignal]) : undefined,
           sessionDir,
           sessionRoot,
           resumeSession: shouldResumeThisSession && !!sessionDir,
@@ -192,22 +260,44 @@ export async function executeParallelSubprocess(
           intelligencePresets: extras?.intelligencePresets,
           resumeSettings: extras?.resumeSettings?.[index],
           onHandle: (handle) => onHandleForTask?.(index, t, handle),
-          onUpdate: (partial) => {
-            if (partial.details?.results[0]) {
-              allResults[index] = partial.details.results[0];
-              progress?.request();
-            }
-          },
-          makeDetails,
+          onLeadMessage: onLeadMessage ? (message) => onLeadMessage(index, t, message) : undefined,
+          onUpdate: onUpdate
+            ? (partial) => {
+                if (partial.details?.results[0]) {
+                  allResults[index] = partial.details.results[0];
+                  progress?.request();
+                }
+              }
+            : undefined,
+          makeDetails: childDetails,
         });
       } finally {
         onTaskDone?.(index, t);
       }
-      allResults[index] = result;
+      extras?.onResult?.(index, result);
+      const retained = completed(result);
+      allResults[index] = retained;
       progress?.request();
-      return result;
+      return retained;
+    };
+    results = await mapConcurrent(tasks, maxConcurrency, (task, index) => {
+      if (cancellation?.signal.aborted) throw new Error("Parallel batch was cancelled after a task failure.");
+      const pending = runTask(task, index);
+      running.add(pending);
+      void pending.then(
+        () => running.delete(pending),
+        () => running.delete(pending),
+      );
+      return pending;
     });
     progress?.flush(); // Publish final results before disposing the limiter.
+  } catch (error) {
+    stopProgress();
+    if (cancellation) {
+      cancellation.abort();
+      await Promise.allSettled([...running]);
+    }
+    throw error;
   } finally {
     signal?.removeEventListener("abort", stopProgress);
     stopProgress();
@@ -232,7 +322,7 @@ export async function executeParallelSubprocess(
         text: `Parallel: ${successCount}/${results.length} succeeded\n\n${summaries.join("\n\n")}`,
       },
     ],
-    details: makeDetails(results),
+    details: batchDetails(results),
     ...(successCount === results.length ? {} : { isError: true }),
   };
 }

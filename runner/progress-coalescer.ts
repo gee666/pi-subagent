@@ -6,7 +6,7 @@ export class ProgressCoalescer {
   private disposed = false;
 
   constructor(
-    private readonly emit: () => void,
+    private emit: (() => void) | undefined,
     private readonly intervalMs = 100,
   ) {}
 
@@ -32,11 +32,12 @@ export class ProgressCoalescer {
     this.timer = undefined;
     this.pending = false;
     this.lastEmittedAt = Date.now();
-    this.emit();
+    this.emit?.();
   }
 
   dispose(): void {
     this.disposed = true;
+    this.emit = undefined;
     if (this.timer !== undefined) clearTimeout(this.timer);
     this.timer = undefined;
     this.pending = false;

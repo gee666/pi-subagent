@@ -6,7 +6,10 @@ import type { TranscriptMessage } from "./transcript.js";
 
 /** Current tool names. "subagent" is the legacy launch tool name kept for old sessions. */
 export const SUBAGENT_TOOL_NAME = "subagents";
-export const RESUME_SUBAGENTS_TOOL_NAME = "resume_subagents";
+export const RESUME_SUBAGENTS_TOOL_NAME = "resume_subagents"; // Historical transcripts only.
+export const MESSAGE_SUBAGENT_TOOL_NAME = "message_subagent";
+export const SUBAGENT_COMPLETION_TYPE = "subagent_completion";
+export const SUBAGENT_MESSAGE_TYPE = "subagent_message";
 
 /** Matches the launch tool, current or legacy ("subagents" / "subagent"). */
 export function isSubagentLaunchToolName(name: unknown): boolean {
@@ -15,7 +18,7 @@ export function isSubagentLaunchToolName(name: unknown): boolean {
 
 /** Matches any delegation tool: launch (current or legacy) or resume. */
 export function isSubagentToolName(name: unknown): boolean {
-  return isSubagentLaunchToolName(name) || name === RESUME_SUBAGENTS_TOOL_NAME;
+  return isSubagentLaunchToolName(name) || name === RESUME_SUBAGENTS_TOOL_NAME || name === MESSAGE_SUBAGENT_TOOL_NAME;
 }
 
 /** Context mode for delegated runs. */
@@ -74,6 +77,8 @@ export interface SingleResult {
   budget?: import("../budget.js").SubagentBudget;
   /** Epoch ms when this subagent run started (used for TUI timestamps). */
   startedAt?: number;
+  /** Live process is waiting for descendants, not executing a model or tool. Never persisted. */
+  idle?: boolean;
   /** Most recent semantic activity in this agent's entire live run. */
   lastActionAt?: number;
   exitCode: number;

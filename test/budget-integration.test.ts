@@ -94,7 +94,7 @@ async function harness(dir: string, id: string, budget?: SubagentBudget, entries
     tool: host.tool,
     ctx,
     entries: saved,
-    call: (name: string, id: string, args: unknown) => host.call(name, id, args, ctx),
+    call: (name: string, id: string, args: unknown) => host.callAndWait(name, id, args, ctx),
     async prompt(): Promise<string> {
       const results = await host.emit("before_agent_start", { systemPrompt: "base" }, ctx);
       const result = results.at(-1);
@@ -138,8 +138,8 @@ describe("budget tool integration", () => {
   test("resume guidance does not impose follow-up size or cost restrictions", async () => {
     await withSetup(async (dir) => {
       const root = await harness(dir, "root");
-      const description = root.tool("resume_subagents").description;
-      assert.match(description, /keeping their previous context/);
+      const description = root.tool("message_subagent").description;
+      assert.match(description, /saved context and original model settings/);
       for (const text of [description, await root.prompt()]) {
         assert.doesNotMatch(
           text,
@@ -241,8 +241,9 @@ describe("budget tool integration", () => {
       assert.equal(readBudget(rootBudget).remaining, 0);
       process.env.PI_SUBAGENT_DEPTH = "0";
 
-      const resumed = await root.call("resume_subagents", "resume", {
-        resumes: [{ subagent: a.name, task: "continue" }],
+      const resumed = await root.call("message_subagent", "resume", {
+        name: a.name,
+        message: "continue",
       });
       assert.notEqual(resumed.isError, true, JSON.stringify(resumed.content));
       assert.deepEqual(resumed.details.results[0].budget, a.budget);
@@ -251,8 +252,9 @@ describe("budget tool integration", () => {
       assert.equal(readBudget(rootBudget).remaining, 0);
 
       // A different owner gets a session fork, not a fresh descendant allowance.
-      const forked = await branch.call("resume_subagents", "fork", {
-        resumes: [{ subagent: b.name, task: "follow up" }],
+      const forked = await branch.call("message_subagent", "fork", {
+        name: b.name,
+        message: "follow up",
       });
       assert.notEqual(forked.isError, true, JSON.stringify(forked.content));
       assert.deepEqual(forked.details.results[0].budget, b.budget);
@@ -275,14 +277,10 @@ describe("budget tool integration", () => {
       assert.ok(worker.budget && worker.name);
       const parentBudget = persistedBudget(root.entries);
       const resume = (id: string, max_subagents_allowed?: number) =>
-        root.call("resume_subagents", id, {
-          resumes: [
-            {
-              subagent: worker.name,
-              task: "continue",
-              ...(max_subagents_allowed === undefined ? {} : { max_subagents_allowed }),
-            },
-          ],
+        root.call("message_subagent", id, {
+          name: worker.name,
+          message: "continue",
+          ...(max_subagents_allowed === undefined ? {} : { max_subagents_allowed }),
         });
       const raised = await resume("raise", 3);
       assert.notEqual(raised.isError, true, JSON.stringify(raised.content));
@@ -304,16 +302,17 @@ describe("budget tool integration", () => {
       assert.equal(calls(log).length, before);
       assert.equal(readBudget(worker.budget).remaining, 3);
       assert.equal(readBudget(parentBudget).remaining, 1);
-      await assert.rejects(resume("invalid", -1), /Invalid tool arguments:[\s\S]*\/resumes\/0\/max_subagents_allowed/);
+      await assert.rejects(resume("invalid", -1), /Invalid tool arguments:[\s\S]*\/max_subagents_allowed/);
       await assert.rejects(
         resume("overflow", Number.MAX_SAFE_INTEGER),
-        /Invalid tool arguments:[\s\S]*\/resumes\/0\/max_subagents_allowed/,
+        /Invalid tool arguments:[\s\S]*\/max_subagents_allowed/,
       );
       assert.equal(calls(log).length, before);
       assert.equal(Object.keys(readNamesRegistry(path.join(dir, "names.json")).agents).length, 1);
       const reloaded = await harness(dir, "reloaded", undefined, [...root.entries]);
-      const continued = await reloaded.call("resume_subagents", "after-reload", {
-        resumes: [{ subagent: worker.name, task: "continue" }],
+      const continued = await reloaded.call("message_subagent", "after-reload", {
+        name: worker.name,
+        message: "continue",
       });
       assert.notEqual(continued.isError, true, JSON.stringify(continued.content));
       assert.equal(readBudget(worker.budget).remaining, 3);
@@ -325,7 +324,7 @@ describe("budget tool integration", () => {
       process.env.DISABLE_RESUMABLE_SUBAGENTS = "true";
       process.env.PI_SUBAGENT_MAX_TOTAL_AGENTS = "1";
       const h = await harness(dir, "root");
-      assert.equal(h.tools.has("resume_subagents"), false);
+      assert.equal(h.tools.has("message_subagent"), false);
       const result = await h.call("subagents", "one", { tasks: [task(0)] });
       assert.notEqual(result.isError, true, JSON.stringify(result.content));
       assert.ok(result.details.results[0].budget);

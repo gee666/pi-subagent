@@ -136,7 +136,7 @@ test("saved explicit choice recovers through the provider and tool with sole, ze
   const firstCtx = context(first);
   try {
     await first.emit("session_start", {}, firstCtx);
-    const launched = await first.call("subagents", "saved-id", { tasks: [savedTask] }, firstCtx);
+    const launched = await first.callAndWait("subagents", "saved-id", { tasks: [savedTask] }, firstCtx);
     assert.equal(launched.isError, false, JSON.stringify(launched.content));
     const saved = launched.details.results[0];
     assert.ok(saved.name);
@@ -182,7 +182,7 @@ test("saved explicit choice recovers through the provider and tool with sole, ze
       const ctx = context(host);
       try {
         await host.emit("session_start", {}, ctx);
-        await assert.rejects(host.call("subagents", "ordinary", { tasks: [savedTask] }, ctx));
+        await assert.rejects(host.callAndWait("subagents", "ordinary", { tasks: [savedTask] }, ctx));
         const stream = host.provider(RESUME_PROVIDER).streamSimple(
           model(RESUME_PROVIDER, RESUME_MODEL_ID, "openai-responses"),
           normalizeContext({
@@ -199,7 +199,7 @@ test("saved explicit choice recovers through the provider and tool with sole, ze
           tasks: [{ agent: "worker", task: "saved work", max_subagents_allowed: 0 }],
         });
         // Also cover argument preparation of old saved arguments, not just normalized provider output.
-        const recovered = await host.call(
+        const recovered = await host.callAndWait(
           "subagents",
           call.id,
           expected ? call.arguments : { tasks: [savedTask] },

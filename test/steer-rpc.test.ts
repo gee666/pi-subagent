@@ -48,7 +48,10 @@ process.stdin.on("data", (d) => {
   buf = lines.pop() || "";
   for (const line of lines) {
     if (!line.trim()) continue;
+    const command = JSON.parse(line);
+    if (command.type !== "prompt") continue;
     received.push(line);
+    process.stdout.write(JSON.stringify({ type: "response", command: "prompt", id: command.id, success: true }) + "\\n");
     if (received.length === 2) finish();
   }
 });
@@ -56,6 +59,7 @@ process.stdin.on("data", (d) => {
 
 describe("subagent steering handle RPC transport", () => {
   test("handle.steer sends a prompt command with streamingBehavior steer (not a raw steer command)", async () => {
+    let steering: Promise<boolean | void> | undefined;
     const result = await runAgentSubprocess({
       cwd: process.cwd(),
       agents: [fakeAgent],
@@ -71,10 +75,13 @@ describe("subagent steering handle RPC transport", () => {
         argsPrefix: ["-e", echoRpcScript, "--"],
       },
       onHandle: (handle) => {
-        handle.steer("steer me");
+        steering = Promise.resolve(handle.steer("steer me"));
       },
     });
 
+    assert.ok(steering, "expected a steering delivery request");
+    assert.equal(await steering, true, "the mock must acknowledge steering before settlement");
+    assert.doesNotMatch(result.stderr, /Steering acknowledgment timed out|Steering prompt rejected/);
     assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
     const assistant = result.messages.find((message) => message.role === "assistant");
     assert.ok(assistant, "expected the mock to echo an assistant message");

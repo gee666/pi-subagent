@@ -1,5 +1,7 @@
 # Configuration
 
+Launch and messaging tools acknowledge work without waiting for completion. The settings below control delegation, saved sessions, and worker processes.
+
 ## Agent frontmatter
 
 | Field | Default | Meaning |
@@ -96,22 +98,31 @@ Only user-configurable extension variables have JSON counterparts. Inherited run
 
 ## Tool descriptions
 
-In either settings filename, use `tool-prompts` to replace either tool's full model-facing description:
+`tool-prompts` in either settings filename replaces a tool's full model-facing description:
 
 ```json
 {
   "tool-prompts": {
-    "subagents": "Your full delegation instructions.",
-    "resume_subagents": "Your full resume instructions."
+    "subagents": "Your full asynchronous delegation instructions.",
+    "message_subagent": "Your full named-worker messaging instructions.",
+    "message_lead_agent": "Your full child-to-lead messaging instructions."
   }
 }
 ```
 
 Missing descriptions retain their defaults. Overrides change written guidance, not schemas, budget checks, or runtime limits. Keep instructions to estimate worker counts and avoid unnecessary delegation.
 
+Describe launch results as immediate `started` acknowledgements, not final output. Completion arrives as lead steering. `message_subagent` steers running workers or resumes idle ones; the child-only `message_lead_agent` sends nonblocking lead steering. Both completion and child messages wake an idle lead.
+
+## Human messaging and live activity
+
+`/message_subagent` selects live targets before asking for message text. Choose `All (+nested)` for all live workers, `All` for top-level workers, `Youngest` for live workers without running descendants, or `Names (e.g. John, Maria)` for comma-separated names or nested paths. There is no `No` choice; Esc cancels. Automatic broadcast interception of ordinary user input has been removed. This human command is separate from the `message_subagent` model tool, which can also resume a saved worker.
+
+The TUI shows one live line above the editor, such as `Running 2: John 12s · Maria 8s`, with an overflow count and a separate idle count when needed. Timer ticks use live handles and snapshots, not session metadata or disk reads. `/subagent-expand` lists running workers by depth, top levels before nested workers, then live idle parents waiting for children, then completed or stopped history.
+
 ## Caller-selected intelligence
 
-Define named model presets in `pi-subagent.json` or `pi-subagents.json`. With two or more enabled presets, the calling model must choose a configured `intelligence` preset for every launch item. With exactly one enabled preset, the launch tool hides the argument and automatically uses that preset. With no presets, the argument is absent and existing model/thinking defaults apply to launches. Named resumes never offer or accept an intelligence choice. No router or separate model-selection request is used.
+Define named model presets in `pi-subagent.json` or `pi-subagents.json`. With two or more enabled presets, the calling model must choose a configured `intelligence` preset for every launch item. With exactly one enabled preset, the launch tool hides the argument and automatically uses that preset. With no presets, the argument is absent and existing model/thinking defaults apply to launches. `message_subagent` never offers or accepts an intelligence choice. No router or separate model-selection request is used.
 
 ```json
 {
@@ -153,11 +164,11 @@ Use models available in your Pi installation. Names are arbitrary, unique, non-e
 
 A selected or automatic preset overrides the parent model and agent model/thinking settings for a launch. The parent's explicit `--provider` and `--api-key` are not forwarded when a preset is selected. Named resumes use their saved provider and retain a CLI `--api-key` only when that provider matches the parent's explicit `--provider`; otherwise they drop the key. Worker providers use their configured Pi credentials. With multiple presets, omitted or `null` choices reject the entire launch batch before any worker starts or budget changes.
 
-`resume_subagents` retains the original effective model, thinking level, and intelligence label. This also applies to private forks and after restart, preset changes, disabling intelligence, changing the parent model, or editing/deleting the agent definition. A worker launched without a preset remains unlabelled. Pass only `{ subagent, task }` and an optional `max_subagents_allowed`; any `intelligence` argument, including `null`, rejects the resume batch.
+`message_subagent` retains the worker's original effective model, thinking level, and intelligence label, whether it steers a running worker or resumes an idle one. This also applies to private forks and after restart, preset changes, disabling intelligence, changing the parent model, or editing/deleting the agent definition. A worker launched without a preset remains unlabelled. Pass only `{ name, message }` and an optional `max_subagents_allowed`; any `intelligence` argument, including `null`, is invalid.
 
-Tool result rows show the selected preset, for example `Nicolas (Junior/code-writer)`. Display names capitalize only the first character; configured spelling and argument values otherwise stay unchanged. Runs without a preset show `Nicolas (code-writer)`. Runs without an agent type show `Nicolas (Junior)`, or just `Nicolas` when neither qualifier exists. Agent types come only from user-created definitions. With no available types, the launch schema omits `agent` and uses a default worker without agent-specific instructions. Durable results retain their own preset name, and the name registry retains the initial choice. The `/subagent-expand` picker shows the initial preset beside each agent type and lets you search by preset name. Its transcript view shows each task's or resume's recorded intelligence alongside its actual transcript model and thinking level. Later resumes do not relabel earlier work. Missing model or thinking metadata remains `unknown`, even when a preset name is known.
+Tool result rows show the selected preset, for example `Nicolas (Junior/code-writer)`. Display names capitalize only the first character; configured spelling and argument values otherwise stay unchanged. Runs without a preset show `Nicolas (code-writer)`. Runs without an agent type show `Nicolas (Junior)`, or just `Nicolas` when neither qualifier exists. Agent types come only from user-created definitions. With no available types, the launch schema omits `agent` and uses a default worker without agent-specific instructions. Durable results retain their own preset name, and the name registry retains the initial choice. The `/subagent-expand` picker shows the initial preset beside each agent type and lets you search by preset name. Its transcript view shows each task's or resumed turn's recorded intelligence alongside its actual transcript model and thinking level. Later messages do not relabel earlier work. Missing model or thinking metadata remains `unknown`, even when a preset name is known.
 
-`PI_SUBAGENT_INTELLIGENCE=true` enables presets when they exist, which is the default. Set it to `false` or `0` to treat the configuration as having no presets for new launches: the launch tool hides the argument and no automatic preset applies. Named resumes still retain their original settings. Unknown choices or attempts to pass a named hidden argument fail before launching workers. When the argument is hidden, omission or `null` still uses the automatic sole preset or existing defaults.
+`PI_SUBAGENT_INTELLIGENCE=true` enables presets when they exist, which is the default. Set it to `false` or `0` to treat the configuration as having no presets for new launches: the launch tool hides the argument and no automatic preset applies. Named workers still retain their original settings when messaged or resumed. Unknown choices or attempts to pass a named hidden argument fail before launching workers. When the argument is hidden, omission or `null` still uses the automatic sole preset or existing defaults.
 
 Configuration follows the trust checks and file order above. A later `subagents-models` block replaces the entire earlier block. An empty list disables selection. Invalid blocks warn and disable selection rather than using a partial list. Nested workers load configuration using the same rules. Reload Pi after changing settings.
 
@@ -194,7 +205,9 @@ Cycle-blocked tasks fail individually; legal siblings still run. A nested tool e
 
 The idle watchdog pauses during tool execution. When the last concurrent tool finishes, a fresh idle window starts. Agent events and changed nested-worker state reset it; unchanged heartbeats do not. Timeout and cancellation terminate the process tree and bound cleanup even if the OS never reports closure.
 
-RPC completion waits for `agent_settled`, not `agent_end`, because Pi may retry, compact, or continue after a low-level run ends. Rejected prompts, signal exits, and exit before settlement are failures.
+Worker-turn completion waits for `agent_settled`, not `agent_end`, because Pi may retry, compact, or continue after a low-level run ends. This wait happens in the background, not inside the lead's launch or messaging tool call.
+
+If descendants are still active at `agent_settled`, the runner reports `Idle, waiting for children.` with the worker's own last answer to the lead via steering. The child process stays alive and its idle watchdog pauses while it waits. Child messages and completions can wake it. Final `Finished` status and completion steering wait until the whole subtree and resulting continuations have settled. Rejected prompts, signal exits, and exit before settlement are failures. A finished durable worker remains available for later resume through `message_subagent`.
 
 Children inherit provider, authentication, proxy, home, temporary-directory, and Pi environment settings. On Windows, the runner normalizes `Path`/`PATH` and adds Node, `PNPM_HOME`, npm's user bin, `%LOCALAPPDATA%\\pnpm`, and `%SystemRoot%\\System32` to executable search paths.
 

@@ -68,6 +68,20 @@ export const ResumeSubagentsParams = Type.Object(
   { additionalProperties: false },
 );
 
+export const MessageSubagentParams = Type.Object(
+  {
+    name: Type.String({ minLength: 1, pattern: "\\S", description: "Name returned by a previous subagents run." }),
+    message: Type.String({
+      minLength: 1,
+      pattern: "\\S",
+      description:
+        "Message to steer a running subagent, or a new task to resume an idle subagent with its saved context.",
+    }),
+    max_subagents_allowed: ResumeItem.properties.max_subagents_allowed,
+  },
+  { additionalProperties: false },
+);
+
 export function createIntelligenceSchemas(
   presets: IntelligencePreset[] = [],
   settings?: SubagentSettings,

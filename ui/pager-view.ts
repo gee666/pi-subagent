@@ -3,19 +3,20 @@ import { formatSubagentLabel } from "./agent-label.js";
 import { stripTerminalSequences } from "@earendil-works/pi-tui";
 import {
   TOOL_LIST_HEADER_LINES,
+  getActivityBlock,
   getDetailChildren,
   getToolListRows,
   getTurnTools,
   renderChildTreeLines,
   renderToolDetailLines,
-  renderTurnOverviewLines,
+  renderActivityLines,
   renderTurnToolListLines,
   type DetailTheme,
   type SubagentDetail,
 } from "../detail.js";
 
 import { findMatch } from "./overlay-input.js";
-type ViewMode = "turn" | "tools" | "tool-detail" | "children";
+type ViewMode = "activity" | "tools" | "tool-detail" | "children";
 
 export interface PagerOptions {
   detail: SubagentDetail;
@@ -30,9 +31,8 @@ export interface PagerOptions {
 export class PagerView {
   protected readonly options: PagerOptions;
   protected detail: SubagentDetail;
-  protected readonly parentStack: Array<{ detail: SubagentDetail; turnIndex: number }> = [];
-  protected mode: ViewMode = "turn";
-  protected turnIndex: number;
+  protected readonly parentStack: SubagentDetail[] = [];
+  protected mode: ViewMode = "activity";
   protected toolRow = 0;
   protected childIndex = 0;
   protected lines: string[] = [];
@@ -49,7 +49,6 @@ export class PagerView {
   constructor(options: PagerOptions) {
     this.options = options;
     this.detail = options.detail;
-    this.turnIndex = Math.max(0, this.detail.blocks.length - 1);
   }
 
   invalidate(): void {
@@ -63,7 +62,7 @@ export class PagerView {
 
   protected clamp(): void {
     this.scroll = Math.min(Math.max(0, this.scroll), this.maxScroll());
-    const rows = getToolListRows(this.detail.blocks[this.turnIndex]);
+    const rows = getToolListRows(getActivityBlock(this.detail));
     this.toolRow = Math.min(Math.max(0, this.toolRow), Math.max(0, rows.length - 1));
     const children = getDetailChildren(this.detail);
     this.childIndex = Math.min(Math.max(0, this.childIndex), Math.max(0, children.length - 1));
@@ -74,15 +73,6 @@ export class PagerView {
     this.status = "";
     this.activeMatchLine = -1;
     this.dirty = true;
-  }
-
-  protected setTurn(delta: number): void {
-    const count = this.detail.blocks.length;
-    if (count === 0) return;
-    this.turnIndex = Math.min(Math.max(0, this.turnIndex + delta), count - 1);
-    this.toolRow = 0;
-    this.childIndex = 0;
-    this.resetView();
   }
 
   protected setMode(mode: ViewMode): void {
@@ -98,7 +88,7 @@ export class PagerView {
   }
 
   protected selectedToolIndex(): number {
-    const rows = getToolListRows(this.detail.blocks[this.turnIndex]);
+    const rows = getToolListRows(getActivityBlock(this.detail));
     return rows[this.toolRow]?.toolIndex ?? 0;
   }
 
@@ -140,7 +130,7 @@ export class PagerView {
     this.scroll = Math.min(index, this.maxScroll());
     if (this.mode === "tools") {
       const matchedRow = index - TOOL_LIST_HEADER_LINES;
-      if (matchedRow >= 0 && matchedRow < getToolListRows(this.detail.blocks[this.turnIndex]).length) {
+      if (matchedRow >= 0 && matchedRow < getToolListRows(getActivityBlock(this.detail)).length) {
         this.toolRow = matchedRow;
         this.dirty = true;
       }
@@ -160,12 +150,12 @@ export class PagerView {
   }
 
   protected buildLines(width: number): string[] {
-    const block = this.detail.blocks[this.turnIndex];
-    if (this.mode === "turn") {
-      return renderTurnOverviewLines(this.detail, this.turnIndex, width, this.options.theme);
+    const block = getActivityBlock(this.detail);
+    if (this.mode === "activity") {
+      return renderActivityLines(this.detail, width, this.options.theme);
     }
     if (this.mode === "tools") {
-      return renderTurnToolListLines(block, this.toolRow, width, this.options.theme);
+      return renderTurnToolListLines(block, this.toolRow, width, this.options.theme, "activity");
     }
     if (this.mode === "children") {
       return renderChildTreeLines(getDetailChildren(this.detail), this.childIndex, width, this.options.theme);
@@ -175,15 +165,14 @@ export class PagerView {
   }
 
   protected title(): string {
-    const turn = `turn ${this.turnIndex + 1}/${Math.max(1, this.detail.blocks.length)}`;
     const suffix =
-      this.mode === "turn"
-        ? turn
+      this.mode === "activity"
+        ? "activity"
         : this.mode === "tools"
-          ? `${turn} • tools`
+          ? "activity • tools"
           : this.mode === "children"
             ? "children"
-            : `${turn} • tool ${this.selectedToolIndex() + 1}`;
+            : `activity • tool ${this.selectedToolIndex() + 1}`;
     return `${formatSubagentLabel(this.detail)} • ${suffix}`;
   }
 
@@ -191,9 +180,9 @@ export class PagerView {
     if (this.searchMode) return `Search: ${this.searchQuery}█   Enter find • Esc cancel`;
     if (this.status) return `${this.status}   n/N next/previous • / new search`;
     const position = `${this.scroll + 1}-${Math.min(this.lines.length, this.scroll + this.viewport)}/${this.lines.length}`;
-    if (this.mode === "turn") {
+    if (this.mode === "activity") {
       const back = this.parentStack.length > 0 ? "Esc parent" : this.options.onBack ? "Esc list" : "Esc close";
-      return `${position}   ←/→ turn • T tools • C children • / search • ${back} • q close`;
+      return `${position}   ↑/↓ scroll • T tools • C children • / search • ${back} • q close`;
     }
     if (this.mode === "tools")
       return `${position}   ↑/↓ row • Enter inspect/expand child • / search • Esc back • q close`;

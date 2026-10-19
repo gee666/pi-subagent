@@ -1,12 +1,20 @@
 # Usage accounting
 
+## Async acknowledgements and completion
+
+`subagents` returns `started` immediately, before final output or usage is available. `message_subagent(name, message, max_subagents_allowed?)` also returns without waiting for the worker to finish. It steers a running worker or resumes an idle durable named worker. Neither acknowledgement is a completed worker result.
+
+Completion arrives separately as lead steering and wakes an idle lead. A child's nonblocking `message_lead_agent(message)` also sends lead steering, but is not a completion event. Do not count a progress report, question, or launch acknowledgement as final usage.
+
+Completion is a custom message with `customType: "subagent_completion"`, display text in `content`, and result data in `details`. It uses `deliverAs: "steer"` with `triggerTurn: true`. Launch receipts carry `asyncJobId`; individual completions carry that ID and `asyncTaskIndex` to identify the launch slot. Results also retain durable worker and execution identities. Include each execution once, even after recovery or repeated delivery. Final statistics do not belong to the launch acknowledgement.
+
+A worker that settles while descendants remain active sends `Idle, waiting for children.` and its own last answer as ordinary lead steering. That is not a final completion or a final usage total. The process remains alive; `Finished` waits for subtree settlement.
+
 ## Result data
 
-Delegation tool results include `details`. Recognize `subagents`, `resume_subagents`, and the legacy launch name `subagent` when reading old sessions.
+Result and saved-session interfaces live in [`types/contracts.ts`](../types/contracts.ts). Async identity and reconciliation helpers live in [`types/messages.ts`](../types/messages.ts), re-exported through `types.ts`. Use these definitions rather than maintaining separate copies.
 
-The canonical interfaces live in [`types/contracts.ts`](../types/contracts.ts). Avoid maintaining a separate copy of those interfaces.
-
-Live results contain:
+Live result details contain:
 
 | Field | Meaning |
 | --- | --- |
@@ -21,36 +29,24 @@ Live results contain:
 
 `contextTokens` is the last context-window snapshot, not cumulative usage. It is not summed across agents. Cost is in USD.
 
-Saved parent-session results use compact schema version 3. They omit full worker transcripts and recursive live breakdowns. Instead, `usageSummary` holds the recursive totals and `results` holds durable child references with outcome and recovery data. Do not assume that saved results contain live `messages`, `usageTree`, or aggregate tool counts.
+Saved parent-session results use compact schema version 3. They omit full worker transcripts and recursive live breakdowns. Instead, `usageSummary` holds the recursive totals and `results` holds durable child references with outcome and recovery data. Do not assume that saved results contain live `messages`, `usageTree`, or aggregate tool counts. Async completion preserves durable usage accounting without requiring full worker transcripts in the lead's context.
 
 ## Reading RPC events
 
-Current Pi emits tool results as `message_end` events with `message.role === "toolResult"`. Older streams may use `tool_result_end`. Process each tool call only once if a transport delivers both shapes.
+Pi emits tool results as `message_end` events with `message.role === "toolResult"`. Older streams may use `tool_result_end`. Process each tool call only once if a transport delivers both shapes.
 
-```js
-const seen = new Set();
-let costUsd = 0;
+A tool-result-only cost accumulator misses async completions. Launch and messaging tool results acknowledge work; completion steering carries the later outcome. Decode custom messages with `customType === SUBAGENT_COMPLETION_TYPE`, whose value is `subagent_completion`, and validate their `details` with `isSubagentDetails`. Ordinary child-to-lead messages, including idle notifications, are not completion usage.
 
-for await (const line of jsonLines) {
-  const event = JSON.parse(line);
-  const message = event.message;
-  if (!["message_end", "tool_result_end"].includes(event.type)) continue;
-  if (message?.role !== "toolResult") continue;
-  if (!["subagents", "subagent", "resume_subagents"].includes(message.toolName)) continue;
-  if (!message.details || seen.has(message.toolCallId)) continue;
-  seen.add(message.toolCallId);
+`getNestedSubagentResults(messages)` reconciles launch placeholders with individual completions. `asyncJobId(details)` reads the launch identity and `subagentExecutionId(result)` reads the execution identity. These helpers and `SUBAGENT_COMPLETION_TYPE` are exported from `types.ts`. Match a completion to its job and task slot rather than adding the launch placeholder and completion as separate runs.
 
-  const details = message.details;
-  costUsd += details.usageSummary?.costUsd ?? details.aggregatedUsage?.cost ?? 0;
-}
-```
-
-This sums one parent stream. Do not also sum its children's streams, since parent delegation totals already include descendants. Parent-only model usage can be added separately.
+Sum one lead stream's recursive worker totals. Do not also sum its children's streams, since recursive totals already include descendants. Lead-only model usage can be added separately. Repeated completions or overlapping summaries must not add the same worker run twice.
 
 ## Interactive footer
 
-The `WITH SUBS` line includes the parent's billed session entries and recursive worker usage. Parent accounting follows Pi's session-statistics rules using `ctx.sessionManager.getEntries()`, including off-branch retries, compacted history, branch summaries, and tool-reported usage. Durable worker summaries add delegated cost once.
+The `WITH SUBS` line includes the parent's billed session entries and recursive worker usage. Parent accounting follows Pi's session-statistics rules using `ctx.sessionManager.getEntries()`, including off-branch retries, compacted history, branch summaries, and tool-reported usage. Durable worker summaries add delegated cost once. Async delivery retains this accounting across idle periods and recovery.
 
-The worker count tracks unique identities, not invocations. Named resumes and private forks add usage without increasing the count. Older compact history can recover identities from the name registry.
+The worker count tracks unique identities, not invocations. Messaging, named resumes, and private forks add usage without increasing the count. Older compact history can recover identities from the name registry. This usage count is separate from budget reservations: launching reserves `1 + max_subagents_allowed` slots, while messaging an existing worker allocates no new worker slot. A cap increase can reserve additional descendant capacity from its original launcher.
 
-Pi renders this extension's combined usage through its normal `ctx.ui.setStatus()` footer line.
+Pi renders this extension's combined usage through its normal `ctx.ui.setStatus()` footer line. This is separate from the live `Running N` line above the editor, which shows names, elapsed times, overflow, and idle count using live handles and snapshots without session metadata or disk reads on ticks.
+
+The main `index.ts` entry retains its default registration export and named exports `selectParentModelForSubagent`, `getSubagentsToolDescription`, `collectCombinedUsageStatusLine`, and `collectLiveUsageSummary`. Existing root entry-point imports remain supported.

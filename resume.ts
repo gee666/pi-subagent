@@ -5,6 +5,8 @@ import { parseBoolean, RESUME_PROVIDER } from "./shared.js";
 import { isBudgetAmount } from "./budget.js";
 import { isRecord, sanitizePathComponent } from "./storage/values.js";
 import {
+  asyncJobId,
+  getNestedSubagentResults,
   isResultError,
   isSubagentDetails,
   isSubagentLaunchToolName,
@@ -250,11 +252,27 @@ export function findLatestResumableSubagentCalls(ctx: ExtensionContext): Resumab
     }
   });
 
+  // Completion messages may arrive long after the launch tool returned. Merge
+  // by launch ID and task index rather than treating them as unrelated progress.
+  for (const nested of getNestedSubagentResults(
+    entries.flatMap((entry) => (entry.type === "message" ? [entry.message] : [])),
+  )) {
+    const recorded = results.get(nested.toolCallId);
+    if (recorded && asyncJobId(nested.details)) {
+      results.set(nested.toolCallId, { ...recorded, details: nested.details, isError: nested.isError });
+    }
+  }
+
+  const asyncCalls: ResumableSubagentCall[] = [];
   const candidates: Array<ResumableSubagentCall & { callOrder: number; activityOrder: number }> = [];
   for (const [toolCallId, call] of calls) {
     const result = results.get(toolCallId);
     const unfinished = !result || result.isError || hasUnfinishedResults(result.details, call.tasks.length);
     if (!unfinished) continue;
+    if (result?.details && asyncJobId(result.details)) {
+      asyncCalls.push({ previousToolCallId: toolCallId, tasks: call.tasks, details: result.details });
+      continue;
+    }
     candidates.push({
       previousToolCallId: toolCallId,
       tasks: call.tasks,
@@ -264,8 +282,22 @@ export function findLatestResumableSubagentCalls(ctx: ExtensionContext): Resumab
     });
   }
 
+  const pendingAsyncCalls = asyncCalls.filter(
+    (call, index) =>
+      !asyncCalls
+        .slice(index + 1)
+        .some(
+          (later) =>
+            sameTasks(call.tasks, later.tasks) &&
+            call.details?.results.length === later.details?.results.length &&
+            call.details?.results.every(
+              (result, taskIndex) =>
+                result.sessionDir && result.sessionDir === later.details?.results[taskIndex]?.sessionDir,
+            ),
+        ),
+  );
   const latest = candidates.sort((a, b) => a.activityOrder - b.activityOrder).at(-1);
-  if (!latest) return [];
+  if (!latest) return pendingAsyncCalls;
 
   // If one assistant message issued several subagent tool calls, Pi records
   // separate tool results for them. Resuming only the last one leaves sibling
@@ -283,13 +315,16 @@ export function findLatestResumableSubagentCalls(ctx: ExtensionContext): Resumab
     ...batch.map((candidate) => candidate.activityOrder),
     ...siblingResultOrders,
   );
-  if (!hasOnlyIgnorableTrailingEntries(entries, latestBatchActivity)) return [];
+  if (!hasOnlyIgnorableTrailingEntries(entries, latestBatchActivity)) return pendingAsyncCalls;
 
-  return batch.map(({ previousToolCallId, tasks, details }) => ({
-    previousToolCallId,
-    tasks,
-    details,
-  }));
+  return [
+    ...pendingAsyncCalls,
+    ...batch.map(({ previousToolCallId, tasks, details }) => ({
+      previousToolCallId,
+      tasks,
+      details,
+    })),
+  ];
 }
 
 export function findLatestResumableSubagentCall(ctx: ExtensionContext): ResumableSubagentCall | null {

@@ -1,5 +1,5 @@
 export const BASE_SUBAGENTS_TOOL_DESCRIPTION =
-  "Run agents in separate processes. Calls block until all tasks finish; put parallel tasks in one array.";
+  "Start agents asynchronously in separate processes. Returns their names immediately, without waiting for completion. Each completion arrives as a steering message and wakes you if idle. Keep working in parallel. Use message_subagent(name, message) to steer a running worker or wake an idle one.";
 
 export const SUBAGENT_USAGE_GUIDANCE = [
   "When to launch new subagents:",

@@ -4,6 +4,7 @@ import { SubagentPicker, type PickerItem } from "./picker.js";
 
 export interface ExpandViewOptions {
   items: PickerItem[];
+  getItems?: () => PickerItem[];
   detail?: SubagentDetail;
   resolveDetail: (name: string) => SubagentDetail | undefined;
   getRows: () => number;
@@ -16,6 +17,8 @@ export interface ExpandViewOptions {
 export class SubagentExpandView {
   private readonly picker?: SubagentPicker;
   private pager?: SubagentPager;
+  private refreshTimer?: ReturnType<typeof setInterval>;
+  private disposed = false;
 
   constructor(private readonly options: ExpandViewOptions) {
     if (options.detail) {
@@ -24,23 +27,47 @@ export class SubagentExpandView {
       this.picker = new SubagentPicker({
         ...options,
         onPick: (name) => {
-          if (!name) options.onClose();
+          if (!name) this.close();
           else {
             const detail = options.resolveDetail(name);
             if (detail) this.openDetail(detail);
           }
         },
       });
+      if (options.getItems) {
+        this.refreshTimer = setInterval(() => this.refreshItems(), 1000);
+        this.refreshTimer.unref?.();
+      }
     }
+  }
+
+  private refreshItems(): void {
+    if (this.disposed || !this.options.getItems) return;
+    const items = this.options.getItems();
+    if (!this.disposed) this.picker?.setItems(items);
+  }
+
+  private close(): void {
+    if (this.disposed) return;
+    this.dispose();
+    this.options.onClose();
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    if (this.refreshTimer) clearInterval(this.refreshTimer);
+    this.refreshTimer = undefined;
   }
 
   private openDetail(detail: SubagentDetail): void {
     this.pager = new SubagentPager({
       ...this.options,
       detail,
+      onClose: () => this.close(),
       onBack: this.picker
         ? () => {
             this.pager = undefined;
+            this.refreshItems();
           }
         : undefined,
     });
@@ -48,7 +75,7 @@ export class SubagentExpandView {
   }
 
   handleInput(data: string): void {
-    (this.pager ?? this.picker)?.handleInput(data);
+    if (!this.disposed) (this.pager ?? this.picker)?.handleInput(data);
   }
 
   render(width: number): string[] {

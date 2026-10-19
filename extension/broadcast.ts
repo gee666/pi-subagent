@@ -1,4 +1,5 @@
-import { type SingleResult, type SubagentDetails, getNestedSubagentResults, isSubagentDetails } from "../types.js";
+import { type SingleResult, type SubagentDetails, isSubagentDetails } from "../types.js";
+import { nestedBroadcastHistory, updateBroadcastTargetCache } from "./broadcast-history.js";
 import type { SessionContext } from "./contracts.js";
 import type { ExtensionState } from "./state.js";
 
@@ -9,6 +10,8 @@ export interface BroadcastTarget {
   display: string;
   topLevelId: number;
   restPath: string[];
+  startedAt?: number;
+  idle?: boolean;
 }
 
 export interface ParsedBroadcastSelection {
@@ -70,10 +73,14 @@ export function collectRunningBroadcastTargetsFromResult(
   let hasRunningDescendant = false;
   const completedIds = new Set<string>();
   const nestedDetails: SubagentDetails[] = [];
-  for (const nested of getNestedSubagentResults(result.messages)) {
+  for (const nested of nestedBroadcastHistory(result.messages)) {
     if (!isSubagentDetails(nested.details)) continue;
+    const live = result.liveNestedSubagents?.[nested.toolCallId];
     if (nested.toolCallId) completedIds.add(nested.toolCallId);
-    nestedDetails.push(nested.details);
+    // Async launch receipts are not completed runs. Their live snapshot carries
+    // current descendants, including children launched after the receipt.
+    const hasRunningPlaceholder = nested.details.results.some((child) => child.exitCode === -1);
+    nestedDetails.push(hasRunningPlaceholder && isSubagentDetails(live) ? live : nested.details);
   }
   for (const [toolCallId, live] of Object.entries(result.liveNestedSubagents ?? {})) {
     if (!completedIds.has(toolCallId) && isSubagentDetails(live)) nestedDetails.push(live);
@@ -89,7 +96,13 @@ export function collectRunningBroadcastTargetsFromResult(
 
   if (result.exitCode !== -1) return hasRunningDescendant;
   const restPath = namePath.slice(1);
-  const self = { display: namePath.join(" > "), topLevelId, restPath };
+  const self: BroadcastTarget = {
+    display: namePath.join(" > "),
+    topLevelId,
+    restPath,
+    ...(result.startedAt !== undefined ? { startedAt: result.startedAt } : {}),
+    ...(result.idle ? { idle: true } : {}),
+  };
   targets.all.push(self);
   if (!hasRunningDescendant) targets.youngest.push(self);
   return true;
@@ -100,132 +113,82 @@ export function updateLatestBroadcastTargets(
   details: SubagentDetails | undefined,
   topLevelBaseId = 1,
 ): void {
-  state.latestBroadcastTargets.all = [];
-  state.latestBroadcastTargets.youngest = [];
-  if (!details) {
-    for (const [id, active] of state.activeSubagents) {
-      const display = active.name || active.agent;
-      const target = { display, topLevelId: id, restPath: [] };
-      state.latestBroadcastTargets.all.push(target);
-      state.latestBroadcastTargets.youngest.push(target);
-    }
-    return;
-  }
-  details.results.forEach((result, index) => {
-    collectRunningBroadcastTargetsFromResult(
-      result,
-      [result.name || result.agent],
-      topLevelBaseId + index,
-      state.latestBroadcastTargets,
-    );
-  });
-  const dedupe = (targets: BroadcastTarget[]) =>
-    Array.from(new Map(targets.map((target) => [target.display, target])).values())
-      .filter((target) => state.activeSubagents.has(target.topLevelId))
-      .sort((a, b) => a.display.localeCompare(b.display));
-  state.latestBroadcastTargets.all = dedupe(state.latestBroadcastTargets.all);
-  state.latestBroadcastTargets.youngest = dedupe(state.latestBroadcastTargets.youngest);
+  updateBroadcastTargetCache(state, details, topLevelBaseId, collectRunningBroadcastTargetsFromResult);
+  state.onActivityChanged?.();
 }
 
 export function getFallbackTopLevelTargets(state: ExtensionState): BroadcastTarget[] {
   return Array.from(state.activeSubagents.entries())
     .sort(([a], [b]) => a - b)
-    .map(([id, active]) => ({ display: active.name || active.agent, topLevelId: id, restPath: [] }));
+    .map(([id, active]) => ({
+      display: active.name || active.agent,
+      topLevelId: id,
+      restPath: [],
+      ...(active.startedAt !== undefined ? { startedAt: active.startedAt } : {}),
+      ...(active.handle.isIdle?.() ? { idle: true } : {}),
+    }));
 }
 
-export function sendBroadcastToTargets(
+export async function sendBroadcastToTargets(
   state: ExtensionState,
   message: string,
   targets: BroadcastTarget[],
   ctx: SessionContext,
-): void {
+): Promise<void> {
+  const generation = state.lifecycleGeneration;
   const delivered: string[] = [];
   const missed: string[] = [];
-  for (const target of targets) {
-    const item = state.activeSubagents.get(target.topLevelId);
-    if (!item) {
-      missed.push(target.display);
-      continue;
-    }
-    item.handle.steer(target.restPath.length > 0 ? encodeNestedBroadcast(message, target.restPath) : message);
-    delivered.push(target.display);
-  }
+  const failed: string[] = [];
+  await Promise.all(
+    targets.map(async (target) => {
+      const item = state.activeSubagents.get(target.topLevelId);
+      if (!item) {
+        missed.push(target.display);
+        return;
+      }
+      try {
+        const accepted = await item.handle.steer(
+          target.restPath.length > 0 ? encodeNestedBroadcast(message, target.restPath) : message,
+        );
+        if (accepted === false) failed.push(target.display);
+        else delivered.push(target.display);
+      } catch {
+        failed.push(target.display);
+      }
+    }),
+  );
+  if (generation !== state.lifecycleGeneration) return;
   if (delivered.length > 0) {
-    ctx.ui.notify(`Broadcasted steering message to subagent(s): ${delivered.join(", ")}`, "info");
+    ctx.ui.notify(`Sent steering message to subagent(s): ${delivered.join(", ")}`, "info");
   }
   if (missed.length > 0) {
     ctx.ui.notify(`Some selected subagents are no longer running: ${missed.join(", ")}`, "warning");
   }
+  if (failed.length > 0) {
+    ctx.ui.notify(`Some selected subagents could not accept steering: ${failed.join(", ")}`, "warning");
+  }
 }
 
-export async function askBroadcastForSteering(
+/** Forward only machine-addressed messages. Ordinary input never selects recipients. */
+export async function forwardNestedBroadcast(
   state: ExtensionState,
-  message: string,
+  text: string,
   ctx: SessionContext,
-): Promise<"continue" | "handled"> {
-  const nested = decodeNestedBroadcast(message);
-  if (nested) {
-    if (state.activeSubagents.size === 0) return "handled";
-    const [rawTarget, ...restPath] = nested.path;
-    let resolvedId: number | undefined;
-    for (const [id, item] of state.activeSubagents) {
-      if ((item.name || item.agent).toLowerCase() === rawTarget.toLowerCase()) {
-        resolvedId = id;
-        break;
-      }
-    }
-    if (resolvedId === undefined) return "handled";
-    sendBroadcastToTargets(
+): Promise<boolean> {
+  const nested = decodeNestedBroadcast(text);
+  if (!nested) return false;
+  const [rawTarget, ...restPath] = nested.path;
+  // Missing targets are dropped rather than becoming prompts for this agent.
+  if (!rawTarget) return true;
+  for (const [id, item] of state.activeSubagents) {
+    if ((item.name || item.agent).toLowerCase() !== rawTarget.toLowerCase()) continue;
+    await sendBroadcastToTargets(
       state,
       nested.message,
-      [{ display: nested.path.join(" > "), topLevelId: resolvedId, restPath }],
+      [{ display: nested.path.join(" > "), topLevelId: id, restPath }],
       ctx,
     );
-    return "handled";
+    break;
   }
-
-  if (!ctx.hasUI || state.activeSubagents.size === 0) return "continue";
-
-  const choice = await ctx.ui.select("Broadcast this steering message to subagents?", [
-    "No",
-    "All (+nested)",
-    "Youngest",
-    "Names (e.g. John, Maria)",
-  ]);
-  if (choice === "All (+nested)" || choice === "Youngest") {
-    const fallback = getFallbackTopLevelTargets(state);
-    const selected =
-      choice === "Youngest"
-        ? state.latestBroadcastTargets.youngest.length > 0
-          ? state.latestBroadcastTargets.youngest
-          : fallback
-        : state.latestBroadcastTargets.all.length > 0
-          ? state.latestBroadcastTargets.all
-          : fallback;
-    const current = selected.filter((target) => state.activeSubagents.has(target.topLevelId));
-    if (current.length === 0) {
-      ctx.ui.notify("No selected subagents are still running. Continuing with normal steering.", "warning");
-      return "continue";
-    }
-    sendBroadcastToTargets(state, message, current, ctx);
-    return "handled";
-  }
-  if (choice !== "Names (e.g. John, Maria)") return "continue";
-
-  const answer = await ctx.ui.input("Subagent names to broadcast to (comma-separated)", "");
-  if (!answer) return "continue";
-  const current =
-    state.latestBroadcastTargets.all.length > 0 ? state.latestBroadcastTargets.all : getFallbackTopLevelTargets(state);
-  const parsed = parseBroadcastSelection(answer, current);
-  const validatedTargets = parsed.targets;
-  const errors = parsed.errors;
-  if (errors.length > 0) {
-    ctx.ui.notify(errors.slice(0, 4).join("\n"), "warning");
-  }
-  if (validatedTargets.length === 0) {
-    ctx.ui.notify("No valid running subagents selected. Continuing with normal steering.", "warning");
-    return "continue";
-  }
-  sendBroadcastToTargets(state, message, validatedTargets, ctx);
-  return "handled";
+  return true;
 }

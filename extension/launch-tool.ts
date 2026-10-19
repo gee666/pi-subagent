@@ -16,7 +16,9 @@ import { getTaskBranchSize } from "../resume.js";
 import { buildSubagentDetails, DEFAULT_DELEGATION_MODE, SUBAGENT_TOOL_NAME } from "../types.js";
 import { updateLatestBroadcastTargets } from "./broadcast.js";
 import { makeDetailsFactory } from "./details.js";
-import { executeParallel, executeSingle } from "./execution.js";
+import { executeParallel } from "./execution.js";
+import { startBackground } from "./async-jobs.js";
+import { startedResult } from "./launch-result.js";
 import { formatModelFlag } from "./models.js";
 import {
   confirmProjectAgentsIfNeeded,
@@ -60,7 +62,7 @@ export function registerSubagentsTool(state: ExtensionState) {
       );
     },
 
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
+    async execute(toolCallId, params, signal, _onUpdate, ctx) {
       const toolResult = await (async () => {
         try {
           if (!state.canDelegate) throw new Error("Subagent delegation is disabled for this session.");
@@ -105,11 +107,9 @@ export function registerSubagentsTool(state: ExtensionState) {
           const executionMode = tasks.length === 1 ? "single" : "parallel";
           const topLevelBaseId = state.nextActiveSubagentId;
           state.nextActiveSubagentId += tasks.length;
-          const trackedOnUpdate = trackProgress(state, toolCallId, topLevelBaseId, ctx, onUpdate);
+          const trackedOnUpdate = trackProgress(state, toolCallId, topLevelBaseId, ctx);
 
-          // Apply whole-call security preflight only to tasks that can actually
-          // run. Cyclic tasks become aligned structured failures in the runner;
-          // they must not block legal siblings or consume durable names.
+          // Cyclic tasks must not block legal siblings or consume durable names.
           const cyclicTaskIndexes = new Set<number>();
           if (state.preventCycles) {
             const stack = new Set(state.ancestorAgentStack);
@@ -201,8 +201,7 @@ export function registerSubagentsTool(state: ExtensionState) {
               ({ task, index }) => !cyclicTaskIndexes.has(index) && agents.some((agent) => agent.name === task.agent),
             );
           if (resumePlan && resumePlan.tasks.every((task) => getTaskBranchSize(task) === undefined)) {
-            // Pre-budget sessions can resume their existing workers, but cannot
-            // acquire fresh descendant allowances through recovery.
+            // Legacy recovery cannot grant fresh descendant allowances.
             for (const { index } of runnable) {
               budgets[index] =
                 resumePlan.details?.results[index]?.budget ??
@@ -234,8 +233,7 @@ export function registerSubagentsTool(state: ExtensionState) {
           if (resumePlanIndex >= 0) state.pendingResumePlans.splice(resumePlanIndex, 1);
           state.recoveryPlansByToolCallId?.delete(toolCallId);
 
-          // Assign random durable human names unique across the whole tree. Resumed
-          // runs keep the names already recorded in the previous results.
+          // Names are unique across the tree and reused during recovery.
           const names: Array<string | undefined> = tasks.map(
             (_task, index) => resumePlan?.details?.results[index]?.name,
           );
@@ -283,45 +281,48 @@ export function registerSubagentsTool(state: ExtensionState) {
             throw new SubagentBudgetError(
               "Launch canceled after reservation. Reserved slots remain assigned to these branches.",
             );
-          if (tasks.length === 1) {
-            const [task] = tasks;
-            return executeSingle(
-              state,
-              task.agent,
-              task.task,
-              agents,
-              ctx.cwd,
-              signal,
-              trackedOnUpdate,
-              makeDetails,
-              resumePlan?.details?.results[0],
-              getSessionDirForTask(state, resumePlan?.previousToolCallId ?? toolCallId, 0),
-              !!resumePlan,
-              // Normal calls inherit the model that emitted this tool call;
-              // synthetic resume calls recover the preceding real model.
-              formatModelFlag(getParentModelForSubagent(state, ctx)),
-              topLevelBaseId,
-              names[0],
-              budgets[0],
-              task.intelligence,
-            );
-          }
-
-          return await executeParallel(
+          startBackground(
             state,
-            tasks,
-            agents,
-            ctx.cwd,
-            signal,
-            trackedOnUpdate,
-            makeDetails,
-            resumePlan?.details?.results,
-            (index) => getSessionDirForTask(state, resumePlan?.previousToolCallId ?? toolCallId, index),
-            !!resumePlan,
-            formatModelFlag(getParentModelForSubagent(state, ctx)),
-            topLevelBaseId,
-            { names, budgets },
+            toolCallId,
+            names.filter((name): name is string => !!name),
+            (jobSignal) =>
+              executeParallel(
+                state,
+                tasks,
+                agents,
+                ctx.cwd,
+                jobSignal,
+                trackedOnUpdate,
+                makeDetails,
+                resumePlan?.details?.results,
+                (index) => getSessionDirForTask(state, resumePlan?.previousToolCallId ?? toolCallId, index),
+                !!resumePlan,
+                formatModelFlag(getParentModelForSubagent(state, ctx)),
+                topLevelBaseId,
+                { jobId: toolCallId, names, budgets },
+              ),
           );
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Started ${tasks.length} subagent(s): ${tasks.map((task, index) => names[index] || task.agent || "worker").join(", ")}. Completion messages will arrive asynchronously. Keep working in parallel.`,
+              },
+            ],
+            details: Object.assign(
+              makeDetails(executionMode)(
+                tasks.map((task, index) =>
+                  startedResult(
+                    task,
+                    names[index],
+                    budgets[index],
+                    getSessionDirForTask(state, resumePlan?.previousToolCallId ?? toolCallId, index),
+                  ),
+                ),
+              ),
+              { asyncJobId: toolCallId },
+            ),
+          };
         } catch (err) {
           if (err instanceof SubagentBudgetError) {
             return {

@@ -23,6 +23,11 @@ function messageDedupKey(value: unknown): string {
     toolName: message.toolName,
     content: message.content,
     usage: message.usage,
+    // Completion text can repeat across resumes. Its durable execution identity
+    // and accounting must not disappear just because the worker said "done" again.
+    ...(message.role === "custom" && message.customType === "subagent_completion"
+      ? { completion: message.details }
+      : {}),
   });
 }
 

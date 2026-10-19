@@ -13,7 +13,12 @@ import type { ResumeModel, ResumeModelRegistry, SessionContext } from "./contrac
 import type { SyntheticResumeState } from "./models.js";
 import { resolveDelegationDepthConfig, type DelegationDepthConfig } from "./policy.js";
 
+import type { BackgroundJob } from "./async-jobs.js";
+
 export interface ExtensionState extends DelegationDepthConfig {
+  backgroundJobs: Map<string, BackgroundJob>;
+  /** Delivery token -> session generation, retained until the completion is consumed. */
+  pendingCompletionDeliveries: Map<string, number>;
   pi: ExtensionAPI;
   settings?: SubagentSettings;
   disabled?: boolean;
@@ -44,7 +49,11 @@ export interface ExtensionState extends DelegationDepthConfig {
   recoveryPlansByToolCallId?: Map<string, ResumableSubagentCall>;
   modelToRestoreAfterResume?: ResumeModel;
   approvedProjectAgentDirsForSession: Set<string>;
-  activeSubagents: Map<number, { agent: string; task: string; handle: RunningSubagentHandle; name?: string }>;
+  activeSubagents: Map<
+    number,
+    { agent: string; task: string; handle: RunningSubagentHandle; name?: string; startedAt?: number }
+  >;
+  onActivityChanged?: () => void;
   activeResumeNames: Set<string>;
   forcedErrorToolCallIds: Set<string>;
   activeSubagentUsageSummaries: Map<string, SubagentUsageSummary>;
@@ -78,6 +87,8 @@ export function createExtensionState(pi: ExtensionAPI): ExtensionState {
     currentOwnerId: "ephemeral",
     pendingResumePlans: [],
     approvedProjectAgentDirsForSession: new Set(),
+    backgroundJobs: new Map(),
+    pendingCompletionDeliveries: new Map(),
     activeSubagents: new Map(),
     activeResumeNames: new Set(),
     forcedErrorToolCallIds: new Set(),

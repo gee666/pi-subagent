@@ -35,8 +35,13 @@ function summary(value: SubagentUsageSummary | undefined): SubagentUsageSummary 
   };
 }
 
-function strings(value: Record<string, unknown>, keys: string[]): Record<string, string> {
-  return Object.fromEntries(keys.flatMap((key) => (typeof value[key] === "string" ? [[key, value[key]]] : [])));
+function strings(value: object, keys: string[]): Record<string, string> {
+  return Object.fromEntries(
+    keys.flatMap((key) => {
+      const item: unknown = Reflect.get(value, key);
+      return typeof item === "string" ? [[key, item]] : [];
+    }),
+  );
 }
 
 /** These tasks are structural matching keys, not tool-argument previews. Keep them exact. */
@@ -52,9 +57,20 @@ function delegationArguments(value: unknown): Record<string, unknown> {
   return result;
 }
 
+// Finalized transcript messages are immutable. Cache only their wire projection,
+// never mutable SingleResult objects. Weak keys release it with the transcript.
+const projectedMessages = new WeakMap<object, TranscriptMessage | null>();
+
 function messagesForProgress(value: unknown): TranscriptMessage[] {
   const messages: TranscriptMessage[] = [];
-  for (const message of recordArray(value)) {
+  for (const message of Array.isArray(value) ? value : []) {
+    if (!isRecord(message)) continue;
+    if (projectedMessages.has(message)) {
+      const projected = projectedMessages.get(message);
+      if (projected) messages.push(projected);
+      continue;
+    }
+    const start = messages.length;
     if (message.role === "assistant") {
       const content = recordArray(message.content)
         .filter((part) => part.type === "toolCall" && isSubagentToolName(part.name))
@@ -64,17 +80,21 @@ function messagesForProgress(value: unknown): TranscriptMessage[] {
           arguments: delegationArguments(part.arguments),
         }));
       if (content.length) messages.push({ role: "assistant", content });
-    } else if (message.role === "toolResult" && isSubagentToolName(message.toolName)) {
+    } else if (
+      (message.role === "toolResult" && isSubagentToolName(message.toolName)) ||
+      (message.role === "custom" && message.customType === "subagent_completion")
+    ) {
       // Invalid details cannot supply tree/accounting information. Never forward
       // their original content as a fallback, since it can include arbitrary blobs.
       if (!isSubagentDetails(message.details)) continue;
       messages.push({
-        role: "toolResult",
-        ...strings(message, ["toolName", "toolCallId"]),
+        role: message.role,
+        ...strings(message, ["toolName", "toolCallId", "customType"]),
         isError: message.isError === true,
         details: slimDetailsForProgress(message.details),
       });
     }
+    projectedMessages.set(message, messages.length > start ? messages[messages.length - 1] : null);
   }
   return messages;
 }
@@ -97,6 +117,7 @@ function resultForProgress(result: SingleResult): SingleResult {
     stopReason: result.stopReason,
     model: result.model,
     startedAt: result.startedAt,
+    ...(result.idle ? { idle: true } : {}),
     lastActionAt: result.lastActionAt,
     // Identity references preserve usage-count deduplication across resumes.
     budget: result.budget ? { directory: result.budget.directory } : undefined,
@@ -122,6 +143,10 @@ function resultForProgress(result: SingleResult): SingleResult {
 /** Transient wire projection only. Never use this in durable results or saved transcripts. */
 export function slimDetailsForProgress(details: SubagentDetails): SubagentDetails {
   return {
+    ...strings(details, ["asyncJobId"]),
+    ...(Number.isInteger(Reflect.get(details, "asyncTaskIndex"))
+      ? { asyncTaskIndex: Reflect.get(details, "asyncTaskIndex") }
+      : {}),
     mode: details.mode,
     delegationMode: details.delegationMode,
     projectAgentsDir: null,

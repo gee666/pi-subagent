@@ -8,7 +8,7 @@ import { createBudget, reserveSubagentBudgets, readBudget, SUBAGENT_BUDGET_CUSTO
 import { allocateSubagentNames, readNamesRegistry, SUBAGENT_NAMES_CUSTOM_TYPE } from "../names.js";
 
 /** Exercise real registered prepareArguments -> execute callbacks with no model or network calls. */
-test("registered resume callbacks accept strict-provider null budgets for batches, objects and shorthand", async () => {
+test("registered messaging validates arguments before side effects and retains saved settings and allowances", async () => {
   fs.mkdirSync("tmp", { recursive: true });
   const root = fs.mkdtempSync(path.resolve("tmp/resume-arguments-"));
   const log = path.join(root, "calls.jsonl");
@@ -100,24 +100,21 @@ test("registered resume callbacks accept strict-provider null budgets for batche
           .split("\n")
           .map((line) => JSON.parse(line))
       : [];
-  const item = { subagent: names[0], task: "follow up", max_subagents_allowed: null };
+  const item = { name: names[0], message: "follow up" };
   try {
     await host.emit("session_start", {}, ctx);
     const before = readBudget(parentBudget).remaining;
+    assert.equal(host.tools.has("resume_subagents"), false);
     for (const args of [
-      { resumes: [{ ...item }, { ...item, subagent: names[1] }] },
-      { resumes: [item] },
-      { resumes: item },
       item,
-      { resumes: [{ subagent: names[0], task: "omitted allowance" }] },
+      { name: names[1], message: "second worker" },
+      { ...item, message: "omitted allowance" },
     ]) {
       const snapshot = structuredClone(args);
-      const result = await host.call("resume_subagents", "valid", args, ctx);
+      const result = await host.callAndWait("message_subagent", "valid", args, ctx);
       assert.equal(result.isError, false, JSON.stringify(result.content));
-      assert.equal(
-        result.details.results.length,
-        "resumes" in args && Array.isArray(args.resumes) ? args.resumes.length : 1,
-      );
+      assert.equal(result.details.results.length, 1);
+      assert.equal(result.details.results[0].name, args.name);
       for (const resultItem of result.details.results) {
         assert.equal(resultItem.intelligence, "senior");
         assert.equal(resultItem.model, "saved/original");
@@ -125,11 +122,11 @@ test("registered resume callbacks accept strict-provider null budgets for batche
       }
       assert.deepEqual(args, snapshot, "preparation must not mutate recorded model arguments");
       assert.equal(readBudget(parentBudget).remaining, before);
-      for (const budget of budgets) assert.equal(readBudget(budget).limit, 1, "null means keep, never zero");
+      for (const budget of budgets) assert.equal(readBudget(budget).limit, 1, "omission means keep, never zero");
     }
     for (const invalid of [
-      { ...item, subagent: null },
-      { ...item, task: null },
+      ...[null, "", " "].map((name) => ({ ...item, name })),
+      ...[null, "", " "].map((message) => ({ ...item, message })),
       ...["senior", null, 7].map((intelligence) => ({ ...item, intelligence })),
       ...[-1, 1.5, "1", false, Number.MAX_SAFE_INTEGER].map((max_subagents_allowed) => ({
         ...item,
@@ -139,27 +136,21 @@ test("registered resume callbacks accept strict-provider null budgets for batche
     ]) {
       const beforeNames = fs.readFileSync(namesFile, "utf8");
       const beforeCalls = calls().length;
-      const badSibling = invalid.subagent === null ? invalid : { ...invalid, subagent: names[1] };
-      for (const args of [
-        invalid,
-        { resumes: invalid },
-        { resumes: [invalid] },
-        { resumes: [item, badSibling] },
-        { resumes: [badSibling, item] },
-      ]) {
-        await assert.rejects(host.call("resume_subagents", "invalid", args, ctx), (error: Error) => {
+      for (const args of [invalid, { resumes: invalid }, { resumes: [item, invalid] }, [item, invalid]]) {
+        await assert.rejects(host.call("message_subagent", "invalid", args, ctx), (error: Error) => {
           assert.match(error.message, /Invalid tool arguments/);
           assert.notEqual(error.message, "Assert");
           return true;
         });
       }
-      assert.equal(calls().length, beforeCalls, "invalid batches must not spawn any worker");
+      assert.equal(calls().length, beforeCalls, "invalid messaging must not spawn any worker");
       assert.equal(fs.readFileSync(namesFile, "utf8"), beforeNames, "invalid calls must not change names or markers");
       assert.equal(readBudget(parentBudget).remaining, before);
     }
-    const zero = await host.call("resume_subagents", "zero", { resumes: [{ ...item, max_subagents_allowed: 0 }] }, ctx);
+    const zero = await host.callAndWait("message_subagent", "zero", { ...item, max_subagents_allowed: 0 }, ctx);
     assert.equal(zero.isError, false, JSON.stringify(zero.content));
     assert.equal(readBudget(budgets[0]).limit, 0, "explicit zero remains an override");
+    assert.equal(calls().length, 4, "three follow-ups and an explicit zero override must execute");
     assert.ok(
       calls().every(
         (call) =>

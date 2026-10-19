@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { normalizeContext, validateToolArguments, type Provider } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { discoverAgents } from "../agents.js";
@@ -54,8 +55,14 @@ for (const [customTypesAvailable, hiddenIntelligence] of [
     try {
       let tool: ToolDefinition | undefined;
       let provider: Provider | undefined;
+      const completions: Array<Parameters<ExtensionAPI["sendMessage"]>[0]> = [];
       const pi = hostDouble<ExtensionAPI>({
         getFlag: () => undefined,
+        sendMessage(message, options) {
+          assert.equal(message.customType, "subagent_completion");
+          assert.deepEqual(options, { deliverAs: "steer", triggerTurn: true });
+          completions.push(message);
+        },
         registerTool(registered) {
           tool = registered as unknown as ToolDefinition;
         },
@@ -166,8 +173,16 @@ for (const [customTypesAvailable, hiddenIntelligence] of [
         );
         assert.notEqual("isError" in result && result.isError, true, JSON.stringify(result.content));
         assert.ok(isSubagentDetails(result.details));
+        assert.equal(result.details.results[0].exitCode, -1);
+        await Promise.all([...state.backgroundJobs.values()].map((job) => job.promise));
+        const deadline = Date.now() + 10000;
+        while (completions.length === 0 && Date.now() < deadline) await delay(10);
+        assert.equal(completions.length, 1);
+        const completion = completions.shift()!;
+        assert.ok(isSubagentDetails(completion.details));
         const saved = plans[index].details!.results[0];
-        const recovered = result.details.results[0];
+        const recovered = completion.details.results[0];
+        assert.equal(recovered.exitCode, 0);
         assert.equal(recovered.agent, saved.agent);
         assert.equal(recovered.name, saved.name);
         assert.equal(recovered.sessionDir, saved.sessionDir);

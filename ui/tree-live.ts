@@ -39,6 +39,10 @@ function formatToolArgPreview(toolName: unknown, rawArgs: unknown): string {
         .filter(Boolean)
         .join(", ");
     }
+    case "message_subagent":
+      return truncateTo(`${stringValue(args.name)}: ${stringValue(args.message).replace(/\s+/g, " ").trim()}`, 80);
+    case "message_lead_agent":
+      return truncateTo(stringValue(args.message).replace(/\s+/g, " ").trim(), 80);
     case "resume_subagents": {
       const raw = args.resumes;
       const resumes = Array.isArray(raw) ? raw : raw && typeof raw === "object" ? [raw] : [];

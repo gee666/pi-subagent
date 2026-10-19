@@ -1,3 +1,5 @@
+import { publishCompletion } from "./completion.js";
+import { notifyLead } from "./async-jobs.js";
 import { type AgentConfig } from "../agents.js";
 import { type SubagentBudget } from "../budget.js";
 import { isFinishedResult } from "../resume.js";
@@ -72,7 +74,13 @@ export async function executeSingle(
       intelligencePresets: state.intelligencePresets,
       onHandle: (handle) => {
         activeId = topLevelBaseId;
-        state.activeSubagents.set(activeId, { agent: agentName, task, handle, name: subagentName });
+        state.activeSubagents.set(activeId, {
+          agent: agentName,
+          task,
+          handle,
+          name: subagentName,
+          startedAt: Date.now(),
+        });
         updateLatestBroadcastTargets(state, undefined);
       },
     });
@@ -122,12 +130,14 @@ export async function executeParallel(
   fallbackModel: string | undefined,
   topLevelBaseId: number,
   extras?: {
+    jobId?: string;
     names?: Array<string | undefined>;
     rawPrompts?: boolean;
     budgets?: Array<SubagentBudget | undefined>;
     resumeSettings?: Array<import("../storage/name-records.js").SubagentModelSettings>;
   },
 ) {
+  const generation = state.lifecycleGeneration;
   const taskIds = new Map<number, number>();
   try {
     return await executeParallelSubprocess(
@@ -149,18 +159,39 @@ export async function executeParallel(
       (index, task, handle) => {
         const id = topLevelBaseId + index;
         taskIds.set(index, id);
-        state.activeSubagents.set(id, { agent: task.agent, task: task.task, handle, name: extras?.names?.[index] });
+        state.activeSubagents.set(id, {
+          agent: task.agent,
+          task: task.task,
+          handle,
+          name: extras?.names?.[index],
+          startedAt: Date.now(),
+        });
         updateLatestBroadcastTargets(state, undefined);
       },
       (index) => {
         const id = taskIds.get(index);
         if (id !== undefined) {
           state.activeSubagents.delete(id);
+          taskIds.delete(index);
           updateLatestBroadcastTargets(state, undefined);
         }
       },
       {
         ...extras,
+        compactCompletedResults: true,
+        cancelOnError: true,
+        onResult: (index, result) => {
+          const job = extras?.jobId ? state.backgroundJobs.get(extras.jobId) : undefined;
+          if (job && result.name) job.names = job.names.filter((name) => name !== result.name);
+          publishCompletion(
+            state,
+            result,
+            generation,
+            extras?.jobId ? { jobId: extras.jobId, taskIndex: index } : undefined,
+          );
+        },
+        onLeadMessage: (index, task, message) =>
+          notifyLead(state, `Message from subagent ${extras?.names?.[index] ?? task.agent}:\n${message}`, generation),
         settings: state.settings,
         namesFile: state.currentNamesFile || undefined,
         intelligencePresets: state.intelligencePresets,

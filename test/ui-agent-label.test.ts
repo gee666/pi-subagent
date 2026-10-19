@@ -155,9 +155,9 @@ test("picker and pager titles use the same optional type labels", () => {
     const picker = new SubagentPicker({ ...common, items: [item], onPick() {} });
     const pager = new SubagentPager({ ...common, detail: detailFor(item), onClose() {} });
     assert.ok(picker.render(120).join("\n").includes(label));
-    assert.ok(pager.render(120)[0].includes(`${label} • turn 1/1`));
+    assert.ok(pager.render(120)[0].includes(`${label} • activity`));
     pager.handleInput("T");
-    assert.ok(pager.render(120)[0].includes(`${label} • turn 1/1 • tools`));
+    assert.ok(pager.render(120)[0].includes(`${label} • activity • tools`));
     if (intelligence) assert.deepEqual(filterPickerItems([item], "senior"), [item]);
     for (const component of [picker, pager]) {
       for (const width of [0, 1, 12, 24, 60]) {

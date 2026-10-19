@@ -7,6 +7,7 @@ export interface DetailChildRef {
 }
 
 export type DetailEvent =
+  | { type: "message"; label: string; text: string; at?: number; isError?: boolean; children?: DetailChildRef[] }
   | { type: "thinking"; text: string }
   | { type: "text"; text: string; assistantTurn?: number }
   | { type: "tool"; name: string; preview: string; arguments: string; isError?: boolean; result?: string }

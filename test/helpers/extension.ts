@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import * as path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { createFauxCore, fauxAssistantMessage, type Provider, type Model, type Api } from "@earendil-works/pi-ai";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type {
@@ -12,7 +13,7 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import subagentExtension from "../../index.js";
-import { buildSubagentDetails, isSubagentDetails, type SubagentDetails } from "../../types.js";
+import { buildSubagentDetails, isSubagentDetails, isResultError, type SubagentDetails } from "../../types.js";
 import { makeResult } from "./results.js";
 import { serializedDetails } from "./json.js";
 
@@ -88,6 +89,7 @@ type EventName = ExtensionEvent["type"];
 type EventOf<K extends EventName> = Extract<ExtensionEvent, { type: K }>;
 type Handler<K extends EventName> = (event: EventOf<K>, ctx: ExtensionContext) => unknown;
 const defaults = {
+  input: { type: "input", text: "", source: "rpc" },
   session_start: { type: "session_start", reason: "new" },
   session_shutdown: { type: "session_shutdown", reason: "quit" },
   session_tree: { type: "session_tree", newLeafId: null, oldLeafId: null },
@@ -109,7 +111,9 @@ const defaults = {
     },
   },
 } satisfies {
-  [K in "session_start" | "session_shutdown" | "session_tree" | "message_end" | "before_agent_start"]: EventOf<K>;
+  [
+    K in "input" | "session_start" | "session_shutdown" | "session_tree" | "message_end" | "before_agent_start"
+  ]: EventOf<K>;
 };
 
 type TSchema = ToolDefinition["parameters"];
@@ -125,7 +129,15 @@ export function createExtensionHarness(options: { confirmAnswer?: boolean } = {}
   const providers = new Map<string, Provider>();
   const tools = new Map<string, CapturedTool>();
   let activeTools = ["read", "bash", "subagent"];
-  const calls = { setModel: [] as Model<Api>[], sentUserMessages: [] as string[], confirms: 0 };
+  const calls = {
+    setModel: [] as Model<Api>[],
+    sentUserMessages: [] as string[],
+    sentMessages: [] as Array<{
+      message: Parameters<ExtensionAPI["sendMessage"]>[0];
+      options: Parameters<ExtensionAPI["sendMessage"]>[1];
+    }>,
+    confirms: 0,
+  };
   let entriesToAppend: SessionEntry[] | undefined;
 
   function on<K extends EventName>(name: K, handler: Handler<K>): void {
@@ -173,6 +185,9 @@ export function createExtensionHarness(options: { confirmAnswer?: boolean } = {}
       sendUserMessage(text) {
         assert.equal(typeof text, "string");
         if (typeof text === "string") calls.sentUserMessages.push(text);
+      },
+      sendMessage(message, options) {
+        calls.sentMessages.push({ message, options });
       },
       appendEntry(customType, data) {
         entriesToAppend?.push(customEntry(customType, data));
@@ -236,6 +251,64 @@ export function createExtensionHarness(options: { confirmAnswer?: boolean } = {}
       const results: unknown[] = [];
       for (const handler of handlers.get(name) ?? []) results.push(await handler(event, ctx));
       return results;
+    },
+    /** Keep call() immediate; completion-sensitive tests opt into this async boundary. */
+    async callAndWait(name: string, id: string, args: unknown, ctx: ExtensionContext) {
+      const after = calls.sentMessages.length;
+      const started = await this.call(name, id, args, ctx);
+      if (started.isError) return { ...started, started, completions: [] };
+      assert.match(JSON.stringify(started.content), /Started .*subagent|started in the background/);
+      for (const result of started.details.results) assert.equal(result.exitCode, -1);
+      const expected = name === "subagents" ? started.details.results.length : 1;
+      assert.ok(expected > 0);
+      const deadline = Date.now() + 10000;
+      let completions = calls.sentMessages.slice(after);
+      while (completions.length < expected && Date.now() < deadline) {
+        await delay(10);
+        completions = calls.sentMessages.slice(after);
+      }
+      assert.equal(completions.length, expected, `Missing completion for ${name} ${id}`);
+      const results = completions.flatMap(({ message, options }) => {
+        assert.equal(message.customType, "subagent_completion");
+        assert.deepEqual(options, { deliverAs: "steer", triggerTurn: true });
+        assert.equal(message.display, true);
+        assert.ok(isSubagentDetails(message.details));
+        assert.equal(message.details.results.length, 1);
+        assert.notEqual(message.details.results[0].exitCode, -1);
+        return message.details.results;
+      });
+      // Completion order is not launch order. Preserve the call's task alignment.
+      if (name === "message_subagent") {
+        assert.ok(args && typeof args === "object" && "name" in args);
+        assert.equal(results[0].name, args.name, "completion must belong to the messaged worker");
+      }
+      const ordered =
+        name === "subagents"
+          ? started.details.results.map((pending) => {
+              const index = results.findIndex((result) =>
+                pending.name
+                  ? result.name === pending.name
+                  : result.agent === pending.agent && result.task === pending.task,
+              );
+              assert.notEqual(index, -1, "completion must match a launched task");
+              return results.splice(index, 1)[0];
+            })
+          : results;
+      return {
+        content: completions.map(({ message }) => {
+          assert.ok(typeof message.content === "string");
+          return { type: "text" as const, text: message.content };
+        }),
+        details: buildSubagentDetails(
+          started.details.mode,
+          started.details.delegationMode,
+          started.details.projectAgentsDir,
+          ordered,
+        ),
+        isError: ordered.some(isResultError),
+        started,
+        completions,
+      };
     },
     async call(name: string, id: string, args: unknown, ctx: ExtensionContext) {
       const tool = tools.get(name);

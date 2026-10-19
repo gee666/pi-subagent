@@ -1,5 +1,5 @@
 import { Key, matchesKey } from "@earendil-works/pi-tui";
-import { getDetailChildren, getToolListRows, getTurnTools } from "../detail.js";
+import { getActivityBlock, getDetailChildren, getToolListRows, getTurnTools } from "../detail.js";
 
 import { classifyKey, type KeyAction } from "./overlay-input.js";
 import { PagerView } from "./pager-view.js";
@@ -18,12 +18,11 @@ export class SubagentPager extends PagerView {
       } else if (this.mode === "tool-detail") {
         this.setMode("tools");
       } else if (this.mode === "tools" || this.mode === "children") {
-        this.setMode("turn");
+        this.setMode("activity");
       } else if (this.parentStack.length > 0) {
         const parent = this.parentStack.pop();
         if (!parent) return;
-        this.detail = parent.detail;
-        this.turnIndex = parent.turnIndex;
+        this.detail = parent;
         this.toolRow = 0;
         this.childIndex = 0;
         this.resetView();
@@ -47,7 +46,7 @@ export class SubagentPager extends PagerView {
       return;
     }
 
-    if (this.mode === "turn") this.handleTurnAction(action);
+    if (this.mode === "activity") this.handleActivityAction(action);
     else if (this.mode === "tools") this.handleToolsAction(action);
     else if (this.mode === "children") this.handleChildrenAction(action);
     else this.handleDetailAction(action);
@@ -55,16 +54,10 @@ export class SubagentPager extends PagerView {
     this.options.requestRender();
   }
 
-  private handleTurnAction(action: KeyAction): void {
+  private handleActivityAction(action: KeyAction): void {
     switch (action) {
-      case "left":
-        this.setTurn(-1);
-        break;
-      case "right":
-        this.setTurn(1);
-        break;
       case "tools":
-        if (getTurnTools(this.detail.blocks[this.turnIndex]).length > 0) this.setMode("tools");
+        if (getTurnTools(getActivityBlock(this.detail)).length > 0) this.setMode("tools");
         break;
       case "children":
         if (getDetailChildren(this.detail).length > 0) this.setMode("children");
@@ -75,7 +68,7 @@ export class SubagentPager extends PagerView {
   }
 
   private handleToolsAction(action: KeyAction): void {
-    const rows = getToolListRows(this.detail.blocks[this.turnIndex]);
+    const rows = getToolListRows(getActivityBlock(this.detail));
     switch (action) {
       case "up":
         this.toolRow -= 1;
@@ -109,7 +102,7 @@ export class SubagentPager extends PagerView {
         break;
       }
       case "left":
-        this.setMode("turn");
+        this.setMode("activity");
         break;
     }
     this.clamp();
@@ -147,7 +140,7 @@ export class SubagentPager extends PagerView {
         this.enterSelectedChild();
         return;
       case "left":
-        this.setMode("turn");
+        this.setMode("activity");
         return;
     }
     this.clamp();
@@ -170,12 +163,11 @@ export class SubagentPager extends PagerView {
       this.status = `Cannot load subagent ${name}.`;
       return;
     }
-    this.parentStack.push({ detail: this.detail, turnIndex: this.turnIndex });
+    this.parentStack.push(this.detail);
     this.detail = next;
-    this.turnIndex = Math.max(0, next.blocks.length - 1);
     this.toolRow = 0;
     this.childIndex = 0;
-    this.setMode("turn");
+    this.setMode("activity");
   }
 
   private handleDetailAction(action: KeyAction): void {

@@ -212,7 +212,7 @@ test("pager classifies navigation keys and wraps search matches", () => {
   assert.equal(findMatch(["one", "target", "three"], "missing", 0, 1), -1);
 });
 
-test("pager navigates turns, tools, and named children", () => {
+test("pager groups messages and navigates tools and named children", () => {
   const childDetail: SubagentDetail = {
     ...detailFixture,
     name: "Maria",
@@ -223,16 +223,19 @@ test("pager navigates turns, tools, and named children", () => {
   const pager = new SubagentPager({
     detail: detailFixture,
     resolveDetail: (name) => (name === "Maria" ? childDetail : undefined),
-    getRows: () => 30,
+    getRows: () => 60,
     theme: { fg: (_color, text) => text, bold: (text) => text },
     requestRender: () => {},
     onClose: () => {},
   });
-  assert.match(pager.render(100).join("\n"), /Resume final response/);
+  const activity = pager.render(100).join("\n");
+  assert.match(activity, /Initial final response[\s\S]*MESSAGE 2[\s\S]*Resume final response/);
+  assert.match(activity, /Olga \(writer\) • activity/);
+  assert.doesNotMatch(activity, /←\/→ turn/);
   pager.handleInput("\u001b[D");
-  assert.match(pager.render(100).join("\n"), /Initial final response/);
+  assert.equal(pager.render(100).join("\n"), activity);
   pager.handleInput("T");
-  assert.match(pager.render(100).join("\n"), /2 tool calls in this turn/);
+  assert.match(pager.render(100).join("\n"), /2 tool calls in this activity/);
   pager.handleInput("\r");
   const tool = pager.render(100).join("\n");
   assert.match(tool, /Tool 1: read/);
@@ -248,7 +251,7 @@ test("pager navigates turns, tools, and named children", () => {
   pager.handleInput("\u001b"); // back to Olga's overview
   assert.match(pager.render(100).join("\n"), /Olga \(writer\)/);
   pager.handleInput("T");
-  assert.match(pager.render(100).join("\n"), /2 tool calls in this turn/);
+  assert.match(pager.render(100).join("\n"), /2 tool calls in this activity/);
 
   pager.handleInput("/");
   for (const char of "subagents") pager.handleInput(char);

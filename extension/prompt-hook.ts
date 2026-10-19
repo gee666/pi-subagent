@@ -1,5 +1,5 @@
 import { budgetPrompt } from "../budget.js";
-import { RESUME_SUBAGENTS_TOOL_NAME, SUBAGENT_TOOL_NAME } from "../types.js";
+import { MESSAGE_SUBAGENT_TOOL_NAME, SUBAGENT_TOOL_NAME } from "../types.js";
 import { resumableSubagentsDisabled } from "./policy.js";
 import { getSubagentsToolDescription } from "./prompts.js";
 import { ensureBudget } from "./runtime.js";
@@ -44,22 +44,16 @@ ${
 }`;
       const resumeGuidance = resumableSubagentsDisabled(state.settings)
         ? ""
-        : (state.configuredToolPrompts[RESUME_SUBAGENTS_TOOL_NAME] ??
-          `### Resumable subagents
+        : (state.configuredToolPrompts[MESSAGE_SUBAGENT_TOOL_NAME] ??
+          `### Subagent messages
 
-Every subagent run is assigned a unique, durable human name (e.g. \`John\`,
-\`Maria\`) which is returned together with its results. Use the
-\`resume_subagents\` tool to continue named subagents with a new task while
-keeping their full previous context:
+Launches return immediately with durable worker names. Each worker's completion arrives as a steering message, waking you if idle. Keep working rather than waiting on the launch tool.
 
-\`\`\`json
-{ "resumes": [{ "subagent": "John", "task": "Now also update the tests." }] }
-\`\`\`
+Use \`message_subagent\` with { "name": "John", "message": "Now also update the tests." } to steer a running worker or wake an idle worker with its saved context and original model settings.
 
-${hasAgentTypes ? "- `agent` in `subagents` selects an agent type.\n" : ""}- \`subagent\` in \`resume_subagents\` is the unique name of an already-run worker.
-- All resumes in one call run in parallel.
-- Optional \`max_subagents_allowed\` changes a worker's lifetime descendant cap, excluding itself. Omit it to keep the current allowance. Past launches and assigned slots still count; increases reserve extra slots from its original launcher.
-- Names survive restarts; you can resume them in a later session of this conversation.`);
+Optional \`max_subagents_allowed\` changes the lifetime descendant cap without resetting spending. Omit it to keep the current allowance. Increases reserve slots from the original launcher; decreases do not refund slots. Names survive restarts.
+
+Workers can call \`message_lead_agent\` to send their immediate lead a steering message without waiting for a reply. Reply with \`message_subagent\`; the reply wakes an idle worker.`);
       return {
         systemPrompt: `${event.systemPrompt}\n\n## Available Subagents
 

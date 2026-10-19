@@ -228,7 +228,7 @@ describe("subagent usage guidance", () => {
   test("allows review and savings, explains blocking, and requires explicit allowances", () => {
     const description = getSubagentsToolDescription();
     assert.match(description, /for independent review/);
-    assert.match(description, /Calls block until all tasks finish; put parallel tasks in one array/);
+    assert.match(description, /Returns their names immediately, without waiting for completion/);
     assert.match(description, /parallel work will save substantial time/);
     assert.match(description, /crowd out your context and force compaction/);
     assert.match(description, /Every new agent costs money/);

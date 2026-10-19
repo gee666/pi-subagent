@@ -117,7 +117,7 @@ test("named resumes retain original settings across preset, parent, definition, 
     assert.match(JSON.stringify(initialSchema), /Small changes/);
     await host.emit("before_agent_start", {}, ctx);
     const budget = findPersistedBudget(entries)!;
-    await assert.rejects(host.call("subagents", "bad", { tasks: [task("bad", "missing")] }, ctx));
+    await assert.rejects(host.callAndWait("subagents", "bad", { tasks: [task("bad", "missing")] }, ctx));
     for (const missing of [{}, { intelligence: null }]) {
       const invalid = { ...task("missing choice"), ...missing };
       for (const tasks of [
@@ -125,13 +125,13 @@ test("named resumes retain original settings across preset, parent, definition, 
         [task("valid choice", "junior"), invalid],
         [invalid, task("valid choice", "expert")],
       ]) {
-        await assert.rejects(host.call("subagents", "missing-launch-choice", { tasks }, ctx));
+        await assert.rejects(host.callAndWait("subagents", "missing-launch-choice", { tasks }, ctx));
       }
     }
     assert.equal(readBudget(budget).remaining, 10);
     assert.equal(calls().length, 0);
     assert.equal(fs.existsSync(namesFile), false);
-    const single = await host.call("subagents", "single", { tasks: [task("single", "junior")] }, ctx);
+    const single = await host.callAndWait("subagents", "single", { tasks: [task("single", "junior")] }, ctx);
     assert.equal(single.isError, false, JSON.stringify(single.content));
     assert.equal(flag(calls()[0].args, "--provider"), "chosen");
     assert.equal(flag(calls()[0].args, "--model"), "org/model");
@@ -146,7 +146,7 @@ test("named resumes retain original settings across preset, parent, definition, 
     assert.ok(
       renderResult(single, false, theme).render(160).join("\n").includes(`${name} (Junior/intelligence-worker)`),
     );
-    const parallel = await host.call(
+    const parallel = await host.callAndWait(
       "subagents",
       "parallel",
       { tasks: [task("expert work", "expert"), task("junior work", "junior")] },
@@ -162,19 +162,19 @@ test("named resumes retain original settings across preset, parent, definition, 
     assert.equal(flag(junior.args, "--provider"), "chosen");
     const before = readBudget(budget).remaining;
     await assert.rejects(
-      host.call(
-        "resume_subagents",
+      host.callAndWait(
+        "message_subagent",
         "bad-resume",
-        { resumes: [{ subagent: name, task: "bad", intelligence: "missing", max_subagents_allowed: 2 }] },
+        { name, message: "bad", intelligence: "missing", max_subagents_allowed: 2 },
         ctx,
       ),
     );
     const beforeCalls = calls().length;
     const beforeNames = fs.readFileSync(namesFile, "utf8");
-    assert.equal(JSON.stringify(host.tool("resume_subagents").parameters).includes('"intelligence"'), false);
+    assert.equal(JSON.stringify(host.tool("message_subagent").parameters).includes('"intelligence"'), false);
     for (const intelligence of ["junior", "missing", null, 7]) {
-      const invalid = { subagent: name, task: "invalid choice", max_subagents_allowed: 2, intelligence };
-      const valid = { subagent: parallel.details.results[0].name, task: "follow up" };
+      const invalid = { name, message: "invalid choice", max_subagents_allowed: 2, intelligence };
+      const valid = { name: parallel.details.results[0].name, message: "follow up" };
       for (const args of [
         invalid,
         { resumes: invalid },
@@ -182,24 +182,26 @@ test("named resumes retain original settings across preset, parent, definition, 
         { resumes: [valid, invalid] },
         { resumes: [invalid, valid] },
       ]) {
-        await assert.rejects(host.call("resume_subagents", "invalid-resume-choice", args, ctx));
+        await assert.rejects(host.callAndWait("message_subagent", "invalid-resume-choice", args, ctx));
       }
     }
     assert.equal(readBudget(budget).remaining, before);
     assert.equal(calls().length, beforeCalls, "invalid resume batches must not spawn any worker");
     assert.equal(fs.readFileSync(namesFile, "utf8"), beforeNames, "invalid resumes must not change saved names");
-    const resumed = await host.call(
-      "resume_subagents",
-      "resumed",
-      {
-        resumes: [
-          { subagent: name, task: "resume junior" },
-          { subagent: parallel.details.results[0].name, task: "resume expert" },
-        ],
-      },
+    const resumed = await host.callAndWait(
+      "message_subagent",
+      "resumed-junior",
+      { name, message: "resume junior" },
+      ctx,
+    );
+    const resumedExpert = await host.callAndWait(
+      "message_subagent",
+      "resumed-expert",
+      { name: parallel.details.results[0].name, message: "resume expert" },
       ctx,
     );
     assert.equal(resumed.isError, false, JSON.stringify(resumed.content));
+    assert.equal(resumedExpert.isError, false, JSON.stringify(resumedExpert.content));
     const selectedResume = calls().find((call) => call.prompt === "resume expert")!;
     const juniorResume = calls().find((call) => call.prompt === "resume junior")!;
     assert.equal(flag(selectedResume.args, "--model"), "big");
@@ -212,7 +214,7 @@ test("named resumes retain original settings across preset, parent, definition, 
     assert.equal(flag(juniorResume.args, "--provider"), "chosen");
     assert.equal(readBudget(budget).remaining, before);
     assert.equal(resumed.details.results[0].intelligence, "junior");
-    assert.equal(resumed.details.results[1].intelligence, "expert");
+    assert.equal(resumedExpert.details.results[0].intelligence, "expert");
     assert.equal(single.details.results[0].intelligence, "junior", "resume cannot rewrite earlier results");
     const detail = buildSubagentDetail(readNamesRegistry(namesFile).agents[name]);
     assert.deepEqual(
@@ -243,10 +245,10 @@ test("named resumes retain original settings across preset, parent, definition, 
     fs.writeFileSync(config, JSON.stringify({ "subagents-models": [{ renamed: settings[0].junior }] }));
     await host.emit("session_start", {}, ctx);
     assert.notEqual(host.tool("subagents").parameters, initialSchema);
-    for (const tool of ["subagents", "resume_subagents"]) {
+    for (const tool of ["subagents", "message_subagent"]) {
       assert.equal(JSON.stringify(host.tool(tool).parameters).includes('"intelligence"'), false);
     }
-    const sole = await host.call(
+    const sole = await host.callAndWait(
       "subagents",
       "sole",
       { tasks: [{ ...task("automatic sole"), intelligence: null }] },
@@ -255,10 +257,10 @@ test("named resumes retain original settings across preset, parent, definition, 
     assert.equal(sole.isError, false, JSON.stringify(sole.content));
     assert.equal(sole.details.results[0].intelligence, "renamed");
     assert.equal(flag(calls().at(-1)!.args, "--model"), "org/model");
-    const soleResume = await host.call(
-      "resume_subagents",
+    const soleResume = await host.callAndWait(
+      "message_subagent",
       "sole-resume",
-      { resumes: { subagent: name, task: "automatic resume" } },
+      { name, message: "automatic resume" },
       ctx,
     );
     assert.equal(soleResume.details.results[0].intelligence, "junior");
@@ -267,7 +269,7 @@ test("named resumes retain original settings across preset, parent, definition, 
     process.env.PI_SUBAGENT_INTELLIGENCE = "0";
     await host.emit("session_start", {}, ctx);
     assert.equal(JSON.stringify(host.tool("subagents").parameters).includes('"intelligence"'), false);
-    const disabled = await host.call(
+    const disabled = await host.callAndWait(
       "subagents",
       "disabled",
       { tasks: [{ ...task("disabled work"), intelligence: null }] },
@@ -276,10 +278,10 @@ test("named resumes retain original settings across preset, parent, definition, 
     assert.equal(disabled.details.results[0].intelligence, undefined);
     assert.equal(flag(calls().at(-1)!.args, "--model"), "changed-parent/different");
     const disabledName = disabled.details.results[0].name!;
-    const disabledResume = await host.call(
-      "resume_subagents",
+    const disabledResume = await host.callAndWait(
+      "message_subagent",
       "disabled-resume",
-      { resumes: { subagent: name, task: "disabled resume" } },
+      { name, message: "disabled resume" },
       ctx,
     );
     assert.equal(disabledResume.details.results[0].intelligence, "junior");
@@ -287,8 +289,13 @@ test("named resumes retain original settings across preset, parent, definition, 
     fs.writeFileSync(config, JSON.stringify({ "subagents-models": [] }));
     process.env.PI_SUBAGENT_INTELLIGENCE = "true";
     await host.emit("session_start", {}, ctx);
-    const zero = await host.call("subagents", "zero", { tasks: [{ ...task("zero work"), intelligence: null }] }, ctx);
-    const zeroResume = await host.call("resume_subagents", "zero-resume", { subagent: name, task: "zero resume" }, ctx);
+    const zero = await host.callAndWait(
+      "subagents",
+      "zero",
+      { tasks: [{ ...task("zero work"), intelligence: null }] },
+      ctx,
+    );
+    const zeroResume = await host.callAndWait("message_subagent", "zero-resume", { name, message: "zero resume" }, ctx);
     assert.equal(zero.details.results[0].intelligence, undefined);
     assert.equal(zeroResume.details.results[0].intelligence, "junior");
     assert.equal(flag(calls().at(-1)!.args, "--model"), "org/model");
@@ -304,10 +311,10 @@ test("named resumes retain original settings across preset, parent, definition, 
     fs.writeFileSync(config, JSON.stringify({ "subagents-models": settings }));
     const restarted = createExtensionHarness();
     await restarted.emit("session_start", {}, ctx);
-    const unselected = await restarted.call(
-      "resume_subagents",
+    const unselected = await restarted.callAndWait(
+      "message_subagent",
       "unselected",
-      { resumes: [{ subagent: disabledName, task: "unselected remains unselected" }] },
+      { name: disabledName, message: "unselected remains unselected" },
       ctx,
     );
     assert.equal(unselected.isError, false, JSON.stringify(unselected.content));
@@ -318,7 +325,7 @@ test("named resumes retain original settings across preset, parent, definition, 
     entries[0] = customEntry(SUBAGENT_NAMES_CUSTOM_TYPE, { namesFile, ownerId: "other-owner" });
     await restarted.emit("session_start", {}, ctx);
     for (const task of ["private fork", "same private fork"]) {
-      const forked = await restarted.call("resume_subagents", task, { subagent: name, task }, ctx);
+      const forked = await restarted.callAndWait("message_subagent", task, { name, message: task }, ctx);
       assert.equal(forked.isError, false, JSON.stringify(forked.content));
       assert.equal(forked.details.results[0].intelligence, "junior");
       assert.equal(flag(calls().at(-1)!.args, "--model"), "org/model");

@@ -1,9 +1,26 @@
-import { buildSubagentDetail, findNameRecord, type SubagentDetail } from "../detail.js";
+import { statSync } from "node:fs";
+import { buildSubagentDetail, findNameRecord, sessionFilesIn, type SubagentDetail } from "../detail.js";
 import { readNamesRegistry, type NamesRegistry, type SubagentNameRecord } from "../names.js";
 import { filterPickerItems, type PickerItem } from "../overlay.js";
 import { SubagentExpandView } from "../ui/expand-view.js";
+import { getActivitySnapshot, type ActivityEntry } from "./activity.js";
 import type { SessionContext } from "./contracts.js";
 import type { ExtensionState } from "./state.js";
+
+const registryCache = new WeakMap<
+  ExtensionState,
+  {
+    file: string;
+    generation: number;
+    signature: string;
+    registry: NamesRegistry;
+  }
+>();
+
+function fileSignature(file: string): string {
+  const stat = statSync(file);
+  return `${stat.mtimeMs}:${stat.size}`;
+}
 
 export function resolveDetailSessionDir(state: ExtensionState, record: SubagentNameRecord): string {
   // Read-only mirror of resolveResumeTarget: a non-owner sees its own fork if
@@ -16,12 +33,49 @@ export function resolveDetailSessionDir(state: ExtensionState, record: SubagentN
 }
 
 export function readCurrentRegistry(state: ExtensionState): NamesRegistry | undefined {
-  if (state.disabled || !state.currentNamesFile) return undefined;
-  try {
-    return readNamesRegistry(state.currentNamesFile);
-  } catch {
+  if (state.disabled || !state.currentNamesFile) {
+    registryCache.delete(state);
     return undefined;
   }
+  try {
+    const file = state.currentNamesFile;
+    const generation = state.lifecycleGeneration;
+    const signature = fileSignature(file);
+    const cached = registryCache.get(state);
+    if (cached?.file === file && cached.generation === generation && cached.signature === signature) {
+      return cached.registry;
+    }
+    const registry = readNamesRegistry(file);
+    // Only registry references live here. Transcripts belong to the open overlay.
+    registryCache.set(state, { file, generation, signature, registry });
+    return registry;
+  } catch {
+    registryCache.delete(state);
+    return undefined;
+  }
+}
+
+/** Snapshot order breaks live ties by top-level id and path, not registry age. */
+export function buildExpandPickerItems(registry: NamesRegistry, activity: ActivityEntry[]): PickerItem[] {
+  const live = new Map(activity.map((entry, index) => [entry.name.toLowerCase(), { entry, index }]));
+  const rank = (entry?: ActivityEntry) => (entry?.status === "running" ? 0 : entry ? 1 : 2);
+  return Object.values(registry.agents ?? {})
+    .map((record) => ({ record, live: live.get(record.name.toLowerCase()) }))
+    .sort((a, b) => {
+      const group = rank(a.live?.entry) - rank(b.live?.entry);
+      if (group) return group;
+      if (a.live && b.live) {
+        return a.live.entry.depth - b.live.entry.depth || a.live.index - b.live.index;
+      }
+      return (b.record.createdAt ?? 0) - (a.record.createdAt ?? 0);
+    })
+    .map(({ record, live }) => ({
+      name: record.name,
+      agent: record.agent,
+      task: record.task,
+      intelligence: record.intelligence,
+      ...(live ? { status: live.entry.status, depth: live.entry.depth } : {}),
+    }));
 }
 
 export function registerSubagentExpandCommand(state: ExtensionState): void {
@@ -32,16 +86,7 @@ export function registerSubagentExpandCommand(state: ExtensionState): void {
     getArgumentCompletions: (prefix: string) => {
       const registry = readCurrentRegistry(state);
       if (!registry) return null;
-      // Fuzzy, not prefix-only: with hundreds of names the user needs to find
-      // one by any fragment of the name, agent type, or task.
-      const pickerItems: PickerItem[] = Object.values(registry.agents ?? {})
-        .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
-        .map((record) => ({
-          name: record.name,
-          agent: record.agent,
-          task: record.task,
-          intelligence: record.intelligence,
-        }));
+      const pickerItems = buildExpandPickerItems(registry, getActivitySnapshot(state));
       const items = filterPickerItems(pickerItems, prefix).map((item) => ({
         value: item.name,
         label: item.name,
@@ -65,25 +110,15 @@ export function registerSubagentExpandCommand(state: ExtensionState): void {
         ctx.ui.notify("No subagent name registry for this session yet.", "warning");
         return;
       }
-      const sortedRecords = Object.values(registry.agents ?? {}).sort(
-        (a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0),
-      );
-      if (sortedRecords.length === 0) {
+      const items = buildExpandPickerItems(registry, getActivitySnapshot(state));
+      if (items.length === 0) {
         ctx.ui.notify("No subagents have run in this session yet.", "info");
         return;
       }
 
       const record = name ? findNameRecord(registry, name) : undefined;
       if (!record && name) {
-        const suggestions = filterPickerItems(
-          sortedRecords.map((item) => ({
-            name: item.name,
-            agent: item.agent,
-            task: item.task,
-            intelligence: item.intelligence,
-          })),
-          name,
-        )
+        const suggestions = filterPickerItems(items, name)
           .slice(0, 10)
           .map((item) => item.name);
         ctx.ui.notify(
@@ -93,11 +128,33 @@ export function registerSubagentExpandCommand(state: ExtensionState): void {
         return;
       }
 
+      const generation = state.lifecycleGeneration;
+      const namesFile = state.currentNamesFile;
+      const owner = state.currentOwnerId;
+      const isCurrent = () =>
+        !state.disabled &&
+        state.lifecycleGeneration === generation &&
+        state.currentNamesFile === namesFile &&
+        state.currentOwnerId === owner;
+      // An overlay-local LRU. File signatures catch appends, replacement, and new session files.
+      const detailCache = new Map<string, { signature: string; detail: SubagentDetail }>();
       const resolveDetail = (selectedName: string): SubagentDetail | undefined => {
-        const selected = findNameRecord(registry, selectedName);
+        if (!isCurrent()) return undefined;
+        const current = readCurrentRegistry(state);
+        const selected = current && findNameRecord(current, selectedName);
         if (!selected) return undefined;
         try {
-          return buildSubagentDetail(selected, { sessionDir: resolveDetailSessionDir(state, selected) });
+          const sessionDir = resolveDetailSessionDir(state, selected);
+          const files = sessionFilesIn(sessionDir);
+          const signature = JSON.stringify([selected, sessionDir, files.map((file) => [file, fileSignature(file)])]);
+          const key = selected.name.toLowerCase();
+          const cached = detailCache.get(key);
+          let detail = cached?.signature === signature ? cached.detail : undefined;
+          detail ??= buildSubagentDetail(selected, { sessionDir });
+          detailCache.delete(key);
+          detailCache.set(key, { signature, detail });
+          if (detailCache.size > 8) detailCache.delete(detailCache.keys().next().value!);
+          return detail;
         } catch (err) {
           ctx.ui.notify(
             `Failed to read subagent session: ${err instanceof Error ? err.message : String(err)}`,
@@ -109,27 +166,39 @@ export function registerSubagentExpandCommand(state: ExtensionState): void {
       const detail = record ? resolveDetail(record.name) : undefined;
       if (record && !detail) return;
 
-      await ctx.ui.custom(
-        (tui, theme, _keybindings, done: (value: void) => void) =>
-          new SubagentExpandView({
-            items: sortedRecords.map((item) => ({
-              name: item.name,
-              agent: item.agent,
-              task: item.task,
-              intelligence: item.intelligence,
-            })),
-            detail,
-            resolveDetail,
-            getRows: () => tui?.terminal?.rows ?? 30,
-            theme,
-            requestRender: () => tui?.requestRender?.(),
-            onClose: () => done(undefined),
-          }),
-        {
-          overlay: true,
-          overlayOptions: { anchor: "center", width: "90%", maxHeight: "90%", margin: 1 },
-        },
-      );
+      let view: SubagentExpandView | undefined;
+      try {
+        await ctx.ui.custom(
+          (tui, theme, _keybindings, done: (value: void) => void) => {
+            view = new SubagentExpandView({
+              items,
+              getItems: () => {
+                if (!isCurrent()) {
+                  view?.dispose();
+                  done(undefined);
+                  return [];
+                }
+                const current = readCurrentRegistry(state);
+                return current ? buildExpandPickerItems(current, getActivitySnapshot(state)) : [];
+              },
+              detail,
+              resolveDetail,
+              getRows: () => tui?.terminal?.rows ?? 30,
+              theme,
+              requestRender: () => tui?.requestRender?.(),
+              onClose: () => done(undefined),
+            });
+            return view;
+          },
+          {
+            overlay: true,
+            overlayOptions: { anchor: "center", width: "90%", maxHeight: "90%", margin: 1 },
+          },
+        );
+      } finally {
+        view?.dispose();
+        detailCache.clear();
+      }
     },
   });
 }

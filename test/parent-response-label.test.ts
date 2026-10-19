@@ -70,7 +70,7 @@ test("parallel success and failure responses share optional identity qualifiers"
   }
 });
 
-test("single error responses keep neutral names and intelligence without blank types", async () => {
+test("async failures retain names and intelligence in completion details without blank labels", async () => {
   const f = settingsFixture();
   const script = path.join(f.root, "failure.cjs");
   fs.writeFileSync(
@@ -98,7 +98,7 @@ test("single error responses keep neutral names and intelligence without blank t
         const ctx = host.makeCtx([], { cwd: f.project, hasUI: false });
         try {
           await host.emit("session_start", {}, ctx);
-          const response = await host.call(
+          const response = await host.callAndWait(
             "subagents",
             "failed-call",
             { tasks: [{ task: "Fail", max_subagents_allowed: 0 }] },
@@ -108,12 +108,10 @@ test("single error responses keep neutral names and intelligence without blank t
           assert.equal(result.agent, "");
           assert.equal(result.intelligence, intelligence);
           assert.equal(Boolean(result.name), named);
-          const label = result.name
-            ? `${result.name}${intelligence ? " (Senior)" : ""}`
-            : intelligence
-              ? "Senior"
-              : "subagent";
-          assert.equal(response.content[0].text, `${label} error: Failed task.`);
+          assert.equal(response.started.isError, false, "launch acknowledges work before it fails");
+          assert.equal(response.started.details.results[0].exitCode, -1);
+          assert.equal(response.content[0].text, `Subagent ${result.name ?? result.agent} failed:\nFailed task.`);
+          assert.equal(result.errorMessage, "Failed task.");
           assert.equal(response.isError, true);
           assert.doesNotMatch(response.content[0].text, /\(\)|Senior\//);
         } finally {

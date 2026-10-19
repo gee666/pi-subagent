@@ -1,13 +1,18 @@
-import { isResultError, type SingleResult } from "../types.js";
+import { createHash } from "node:crypto";
+import { getFinalOutput, isResultError, type SingleResult } from "../types.js";
+import { isRecord } from "../types/records.js";
 import { RETRY_WAIT_GRACE_MS } from "./constants.js";
 import { parseRpcEvent, processRpcEvent } from "./events.js";
 import { appendBoundedStderr } from "./result.js";
 import type { AttemptState } from "./attempt-state.js";
+import { isLeadMessageEvent } from "./lead-message.js";
+import type { RunAgentOptions, RunningSubagentHandle } from "./options.js";
 
 interface ProtocolOptions {
   state: AttemptState;
   result: SingleResult;
   promptRequestId: string;
+  onLeadMessage?: RunAgentOptions["onLeadMessage"];
   emitUpdate(): void;
   noteSemanticActivity(minimumQuietPeriodMs?: number): void;
   stopChild(force: boolean): void;
@@ -15,18 +20,116 @@ interface ProtocolOptions {
   forceStopAndSettle(code?: number): void;
 }
 
+/** A stdin write is not delivery. Wait for prompt preflight to accept each request. */
+export function createSteeringHandle(
+  options: Pick<ProtocolOptions, "state" | "result" | "promptRequestId" | "noteSemanticActivity"> & {
+    sendRpc(command: Record<string, unknown>): boolean;
+    timeoutMs?: number;
+    settleDeferred(): void;
+  },
+): RunningSubagentHandle {
+  const { state, result, promptRequestId, sendRpc, noteSemanticActivity, settleDeferred } = options;
+  const pending = (state.pendingSteeringRequests ??= new Map());
+  let request = 0;
+  return {
+    isSettling: () => state.agentSettled || state.resolved || state.stopping === true,
+    isIdle: () => state.waitingForChildren === true,
+    steer(message: string): Promise<boolean> {
+      if (state.agentSettled || state.resolved || state.stopping) return Promise.resolve(false);
+      const id = `${promptRequestId}-steer-${++request}`;
+      return new Promise<boolean>((resolve) => {
+        const complete = (accepted: boolean) => {
+          if (!pending.delete(id)) return;
+          clearTimeout(timer);
+          resolve(accepted);
+          if (state.resolved || state.stopping) return;
+          if (accepted) {
+            // Preflight can answer after an older run's settlement but before
+            // the new turn starts. Wait for that continuation's own settlement.
+            state.pendingAgentSettled = false;
+            noteSemanticActivity();
+          } else if (pending.size === 0 && state.pendingAgentSettled) {
+            state.pendingAgentSettled = false;
+            settleDeferred();
+          }
+        };
+        const timer = setTimeout(
+          () => {
+            appendBoundedStderr(result, `[pi-subagent] Steering acknowledgment timed out: ${id}\n`);
+            complete(false);
+          },
+          Math.max(1, options.timeoutMs ?? 30_000),
+        );
+        pending.set(id, complete);
+        // Raw steer bypasses the input hook and loses nested broadcasts.
+        if (!sendRpc({ id, type: "prompt", message, streamingBehavior: "steer" })) complete(false);
+      });
+    },
+  };
+}
+
 /** Interpret run boundaries and semantic activity independently of JSONL framing. */
 export function createProtocolHandler(options: ProtocolOptions): (line: string) => void {
   const { state, result, promptRequestId, emitUpdate, noteSemanticActivity, stopChild, doResolve, forceStopAndSettle } =
     options;
+  // One bounded digest per active nested call, not a retained serialized tree.
+  const nestedSignatures = new Map<string, string>();
   return (line: string) => {
+    if (state.resolved) return;
     const event = parseRpcEvent(line);
     if (!event) return;
+
+    if (
+      event.type === "extension_ui_request" &&
+      event.method === "setStatus" &&
+      event.statusKey === "pi-subagent-background"
+    ) {
+      if (typeof event.statusText === "string" && /^(0|[1-9]\d*)$/.test(event.statusText)) {
+        const running = Number(event.statusText);
+        if (Number.isSafeInteger(running)) state.backgroundJobs = running;
+      }
+      return;
+    }
+    if (event.type === "subagent_background" && Number.isSafeInteger(event.running) && Number(event.running) >= 0) {
+      state.backgroundJobs = Number(event.running);
+      return;
+    }
+    if (event.type === "turn_start") {
+      result.idle = false;
+      state.waitingForChildren = false;
+      state.pendingAgentSettled = false;
+    }
+
+    if (isLeadMessageEvent(event)) {
+      if (state.resolved) return;
+      result.lastActionAt = Date.now();
+      if (!state.agentSettled) noteSemanticActivity();
+      const reportError = () => appendBoundedStderr(result, "[pi-subagent] Lead message callback failed.\n");
+      try {
+        // Notifications must not block stream draining, settlement, or subsequent messages.
+        void Promise.resolve(options.onLeadMessage?.(event.message)).catch(reportError);
+      } catch {
+        reportError();
+      }
+      return;
+    }
 
     if (event?.type === "tool_execution_start" && typeof event.toolCallId === "string") {
       state.activeToolCallIds.add(event.toolCallId);
     } else if (event?.type === "tool_execution_end" && typeof event.toolCallId === "string") {
       state.activeToolCallIds.delete(event.toolCallId);
+    }
+
+    if (event.type === "response" && event.command === "prompt" && typeof event.id === "string") {
+      const complete = state.pendingSteeringRequests?.get(event.id);
+      if (complete) {
+        if (event.success !== true) {
+          const error = typeof event.error === "string" ? event.error : "unknown RPC error";
+          appendBoundedStderr(result, `[pi-subagent] Steering prompt rejected: ${error}\n`);
+        }
+        complete(event.success === true);
+        return;
+      }
     }
 
     if (event?.type === "response" && event.id === promptRequestId && event.command === "prompt") {
@@ -55,6 +158,35 @@ export function createProtocolHandler(options: ProtocolOptions): (line: string) 
     }
 
     if (event?.type === "agent_settled") {
+      if ((state.backgroundJobs ?? 0) > 0 && !result.idle) {
+        result.idle = true;
+        state.waitingForChildren = true;
+        emitUpdate();
+        const output = getFinalOutput(result.messages, result.finalOutput) || "(no output)";
+        const reportError = () => appendBoundedStderr(result, "[pi-subagent] Idle notification failed.\n");
+        try {
+          void Promise.resolve(options.onLeadMessage?.(`Idle, waiting for children.\n${output}`)).catch(reportError);
+        } catch {
+          reportError();
+        }
+      }
+      if ((state.pendingSteeringRequests?.size ?? 0) > 0) {
+        // Prompt preflight may still be running in an input hook. Its response
+        // determines whether this old settlement is final or a new turn follows.
+        state.pendingAgentSettled = true;
+        if ((state.backgroundJobs ?? 0) > 0) state.waitingForChildren = true;
+        if (state.idleTimer) clearTimeout(state.idleTimer);
+        state.idleTimer = undefined;
+        return;
+      }
+      // Async descendants may wake this idle RPC session with a completion.
+      // Do not reap the process tree until that continuation has settled too.
+      if ((state.backgroundJobs ?? 0) > 0) {
+        state.waitingForChildren = true;
+        if (state.idleTimer) clearTimeout(state.idleTimer);
+        state.idleTimer = undefined;
+        return;
+      }
       state.agentSettled = true;
       result.lastActionAt = Date.now();
       // No semantic watchdog may fire while we are only waiting for the
@@ -76,6 +208,13 @@ export function createProtocolHandler(options: ProtocolOptions): (line: string) 
       return;
     }
 
+    const previousActionAt = result.lastActionAt;
+    if (
+      (event.type === "message_end" || event.type === "tool_result_end") &&
+      isRecord(event.message) &&
+      typeof event.message.toolCallId === "string"
+    )
+      nestedSignatures.delete(event.message.toolCallId);
     const accepted = processRpcEvent(event, result);
     if (accepted) {
       // Cancel the startup timer as soon as the subprocess proves it has
@@ -94,14 +233,11 @@ export function createProtocolHandler(options: ProtocolOptions): (line: string) 
       // grandchild could keep every ancestor alive forever.
       let semanticActivity = true;
       if (event?.type === "subagent_progress") {
-        let signature: string;
-        try {
-          signature = JSON.stringify(event.details);
-        } catch {
-          signature = "unserializable";
-        }
-        semanticActivity = signature !== state.lastNestedProgressSignature;
-        state.lastNestedProgressSignature = signature;
+        const signature = createHash("sha256").update(JSON.stringify(event.details)).digest("hex");
+        const id = typeof event.toolCallId === "string" ? event.toolCallId : "";
+        semanticActivity = signature !== nestedSignatures.get(id);
+        nestedSignatures.set(id, signature);
+        if (!semanticActivity) result.lastActionAt = previousActionAt;
       }
       if (semanticActivity) noteSemanticActivity();
       emitUpdate();

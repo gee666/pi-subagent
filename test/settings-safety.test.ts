@@ -56,7 +56,7 @@ test("runner command and argsPrefix are personal-only even when config-only SDK 
         isProjectTrusted: () => sdkSettings.isProjectTrusted(),
       });
       await host.emit("session_start", {}, ctx);
-      const result = await host.call(
+      const result = await host.callAndWait(
         "subagents",
         "personal-command",
         {

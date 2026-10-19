@@ -7,6 +7,8 @@ export interface PickerItem {
   agent: string;
   intelligence?: string;
   task?: string;
+  status?: "running" | "idle";
+  depth?: number;
 }
 
 export function filterPickerItems(items: PickerItem[], query: string): PickerItem[] {
@@ -33,6 +35,7 @@ export interface PickerOptions {
 export class SubagentPicker {
   private readonly options: PickerOptions;
   private query = "";
+  private items: PickerItem[];
   private filtered: PickerItem[];
   private selected = 0;
   private scroll = 0;
@@ -40,7 +43,27 @@ export class SubagentPicker {
 
   constructor(options: PickerOptions) {
     this.options = options;
-    this.filtered = options.items;
+    this.items = options.items;
+    this.filtered = this.items;
+  }
+
+  /** Update live ordering without resetting the search or the selected name. */
+  setItems(items: PickerItem[]): boolean {
+    const keys = ["name", "agent", "intelligence", "task", "status", "depth"] as const;
+    if (
+      items.length === this.items.length &&
+      items.every((item, index) => keys.every((key) => item[key] === this.items[index][key]))
+    )
+      return false;
+
+    const selectedName = this.filtered[this.selected]?.name.toLowerCase();
+    this.items = items;
+    this.filtered = filterPickerItems(items, this.query);
+    const selected = this.filtered.findIndex((item) => item.name.toLowerCase() === selectedName);
+    if (selected >= 0) this.selected = selected;
+    this.clamp();
+    this.options.requestRender();
+    return true;
   }
 
   invalidate(): void {}
@@ -69,12 +92,12 @@ export class SubagentPicker {
     else if (matchesKey(data, Key.end)) this.selected = this.filtered.length - 1;
     else if (data === "\u007f" || data === "\b") {
       this.query = this.query.slice(0, -1);
-      this.filtered = filterPickerItems(this.options.items, this.query);
+      this.filtered = filterPickerItems(this.items, this.query);
       this.selected = 0;
       this.scroll = 0;
     } else if (data && data.charCodeAt(0) >= 32 && !data.startsWith("\u001b")) {
       this.query += data;
-      this.filtered = filterPickerItems(this.options.items, this.query);
+      this.filtered = filterPickerItems(this.items, this.query);
       this.selected = 0;
       this.scroll = 0;
     } else {
@@ -91,7 +114,7 @@ export class SubagentPicker {
     this.viewport = Math.max(1, Math.floor(rows * 0.9) - 4);
     this.clamp();
 
-    const out = [frame.top(`Expand subagent (${this.filtered.length}/${this.options.items.length})`)];
+    const out = [frame.top(`Expand subagent (${this.filtered.length}/${this.items.length})`)];
     out.push(frame.row(`${theme.fg("accent", "Search:")} ${this.query}█`));
 
     const window = this.filtered.slice(this.scroll, this.scroll + this.viewport);
@@ -104,8 +127,15 @@ export class SubagentPicker {
       const isSelected = this.scroll + index === this.selected;
       const marker = isSelected ? theme.fg("accent", ">") : " ";
       const label = formatSubagentLabel(item);
+      const activity =
+        item.status || item.depth !== undefined
+          ? theme.fg(
+              item.status === "running" ? "success" : "dim",
+              `${item.status === "running" ? "●" : item.status === "idle" ? "○" : "·"}${item.depth !== undefined ? ` d${item.depth}` : ""} `,
+            )
+          : "";
       const task = item.task ? ` — ${item.task.replace(/\s+/g, " ")}` : "";
-      out.push(frame.row(`${marker} ${theme.fg("accent", label)}${theme.fg("dim", task)}`));
+      out.push(frame.row(`${marker} ${activity}${theme.fg("accent", label)}${theme.fg("dim", task)}`));
     }
 
     if (this.filtered.length === 0) out[2] = frame.row(theme.fg("warning", "No matching subagent"));

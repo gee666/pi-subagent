@@ -1,10 +1,11 @@
-import { visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { RESUME_SUBAGENTS_TOOL_NAME } from "../types.js";
 import { displayIntelligence } from "../intelligence.js";
 import { formatSubagentLabel } from "./agent-label.js";
 import { type ThemeFg, formatClockTime, formatTokens, statusEmoji, truncate } from "./tree-format.js";
 import type { DetailBlock, DetailChildRef, DetailUsage, SubagentDetail } from "./detail-model.js";
 import {
+  getActivityBlock,
   getTurnTools,
   getTurnResponse,
   getDetailChildren,
@@ -139,10 +140,11 @@ export function renderTurnToolListLines(
   selectedRow: number,
   width: number,
   theme: DetailTheme = PLAIN_THEME,
+  scope: "turn" | "activity" = "turn",
 ): string[] {
   const out = makeLineWriter(width, theme);
   const tools = getTurnTools(block);
-  out.wrap(`${tools.length} tool call${tools.length === 1 ? "" : "s"} in this turn`, "", "dim");
+  out.wrap(`${tools.length} tool call${tools.length === 1 ? "" : "s"} in this ${scope}`, "", "dim");
   out.push();
   if (tools.length === 0) {
     out.wrap("No tool calls", "", "muted");
@@ -228,6 +230,114 @@ export function renderToolDetailLines(
   return out.lines;
 }
 
+/** One timeline per durable agent. A saved user message is not necessarily a new run. */
+export function renderActivityLines(detail: SubagentDetail, width: number, theme: DetailTheme = PLAIN_THEME): string[] {
+  const out = makeLineWriter(width, theme);
+  const activity = getActivityBlock(detail);
+  const tools = getTurnTools(activity);
+  const isMessageTool = (event: TurnToolEvent) =>
+    event.type === "tool" && (event.name === "message_subagent" || event.name === "message_lead_agent");
+  const messageCount =
+    detail.blocks.length +
+    activity.events.filter((event) => event.type === "message" || (event.type === "tool" && isMessageTool(event)))
+      .length;
+  const compactMessage = (label: string, text: string, at?: number, isError = false) => {
+    const stamp = at !== undefined ? `${formatClockTime(at)} • ` : "";
+    out.wrap(
+      `${label} • ${stamp}${truncateToWidth(text.replace(/\s+/g, " ").trim(), 240, "…")}`,
+      "",
+      isError ? "error" : "muted",
+    );
+  };
+  out.wrap(
+    `Agent activity • ${messageCount} message${messageCount === 1 ? "" : "s"} • ${tools.length} tool call${tools.length === 1 ? "" : "s"}`,
+    "",
+    "dim",
+  );
+  out.wrap(`session total: ${usageLine(detail.usage)}`, "", "dim");
+  for (const note of detail.notes) out.wrap(note, "", "warning");
+  if (tools.length) out.wrap("Press T to inspect tools across all messages", "", "muted");
+  if (!detail.blocks.length) out.wrap("No activity recorded yet.", "", "muted");
+
+  detail.blocks.forEach((block, index) => {
+    out.push();
+    if (index === 0) out.section("TASK");
+    else compactMessage(`MESSAGE ${index + 1}`, block.prompt || "(empty prompt)", block.at);
+    const previous = detail.blocks[index - 1];
+    if (
+      !previous ||
+      previous.model !== block.model ||
+      previous.thinkingLevel !== block.thinkingLevel ||
+      previous.intelligence !== block.intelligence
+    )
+      out.wrap(
+        [
+          block.at !== undefined ? formatClockTime(block.at) : "",
+          `Model: ${block.model ?? "unknown"} • Thinking: ${block.thinkingLevel ?? "unknown"}`,
+          block.intelligence ? `Intelligence: ${displayIntelligence(block.intelligence)}` : "",
+        ]
+          .filter(Boolean)
+          .join(" • "),
+        "",
+        "dim",
+      );
+    if (index === 0) out.wrap(block.prompt || "(empty prompt)", "  ", block.prompt ? "toolOutput" : "muted");
+
+    let pendingTools: TurnToolEvent[] = [];
+    let responseTurn: number | undefined;
+    let inResponse = false;
+    const flushTools = () => {
+      if (!pendingTools.length) return;
+      const counts = new Map<string, number>();
+      for (const event of pendingTools) counts.set(toolLabel(event), (counts.get(toolLabel(event)) ?? 0) + 1);
+      const failed = pendingTools.some(toolIsError);
+      out.push();
+      out.wrap(
+        `TOOLS • ${[...counts].map(([name, count]) => `${name} ×${count}`).join(", ")}${failed ? " • errors" : ""}`,
+        "",
+        failed ? "error" : "dim",
+      );
+      pendingTools = [];
+      inResponse = false;
+    };
+    for (const event of block.events) {
+      if (event.type === "message" || (event.type === "tool" && isMessageTool(event))) {
+        flushTools();
+        if (event.type === "message") compactMessage(event.label, event.text, event.at, event.isError);
+        else
+          compactMessage(
+            event.name === "message_subagent" ? "TO AGENT" : "TO LEAD",
+            event.preview,
+            undefined,
+            event.isError,
+          );
+        inResponse = false;
+      } else if (event.type === "tool" || event.type === "children") {
+        pendingTools.push(event);
+      } else if (event.type === "text" && event.text.trim()) {
+        flushTools();
+        if (!inResponse || event.assistantTurn === undefined || responseTurn !== event.assistantTurn) {
+          out.push();
+          out.section("RESPONSE");
+        }
+        out.wrap(event.text, "  ", "toolOutput");
+        responseTurn = event.assistantTurn;
+        inResponse = true;
+      }
+    }
+    flushTools();
+  });
+
+  const children = getDetailChildren(detail);
+  if (children.length) {
+    out.push();
+    out.section("CHILDREN (DIRECT)");
+    out.lines.push(...renderChildTreeLines(children, -1, width, theme));
+    out.wrap("Press C to select and expand a child", "", "muted");
+  }
+  return out.lines;
+}
+
 export function renderDetailLines(detail: SubagentDetail, width: number, theme: DetailTheme = PLAIN_THEME): string[] {
-  return renderTurnOverviewLines(detail, Math.max(0, detail.blocks.length - 1), width, theme);
+  return renderActivityLines(detail, width, theme);
 }
