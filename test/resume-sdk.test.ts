@@ -23,7 +23,7 @@ test("installed Pi loader's message_subagent accepts strict-provider null budget
       const strictSchema = makeStrictJsonSchema(tool.parameters);
       const first = { name: "Margaret", message: "continue" };
       const second = { name: "Susan", message: "continue" };
-      const strictCalls = [first, second].map(args => ({ ...args, max_subagents_allowed: null }));
+      const strictCalls = [first, second].map(args => ({ ...args, name: [args.name], max_subagents_allowed: null }));
       if (!strictCalls.every((args) => Check(strictSchema, args))) throw new Error("Provider schema rejected null omissions");
       const prepare = args => {
         const snapshot = JSON.stringify(args);
@@ -81,10 +81,10 @@ test("installed Pi loader's message_subagent accepts strict-provider null budget
         },
       }),
     );
-    const item = { name: "Margaret", message: "continue" };
+    const item = { name: ["Margaret"], message: "continue" };
     assert.deepEqual(output.prepared, [
       item,
-      { name: "Susan", message: "continue" },
+      { name: ["Susan"], message: "continue" },
       { ...item, max_subagents_allowed: 0 },
     ]);
     const schema = output.strictSchema;
@@ -101,7 +101,7 @@ test("installed Pi loader's message_subagent accepts strict-provider null budget
     assert.ok(output.invalid.some((error: string) => error.includes("intelligence")));
     assert.ok(output.invalid.some((error: string) => error.includes("/message")));
     assert.deepEqual(output.strictErrors, [], "strict-provider null allowances must mean omission");
-    assert.deepEqual(output.strictPrepared, [item, { name: "Susan", message: "continue" }]);
+    assert.deepEqual(output.strictPrepared, [item, { name: ["Susan"], message: "continue" }]);
     assert.equal(output.strictExecuted.length, 2);
     assert.ok(output.strictExecuted.every((text: string) => text.startsWith("No subagent name registry")));
   } finally {

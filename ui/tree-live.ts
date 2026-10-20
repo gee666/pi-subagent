@@ -40,7 +40,10 @@ function formatToolArgPreview(toolName: unknown, rawArgs: unknown): string {
         .join(", ");
     }
     case "message_subagent":
-      return truncateTo(`${stringValue(args.name)}: ${stringValue(args.message).replace(/\s+/g, " ").trim()}`, 80);
+      return truncateTo(
+        `${Array.isArray(args.name) ? args.name.map((name) => stringValue(name)).join(", ") : stringValue(args.name)}: ${stringValue(args.message).replace(/\s+/g, " ").trim()}`,
+        80,
+      );
     case "message_lead_agent":
       return truncateTo(stringValue(args.message).replace(/\s+/g, " ").trim(), 80);
     case "resume_subagents": {

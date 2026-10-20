@@ -117,8 +117,9 @@ export function gatedRunner(f: Awaited<ReturnType<typeof fixture>>, separateGate
       fs.existsSync(log)
         ? fs
             .readFileSync(log, "utf8")
-            .trim()
             .split("\n")
+            .slice(0, -1) // A concurrently appended final line may still be incomplete.
+            .filter(Boolean)
             .map(
               (line) =>
                 JSON.parse(line) as {

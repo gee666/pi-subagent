@@ -1,3 +1,5 @@
+import type { DetailBudget } from "./detail-budget.js";
+
 export interface DetailChildRef {
   name?: string;
   agent: string;
@@ -43,6 +45,7 @@ export interface SubagentDetail {
   model?: string;
   thinkingLevel?: string;
   tools?: string[];
+  budget?: DetailBudget;
   createdAt?: number;
   sessionDir: string;
   sessionFile?: string;

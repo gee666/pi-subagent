@@ -49,7 +49,7 @@ ${
 
 Launches return immediately with durable worker names. Each worker's completion arrives as a steering message, waking you if idle. Keep working rather than waiting on the launch tool.
 
-Use \`message_subagent\` with { "name": "John", "message": "Now also update the tests." } to steer a running worker or wake an idle worker with its saved context and original model settings.
+Use \`message_subagent\` with { "name": "John", "message": "Now also update the tests." } to steer a running worker or wake an idle worker with its saved context and original model settings. Set "name" to an array, e.g. ["John", "Maria"], to send the same message to several workers concurrently. Each recipient sees only the message, never the recipient list.
 
 Optional \`max_subagents_allowed\` changes the lifetime descendant cap without resetting spending. Omit it to keep the current allowance. Increases reserve slots from the original launcher; decreases do not refund slots. Names survive restarts.
 

@@ -85,6 +85,14 @@ Workers receive durable human names. Call `message_subagent(name, message, max_s
 { "name": "John", "message": "Now update the tests." }
 ```
 
+Send the same message to several workers with an array of names:
+
+```json
+{ "name": ["John", "Maria"], "message": "The shared API changed. Use the new signature." }
+```
+
+Each recipient receives only the message text, not the recipient list. Duplicate names receive one copy. Running workers are steered and idle workers resume concurrently. Delivery failures are reported per recipient without undoing successful deliveries. An optional `max_subagents_allowed` applies separately to each recipient.
+
 A message steers a running worker or resumes an idle worker with its saved context. It does not wait for the worker to finish. `agent` selects a definition at launch; `name` identifies an existing worker. Messaging or resuming a named worker consumes no new worker slot. An optional budget increase can reserve additional descendant slots. See [sessions and budgets](docs/sessions.md) for cap overrides, forks, and crash recovery.
 
 A child calls `message_lead_agent(message)` to send nonblocking steering to its lead:
@@ -128,7 +136,7 @@ Collapsed results show each child's name, task, status, and most recent activity
 
 A live single line above the editor shows `Running N: Name elapsed · Name elapsed`, with `+N` for names that do not fit and a separate idle count. It uses live handles and snapshots, not session metadata or disk reads on timer ticks.
 
-`/subagent-expand <name>` opens a saved worker transcript. With no name, it opens a searchable picker. Running workers come first in depth order, with top-level workers before nested workers. Live idle parents waiting for children come next; completed or stopped history comes last. Name completion is fuzzy. Each task or resumed turn shows its actual provider/model and thinking level from the worker's session, not the parent's settings. Selected presets also appear as an intelligence label, kept separately for each run. Missing historical model/thinking metadata appears as `unknown`.
+`/subagent-expand <name>` opens a saved worker transcript. Its top section shows the current descendant-slot budget: allowed, used/reserved, and remaining. Used slots include allowances reserved for children and their descendants, not just currently running processes. Missing legacy budgets show as unknown. With no name, it opens a searchable picker. Running workers come first in depth order, with top-level workers before nested workers. Live idle parents waiting for children come next; completed or stopped history comes last. Name completion is fuzzy. Each task or resumed turn shows its actual provider/model and thinking level from the worker's session, not the parent's settings. Selected presets also appear as an intelligence label, kept separately for each run. Missing historical model/thinking metadata appears as `unknown`.
 
 [Model presets](docs/configuration.md#caller-selected-intelligence) show labels such as `Nicolas (Junior/code-writer)` in regular tool results. One enabled preset applies automatically to new launches without exposing an `intelligence` argument. Two or more require an explicit `intelligence` choice on every launch item. Omitted or `null` choices reject the whole launch batch before any worker starts. Zero or disabled presets keep the existing launch defaults and show no intelligence label. Without an agent type, labels show `Nicolas (Junior)`; without either qualifier, they show just `Nicolas`. `message_subagent` does not accept `intelligence`; workers retain the original effective model, thinking, and label, even after configuration or parent settings change.
 

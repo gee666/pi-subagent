@@ -1,3 +1,4 @@
+import { readDetailBudget } from "./detail-budget.js";
 import { sessionFilesIn, readSessionEntries } from "./session.js";
 import { SUBAGENT_INTELLIGENCE_CUSTOM_TYPE } from "../intelligence.js";
 export { sessionFilesIn, readSessionMessages } from "./session.js";
@@ -40,7 +41,7 @@ export function describeToolArgs(toolName: string, rawArgs: unknown): string {
   };
   switch (toolName) {
     case "message_subagent":
-      return `${clip(args.name, 40)}: ${clip(args.message, 120)}`;
+      return `${clip(Array.isArray(args.name) ? args.name.filter((name) => typeof name === "string").join(", ") : args.name, 40)}: ${clip(args.message, 120)}`;
     case "message_lead_agent":
       return clip(args.message, 120);
     case "bash":
@@ -292,6 +293,7 @@ export function buildSubagentDetail(record: SubagentNameRecord, options: { sessi
     model,
     thinkingLevel,
     tools: record.tools,
+    budget: readDetailBudget(record.budget),
     createdAt: record.createdAt,
     sessionDir,
     sessionFile,

@@ -247,7 +247,7 @@ describe("budget tool integration", () => {
       });
       assert.notEqual(resumed.isError, true, JSON.stringify(resumed.content));
       assert.deepEqual(resumed.details.results[0].budget, a.budget);
-      assert.match(lastCall(log).prompt, /You cannot launch subagents\./);
+      assert.equal(lastCall(log).prompt, "continue");
       assert.doesNotMatch(lastCall(log).prompt, /Set max_subagents_allowed on each task/);
       assert.equal(readBudget(rootBudget).remaining, 0);
 
@@ -286,7 +286,7 @@ describe("budget tool integration", () => {
       assert.notEqual(raised.isError, true, JSON.stringify(raised.content));
       assert.equal(readBudget(parentBudget).remaining, 1);
       assert.equal(readBudget(worker.budget).remaining, 3);
-      assert.match(lastCall(log).prompt, /launch at most 3 more/);
+      assert.equal(lastCall(log).prompt, "continue");
       assert.notEqual((await resume("unchanged")).isError, true);
       assert.equal(readBudget(worker.budget).remaining, 3);
       assert.notEqual((await resume("lower", 0)).isError, true);

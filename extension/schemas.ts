@@ -68,7 +68,7 @@ export const ResumeSubagentsParams = Type.Object(
   { additionalProperties: false },
 );
 
-export const MessageSubagentParams = Type.Object(
+export const SingleMessageSubagentParams = Type.Object(
   {
     name: Type.String({ minLength: 1, pattern: "\\S", description: "Name returned by a previous subagents run." }),
     message: Type.String({
@@ -78,6 +78,18 @@ export const MessageSubagentParams = Type.Object(
         "Message to steer a running subagent, or a new task to resume an idle subagent with its saved context.",
     }),
     max_subagents_allowed: ResumeItem.properties.max_subagents_allowed,
+  },
+  { additionalProperties: false },
+);
+
+export const MessageSubagentParams = Type.Object(
+  {
+    ...SingleMessageSubagentParams.properties,
+    name: Type.Array(SingleMessageSubagentParams.properties.name, {
+      minItems: 1,
+      description:
+        "Names receiving the same message. Use a one-element array for one recipient. Legacy single-name strings are also accepted. Recipients see only the message, not the list.",
+    }),
   },
   { additionalProperties: false },
 );

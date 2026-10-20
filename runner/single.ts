@@ -163,7 +163,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       opts.settings,
     );
     const prompt =
-      result.budget && readBudget(result.budget).limit > 0
+      opts.rawPrompt !== true && result.budget && readBudget(result.budget).limit > 0
         ? `${taskPrompt}\n\n${budgetPrompt(result.budget)}`
         : taskPrompt;
     let wasAborted = false;

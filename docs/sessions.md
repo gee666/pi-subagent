@@ -6,7 +6,7 @@ Workers run asynchronously. Budget reservations and lifetime descendant-cap sema
 
 `subagents` returns `started` immediately and runs workers in the background. Each worker's completion arrives as steering to its lead and wakes the lead if idle. The launch acknowledgement is not a final result.
 
-Workers keep durable names and saved sessions after completing a turn. `message_subagent(name, message, max_subagents_allowed?)` steers a running worker or resumes an idle worker with its saved context. It returns without waiting for completion. A running worker receives steering rather than a second concurrent turn on the same session.
+Workers keep durable names and saved sessions after completing a turn. `message_subagent(name, message, max_subagents_allowed?)` steers a running worker or resumes an idle worker with its saved context. It returns without waiting for completion. A running worker receives steering rather than a second concurrent turn on the same session. Set `name` to an array to contact several workers with one message. The registered schema uses arrays, including for one recipient; older single-name string calls are normalized automatically. Recipients receive only the message text. Failures are reported individually, and an optional allowance override applies separately to each recipient.
 
 A child can call `message_lead_agent(message)` without blocking. The message becomes lead steering and wakes an idle lead. It does not finish the child's turn or wait for a reply. The lead replies through `message_subagent`.
 

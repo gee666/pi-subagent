@@ -25,18 +25,19 @@ import { executeParallel } from "./execution.js";
 import { resumableSubagentsDisabled } from "./policy.js";
 import { trackProgress } from "./progress.js";
 import { ensureBudget } from "./runtime.js";
-import { MessageSubagentParams, validatePreparedArguments } from "./schemas.js";
+import { SingleMessageSubagentParams as MessageSubagentParams, validatePreparedArguments } from "./schemas.js";
+import { registerMessageBatchTool } from "./message-batch.js";
 import type { ExtensionState } from "./state.js";
 
 export function registerMessageSubagentTool(state: ExtensionState) {
   if (resumableSubagentsDisabled(state.settings) && !state.resumeToolRegistered) return;
   state.resumeToolRegistered = true;
-  state.pi.registerTool({
+  registerMessageBatchTool(state, {
     name: "message_subagent",
     label: "Message subagent",
     description:
       state.configuredToolPrompts.message_subagent ??
-      "Send a message to one named subagent. Running subagents are steered; idle subagents resume with their saved context and original model settings. Returns without waiting for completion. Optional max_subagents_allowed replaces its lifetime descendant cap without resetting spending or refunding reserved slots. Omit to retain its allowance.",
+      "Send the same message to one or more named subagents. Running subagents are steered; idle subagents resume with their saved context and original model settings. Returns without waiting for completion. Optional max_subagents_allowed replaces its lifetime descendant cap without resetting spending or refunding reserved slots. Omit to retain its allowance.",
     parameters: MessageSubagentParams,
     prepareArguments: (args) => {
       if (args && typeof args === "object" && "max_subagents_allowed" in args && args.max_subagents_allowed === null) {

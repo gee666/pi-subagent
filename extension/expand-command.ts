@@ -1,3 +1,4 @@
+import { readDetailBudget } from "../ui/detail-budget.js";
 import { statSync } from "node:fs";
 import { buildSubagentDetail, findNameRecord, sessionFilesIn, type SubagentDetail } from "../detail.js";
 import { readNamesRegistry, type NamesRegistry, type SubagentNameRecord } from "../names.js";
@@ -146,7 +147,12 @@ export function registerSubagentExpandCommand(state: ExtensionState): void {
         try {
           const sessionDir = resolveDetailSessionDir(state, selected);
           const files = sessionFilesIn(sessionDir);
-          const signature = JSON.stringify([selected, sessionDir, files.map((file) => [file, fileSignature(file)])]);
+          const signature = JSON.stringify([
+            selected,
+            readDetailBudget(selected.budget),
+            sessionDir,
+            files.map((file) => [file, fileSignature(file)]),
+          ]);
           const key = selected.name.toLowerCase();
           const cached = detailCache.get(key);
           let detail = cached?.signature === signature ? cached.detail : undefined;

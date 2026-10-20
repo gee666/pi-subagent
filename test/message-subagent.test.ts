@@ -14,10 +14,10 @@ test("message_subagent registers one strict name/message payload and validates d
     assert.equal(f.tool.name, "message_subagent");
     assert.ok(f.tool.prepareArguments);
     const valid = { name: f.name, message: "continue", max_subagents_allowed: 0 };
-    assert.deepEqual(f.tool.prepareArguments(valid), valid);
+    assert.deepEqual(f.tool.prepareArguments(valid), { ...valid, name: [valid.name] });
     const nullable = { ...valid, max_subagents_allowed: null };
     const prepared = f.tool.prepareArguments(nullable);
-    const omitted = { name: f.name, message: "continue" };
+    const omitted = { name: [f.name], message: "continue" };
     assert.deepEqual(prepared, omitted);
     assert.deepEqual(sdk(f.tool, prepared), omitted);
     assert.equal(nullable.max_subagents_allowed, null, "SDK preparation must not mutate the provider payload");
@@ -229,7 +229,7 @@ for (const fork of [false, true]) {
         assert.equal(job.controller.signal.aborted, false, "tool-call cancellation must not abort detached work");
         await until(() => runner.runs().length === 1);
         const run = runner.runs()[0];
-        assert.ok(run.prompt.startsWith("exact follow-up\nsecond line\n\n"));
+        assert.equal(run.prompt, "exact follow-up\nsecond line");
         const flag = (name: string) => run.args[run.args.indexOf(name) + 1];
         assert.equal(flag("--provider"), "original");
         assert.equal(flag("--model"), "provider-model");
