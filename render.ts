@@ -145,6 +145,39 @@ function takePromptLine(text: string, width: number): { line: string; rest: stri
   return { line: normalized.slice(0, split), rest: normalized.slice(split).trimStart() };
 }
 
+function promptPreviewLines(prefix: string, prompt: string, width: number, theme: { fg: ThemeFg }): string[] {
+  if (width <= 0) return [];
+  const prefixWidth = visibleWidth(prefix);
+  const first = takePromptLine(prompt, Math.max(0, width - prefixWidth));
+  const indent = " ".repeat(Math.min(prefixWidth, Math.max(0, width - 8)));
+  const secondWidth = Math.max(0, width - indent.length);
+  const second = takePromptLine(first.rest, secondWidth);
+  const lines = [fitLine(`${prefix}${theme.fg("dim", first.line)}`, width)];
+  if (first.rest) {
+    const text = second.rest ? truncateToWidth(first.rest, secondWidth) : second.line;
+    lines.push(fitLine(`${indent}${theme.fg("dim", text)}`, width));
+  }
+  return lines;
+}
+
+export function renderMessageResult(
+  result: { content: Array<{ type: string; text?: string }>; details?: unknown },
+  expanded: boolean,
+  theme: { fg: ThemeFg; bold: (s: string) => string },
+  context?: ResultRenderContext & { args?: { name?: string; message?: string }; isError?: boolean },
+): Component {
+  const message = context?.args?.message;
+  if (context?.isError || typeof message !== "string") return renderResult(result, expanded, theme, context);
+  const prefix = `  ${statusEmoji("success", theme)} ${theme.fg("accent", context?.args?.name ?? "")} `;
+  return {
+    render: (width) =>
+      expanded
+        ? new Text(`${prefix}${theme.fg("dim", message)}`, 0, 0).render(width).map((line) => fitLine(line, width))
+        : promptPreviewLines(prefix, message, width, theme),
+    invalidate() {},
+  };
+}
+
 class CollapsedSubagentComponent implements Component {
   constructor(
     private readonly details: SubagentDetails,
@@ -157,19 +190,7 @@ class CollapsedSubagentComponent implements Component {
     const lines: string[] = [];
     for (const node of nodes) {
       const prefix = `  ${statusEmoji(node.status, this.theme)} ${this.theme.fg("accent", node.label)} `;
-      const prefixWidth = visibleWidth(prefix);
-      const firstWidth = Math.max(0, width - prefixWidth);
-      const first = takePromptLine(node.task ?? "", firstWidth);
-      const continuationIndent = " ".repeat(Math.min(prefixWidth, Math.max(0, width - 8)));
-      const secondWidth = Math.max(0, width - continuationIndent.length);
-      const second = takePromptLine(first.rest, secondWidth);
-      const firstLine = `${prefix}${this.theme.fg("dim", first.line)}`;
-      lines.push(fitLine(firstLine, width));
-      if (first.rest) {
-        const hasMore = second.rest.length > 0;
-        const secondText = hasMore ? truncateToWidth(first.rest, secondWidth) : second.line;
-        lines.push(fitLine(`${continuationIndent}${this.theme.fg("dim", secondText)}`, width));
-      }
+      lines.push(...promptPreviewLines(prefix, node.task ?? "", width, this.theme));
       const actionAt = node.lastActionAt ?? node.startedAt;
       if (actionAt !== undefined) {
         lines.push(fitLine(`     ${this.theme.fg("muted", `last action: ${formatClockTime(actionAt)}`)}`, width));

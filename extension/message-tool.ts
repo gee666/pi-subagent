@@ -14,7 +14,7 @@ import {
   updateNameRecord,
 } from "../names.js";
 import { originalModelSettings } from "../storage/session-settings.js";
-import { recordToolCallStart, renderResult } from "../render.js";
+import { recordToolCallStart, renderMessageResult } from "../render.js";
 import { buildSubagentDetails, DEFAULT_DELEGATION_MODE } from "../types.js";
 import { startBackground } from "./async-jobs.js";
 import { updateLatestBroadcastTargets } from "./broadcast.js";
@@ -241,6 +241,6 @@ export function registerMessageSubagentTool(state: ExtensionState) {
         0,
         0,
       ),
-    renderResult: (result, { expanded }, theme, context) => renderResult(result, expanded, theme, context),
+    renderResult: (result, { expanded }, theme, context) => renderMessageResult(result, expanded, theme, context),
   });
 }

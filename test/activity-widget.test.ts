@@ -78,7 +78,13 @@ function fixture(t: TestContext) {
       renders++;
     },
   });
-  const theme = hostDouble<Theme>({ fg: (_color, text) => text });
+  const colors: string[] = [];
+  const theme = hostDouble<Theme>({
+    fg: (color, text) => {
+      colors.push(color);
+      return text;
+    },
+  });
   const setWidget: ExtensionContext["ui"]["setWidget"] = (key, content, options) => {
     calls.push({ key, installed: content !== undefined, placement: options?.placement });
     assert.equal(typeof content === "function" || content === undefined, true);
@@ -105,7 +111,7 @@ function fixture(t: TestContext) {
     assert.ok(widget);
     return widget.render(120).join("\n");
   };
-  return { state, calls, start, shutdown, add, screen, renders: () => renders };
+  return { state, calls, colors, start, shutdown, add, screen, renders: () => renders };
 }
 
 test("registration installs one widget above the editor and does not poll while empty", (t) => {
@@ -114,6 +120,7 @@ test("registration installs one widget above the editor and does not poll while 
   assert.deepEqual(f.calls, [{ key: "subagent-running", installed: true, placement: "aboveEditor" }]);
   assert.equal(typeof f.state.onActivityChanged, "function");
   assert.equal(f.screen(), "Running 0");
+  assert.deepEqual(f.colors, ["accent"]);
   const renders = f.renders();
   t.mock.timers.tick(5000);
   assert.equal(f.renders(), renders);

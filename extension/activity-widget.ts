@@ -72,7 +72,7 @@ export function registerActivityWidget(state: ExtensionState): void {
       (tui, theme) => {
         requestRender = () => tui.requestRender();
         return {
-          render: (width) => [theme.fg("dim", formatActivityLine(entries, width))],
+          render: (width) => [theme.fg("accent", formatActivityLine(entries, width))],
           invalidate() {},
         };
       },
