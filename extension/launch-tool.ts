@@ -233,7 +233,6 @@ export function registerSubagentsTool(state: ExtensionState) {
           if (resumePlanIndex >= 0) state.pendingResumePlans.splice(resumePlanIndex, 1);
           state.recoveryPlansByToolCallId?.delete(toolCallId);
 
-          // Names are unique across the tree and reused during recovery.
           const names: Array<string | undefined> = tasks.map(
             (_task, index) => resumePlan?.details?.results[index]?.name,
           );
@@ -317,6 +316,7 @@ export function registerSubagentsTool(state: ExtensionState) {
                     names[index],
                     budgets[index],
                     getSessionDirForTask(state, resumePlan?.previousToolCallId ?? toolCallId, index),
+                    selectIntelligence(state.intelligencePresets, task.intelligence, state.settings)?.name,
                   ),
                 ),
               ),

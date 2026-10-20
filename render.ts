@@ -14,6 +14,7 @@ const fitLine = (text: string, width: number) =>
   truncateToWidth(text, width, "").replace(/\u001b\[0m/g, "\u001b[22;23;24;25;27;28;29;39m");
 
 import { MAX_LIVE_LOG_ENTRIES, isSubagentDetails, type SubagentDetails } from "./types.js";
+import { isRecord } from "./types/records.js";
 import { formatSubagentLabel } from "./ui/agent-label.js";
 import {
   type ThemeFg,
@@ -168,7 +169,14 @@ export function renderMessageResult(
 ): Component {
   const message = context?.args?.message;
   if (context?.isError || typeof message !== "string") return renderResult(result, expanded, theme, context);
-  const prefix = `  ${statusEmoji("success", theme)} ${theme.fg("accent", context?.args?.name ?? "")} `;
+  const recipient =
+    isRecord(result.details) && isRecord(result.details.recipient) ? result.details.recipient : undefined;
+  const label = formatSubagentLabel({
+    name: recipient?.name ?? context?.args?.name,
+    agent: recipient?.agent,
+    intelligence: recipient?.intelligence,
+  });
+  const prefix = `  ${statusEmoji("success", theme)} ${theme.fg("accent", label)} `;
   return {
     render: (width) =>
       expanded

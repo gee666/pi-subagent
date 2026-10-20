@@ -133,6 +133,7 @@ test("named resumes retain original settings across preset, parent, definition, 
     assert.equal(fs.existsSync(namesFile), false);
     const single = await host.callAndWait("subagents", "single", { tasks: [task("single", "junior")] }, ctx);
     assert.equal(single.isError, false, JSON.stringify(single.content));
+    assert.equal(single.started.details.results[0].intelligence, "junior");
     assert.equal(flag(calls()[0].args, "--provider"), "chosen");
     assert.equal(flag(calls()[0].args, "--model"), "org/model");
     assert.equal(flag(calls()[0].args, "--thinking"), "high");
@@ -256,6 +257,7 @@ test("named resumes retain original settings across preset, parent, definition, 
     );
     assert.equal(sole.isError, false, JSON.stringify(sole.content));
     assert.equal(sole.details.results[0].intelligence, "renamed");
+    assert.equal(sole.started.details.results[0].intelligence, "renamed");
     assert.equal(flag(calls().at(-1)!.args, "--model"), "org/model");
     const soleResume = await host.callAndWait(
       "message_subagent",

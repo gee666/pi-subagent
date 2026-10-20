@@ -4,10 +4,46 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { renderMessageResult, renderResult } from "../render.js";
 import { buildSubagentDetails } from "../types.js";
 import { makeResult } from "./helpers/results.js";
+import { fixture } from "./helpers/message-subagent.js";
+import { hostDouble } from "./helpers/extension.js";
+import { updateNamesRegistry } from "../names.js";
+import type { Theme, ToolDefinition } from "@earendil-works/pi-coding-agent";
+type RenderContext = Parameters<NonNullable<ToolDefinition["renderResult"]>>[3];
 
 const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
 const receipt = { content: [{ type: "text", text: 'Message sent to subagent "Padmini".' }] };
 const context = (message: string) => ({ args: { name: "Padmini", message } });
+
+test("message call headers and previews retain original intelligence and optional type", async () => {
+  const f = await fixture();
+  try {
+    f.running(() => true);
+    const cases = [
+      { agent: "writer", intelligence: "senior", qualifier: " (Senior/writer)" },
+      { agent: "", intelligence: "senior", qualifier: " (Senior)" },
+      { agent: "writer", intelligence: undefined, qualifier: " (writer)" },
+      { agent: "", intelligence: undefined, qualifier: "" },
+    ];
+    const tuiTheme = hostDouble<Theme>(theme);
+    for (const { agent, intelligence, qualifier } of cases) {
+      await updateNamesRegistry(f.state.currentNamesFile, (registry) => {
+        Object.assign(registry.agents[f.name], { agent, intelligence });
+      });
+      const args = { name: f.name, message: "Continue the work." };
+      const result = await f.execute(args);
+      const ctx = hostDouble<RenderContext>({ args, state: {}, isError: false });
+      const header = f.tool.renderCall!(args, tuiTheme, ctx).render(120).join("\n");
+      assert.ok(header.includes(`${f.name}${qualifier}`), header);
+      for (const expanded of [false, true]) {
+        const body = f.tool.renderResult!(result, { expanded, isPartial: false }, tuiTheme, ctx).render(120).join("\n");
+        assert.ok(body.includes(`${f.name}${qualifier}`), body);
+        if (!qualifier) assert.doesNotMatch(body, /\(\)|Senior|writer/);
+      }
+    }
+  } finally {
+    await f.close();
+  }
+});
 
 test("message previews use the same two-line prompt formatting as task previews", () => {
   const message = "Check the parser carefully.\nThen update the tests.\n" + "Keep the existing behavior. ".repeat(12);

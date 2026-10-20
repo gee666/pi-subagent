@@ -7,11 +7,13 @@ export function startedResult(
   name: string | undefined,
   budget: SubagentBudget | undefined,
   sessionDir: string,
+  intelligence?: string,
 ): SingleResult {
   return {
     agent: task.agent,
     task: task.task,
     name,
+    intelligence,
     budget,
     sessionDir,
     agentSource: "unknown",

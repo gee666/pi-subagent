@@ -14,6 +14,8 @@ import {
   updateNameRecord,
 } from "../names.js";
 import { originalModelSettings } from "../storage/session-settings.js";
+import { formatSubagentLabel } from "../ui/agent-label.js";
+import { resolveMessageRecipient, type MessageRecipient } from "./message-identity.js";
 import { recordToolCallStart, renderMessageResult } from "../render.js";
 import { buildSubagentDetails, DEFAULT_DELEGATION_MODE } from "../types.js";
 import { startBackground } from "./async-jobs.js";
@@ -49,6 +51,7 @@ export function registerMessageSubagentTool(state: ExtensionState) {
       const namesFile = state.currentNamesFile;
       const ownerId = state.currentOwnerId;
       const localGuards = state.activeResumeNames;
+      let recipient: MessageRecipient | undefined;
       let guardedName: string | undefined;
       let marked = false;
       let backgroundOwnsCleanup = false;
@@ -66,10 +69,14 @@ export function registerMessageSubagentTool(state: ExtensionState) {
       };
       const result = (text: string) => ({
         content: [{ type: "text" as const, text }],
-        details: buildSubagentDetails("parallel", DEFAULT_DELEGATION_MODE, null, []),
+        details: Object.assign(
+          buildSubagentDetails("parallel", DEFAULT_DELEGATION_MODE, null, []),
+          recipient ? { recipient } : {},
+        ),
       });
       try {
         const { name, message, max_subagents_allowed } = validatePreparedArguments(MessageSubagentParams, rawParams);
+        recipient = resolveMessageRecipient(state, name);
         checkCurrent();
         if (!state.canDelegate || resumableSubagentsDisabled(state.settings))
           throw new Error("Subagent messaging is disabled for this session.");
@@ -144,6 +151,11 @@ export function registerMessageSubagentTool(state: ExtensionState) {
         const resolution = await resolveResumeTarget(namesFile, name, ownerId);
         checkCurrent();
         if ("error" in resolution) throw new Error(resolution.error);
+        recipient = {
+          name: resolution.record.name,
+          agent: resolution.record.agent,
+          intelligence: resolution.record.intelligence,
+        };
         const definition = discovery.agents.find((agent) => agent.name === resolution.record.agent);
         if (definition && !isAgentEnabledAtLayer(definition, state.currentDepth + 1, state.maxDepth)) {
           throw new Error(
@@ -235,12 +247,16 @@ export function registerMessageSubagentTool(state: ExtensionState) {
       }
     },
 
-    renderCall: (args, theme) =>
-      new Text(
-        `${theme.fg("toolTitle", theme.bold("message subagent "))}${theme.fg("accent", typeof args.name === "string" ? args.name : "")}`,
+    renderCall: (args, theme, context) => {
+      const name = typeof args.name === "string" ? args.name : "";
+      const cache = context?.state ?? {};
+      if (!cache.recipient || cache.recipient.name !== name) cache.recipient = resolveMessageRecipient(state, name);
+      return new Text(
+        `${theme.fg("toolTitle", theme.bold("message subagent "))}${theme.fg("accent", formatSubagentLabel(cache.recipient))}`,
         0,
         0,
-      ),
+      );
+    },
     renderResult: (result, { expanded }, theme, context) => renderMessageResult(result, expanded, theme, context),
   });
 }
