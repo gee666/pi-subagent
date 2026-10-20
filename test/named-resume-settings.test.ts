@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { fixture, gatedRunner, text } from "./helpers/message-subagent.js";
 import { test, after } from "node:test";
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
@@ -147,6 +148,32 @@ test("named resumes retain same-provider CLI auth but strip conflicting or unkno
       assert.equal(args.includes("--api-key"), false);
     }
     for (const arg of ["--provider", "--model", "--thinking"]) assert.equal(legacy.includes(arg), false);
+  }
+});
+
+test("foreign owners cannot resume saved workers or steer live workers through private forks", async () => {
+  for (const running of [false, true]) {
+    const f = await fixture();
+    try {
+      const runner = gatedRunner(f);
+      const received: string[] = [];
+      if (running)
+        f.running((message) => {
+          received.push(message);
+          return true;
+        });
+      f.state.currentOwnerId = "foreign-owner";
+      const before = fs.readFileSync(f.state.currentNamesFile, "utf8");
+      const result = await f.execute({ name: f.name, message: "not mine", max_subagents_allowed: 3 });
+      assert.equal(Reflect.get(result, "isError"), true);
+      assert.match(text(result), /direct children/);
+      assert.deepEqual(received, []);
+      assert.deepEqual(runner.runs(), []);
+      assert.equal(fs.readFileSync(f.state.currentNamesFile, "utf8"), before);
+      assert.equal(f.state.backgroundJobs.size, 0);
+    } finally {
+      await f.close();
+    }
   }
 });
 

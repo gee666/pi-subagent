@@ -6,6 +6,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { readBudget, reserveSubagentBudgets } from "../budget.js";
 import { readNamesRegistry } from "../names.js";
 import { isSubagentDetails } from "../types.js";
+import { schedulerFor } from "../extension/scheduler.js";
 import { fixture, deferred, until, assertSuccess, text, gatedRunner, sdk } from "./helpers/message-subagent.js";
 
 test("message_subagent registers one strict name/message payload and validates direct calls", async () => {
@@ -83,79 +84,56 @@ test("running messages steer immediately and resize the original grant without r
   }
 });
 
-test("messages wait for startup jobs to expose a handle and can cancel that wait", async () => {
+test("messages queue promptly during worker startup and stop discards undelivered steering", async () => {
   const f = await fixture();
   const gate = deferred();
+  const scheduler = schedulerFor(f.state);
+  const messages: string[] = [];
+  const ticket = scheduler.schedule(f.name, () => gate.promise);
   try {
-    f.state.backgroundJobs.set("startup", {
-      names: [f.name],
-      controller: new AbortController(),
-      promise: gate.promise,
-    });
-    const messages: string[] = [];
-    let returned = false;
-    const response = f.execute({ name: f.name, message: "during startup" }).then((result) => {
-      returned = true;
-      return result;
-    });
-    await delay(25);
-    assert.equal(returned, false);
-    assert.equal(f.state.activeResumeNames.size, 0);
-    f.running((message) => {
+    const response = await f.execute({ name: f.name, message: "during startup" });
+    assertSuccess(response);
+    assert.match(text(response), /Message queued/);
+    assert.equal(Reflect.get(response.details!, "queued"), true);
+    scheduler.setSteer(f.name, (message) => {
       messages.push(message);
     });
-    assertSuccess(await response);
+    await until(() => messages.length === 1);
     assert.deepEqual(messages, ["during startup"]);
-    f.state.activeSubagents.clear();
-    const controller = new AbortController();
-    const cancelled = f.execute({ name: f.name, message: "cancelled" }, controller.signal);
-    controller.abort();
-    assert.match(text(await cancelled), /abort/i);
-    assert.equal(f.state.backgroundJobs.get("startup")!.controller.signal.aborted, false);
-    f.state.backgroundJobs.delete("startup");
+    scheduler.stop(f.name);
     gate.resolve();
+    await ticket.promise;
+    const next = scheduler.schedule(f.name, () => gate.promise);
+    const dropped = await f.execute({ name: f.name, message: "discard me" });
+    assertSuccess(dropped);
+    scheduler.stop(f.name);
+    scheduler.setSteer(f.name, (message) => {
+      messages.push(message);
+    });
+    await next.promise.catch(() => undefined);
+    assert.deepEqual(messages, ["during startup"]);
   } finally {
+    scheduler.shutdown();
     gate.resolve();
     await f.close();
   }
 });
 
-test("an awaited false from a settling handle waits for its background job before retrying", async () => {
+test("a settling handle reports a prompt retry error without waiting for its job", async () => {
   const f = await fixture();
   const gate = deferred();
   try {
-    f.state.backgroundJobs.set("settling", {
-      names: [f.name],
-      controller: new AbortController(),
-      promise: gate.promise,
-    });
-    let attempts = 0;
-    let returned = false;
+    const job = { names: [f.name], controller: new AbortController(), promise: gate.promise };
+    f.state.backgroundJobs.set("settling", job);
     f.running(
-      async () => {
-        attempts++;
-        return false;
-      },
+      async () => false,
       () => true,
     );
-    const response = f.execute({ name: f.name, message: "follow-up" }).then((result) => {
-      returned = true;
-      return result;
-    });
-    await delay(25);
-    assert.equal(attempts, 1);
-    assert.equal(returned, false, "settling rejection must not report success");
-    const delivered: string[] = [];
-    f.running((message) => {
-      delivered.push(message);
-    });
-    await delay(25);
-    assert.equal(returned, false, "a replacement handle must not bypass the old job's settlement");
-    assert.deepEqual(delivered, []);
-    f.state.backgroundJobs.delete("settling");
-    gate.resolve();
-    assertSuccess(await response);
-    assert.deepEqual(delivered, ["follow-up"]);
+    const response = await f.execute({ name: f.name, message: "follow-up" });
+    assert.equal(Reflect.get(response, "isError"), true);
+    assert.match(text(response), /Retry when it finishes/);
+    assert.equal(f.state.backgroundJobs.get("settling"), job);
+    assert.equal(job.controller.signal.aborted, false);
   } finally {
     gate.resolve();
     await f.close();
@@ -198,14 +176,13 @@ test("an awaited false from a non-settling handle reports failed steering withou
   }
 });
 
-for (const fork of [false, true]) {
+for (const changeSession of [false, true]) {
   test(
-    `idle messaging starts background execution with original settings, fork ${fork}`,
+    `owned idle messaging preserves original settings and captured cleanup, session changes ${changeSession}`,
     { timeout: 15000 },
     async () => {
       const f = await fixture();
       const runner = gatedRunner(f);
-      if (fork) f.state.currentOwnerId = "another-owner";
       const owner = f.state.currentOwnerId;
       const namesFile = f.state.currentNamesFile;
       const controller = new AbortController();
@@ -237,13 +214,12 @@ for (const fork of [false, true]) {
         assert.equal(run.intelligence, "old-label");
         assert.equal(run.budget, f.budget.directory);
         const record = readNamesRegistry(namesFile).agents[f.name];
-        const resumedDir = fork ? record.forks[owner].sessionDir : f.sessionDir;
-        assert.equal(flag("--session"), path.join(resumedDir, "session.jsonl"));
-        if (fork) assert.notEqual(resumedDir, f.sessionDir);
+        assert.equal(flag("--session"), path.join(f.sessionDir, "session.jsonl"));
+        assert.deepEqual(record.forks, {}, "owned resumes do not create private forks");
         assert.deepEqual(readBudget(f.state.currentBudget!), initial, "resume does not allocate a new grant");
         assert.equal(record.lastResumePrompt, "exact follow-up\nsecond line");
         // Cleanup must use captured registry identity, not the next session's.
-        if (fork) {
+        if (changeSession) {
           f.state.lifecycleGeneration++;
           f.state.currentNamesFile = path.join(f.root, "next-session.json");
           f.state.currentOwnerId = "next-owner";
@@ -253,7 +229,11 @@ for (const fork of [false, true]) {
         runner.release();
         await job.promise;
         assert.equal(readNamesRegistry(namesFile).agents[f.name].activeResumes?.[owner], undefined);
-        assert.equal(f.state.activeResumeNames.has(f.name), fork, "cleanup releases only the original session's guard");
+        assert.equal(
+          f.state.activeResumeNames.has(f.name),
+          changeSession,
+          "cleanup releases only the original session's guard",
+        );
         assert.equal(toolUpdates, 0, "background progress must not invoke the returned tool callback");
       } finally {
         await f.close();

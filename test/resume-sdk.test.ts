@@ -77,7 +77,6 @@ test("installed Pi loader's message_subagent accepts strict-provider null budget
           PI_SUBAGENT_NAMES_FILE: "",
           PI_SUBAGENT_BUDGET_DIR: "",
           PI_SUBAGENT_DEPTH: "0",
-          DISABLE_RESUMABLE_SUBAGENTS: "false",
         },
       }),
     );

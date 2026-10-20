@@ -17,7 +17,7 @@ test("project settings load after trust, refresh on session switches and can ena
     f.write(f.agent, { delegation: { depth: 0 }, resume: { disableAuto: true } });
     f.write(path.join(f.project, ".pi"), {
       delegation: { depth: 3 },
-      limits: { parallel: 1, total: 0 },
+      limits: { tasksPerCall: 1, total: 0 },
       agents: { confirmProject: "session" },
       models: { intelligence: true },
       "subagents-models": [
@@ -39,7 +39,7 @@ test("project settings load after trust, refresh on session switches and can ena
     assert.equal(Value.Check(params, { tasks: [task] }), false);
     assert.equal(Value.Check(params, { tasks: [{ ...task, intelligence: "cheap" }] }), true);
     const prompt = (await host.emit("before_agent_start", {}, trusted)).at(-1) as { systemPrompt: string };
-    assert.match(prompt.systemPrompt, /Technical batch capacity: 1/);
+    assert.match(prompt.systemPrompt, /Maximum tasks per call: 1/);
     assert.match(prompt.systemPrompt, /You cannot launch subagents/);
     assert.match(prompt.systemPrompt, /No agent types are available/);
     const budgetEntry = entries.find(
@@ -50,15 +50,11 @@ test("project settings load after trust, refresh on session switches and can ena
     f.write(path.join(f.project, ".pi"), {
       delegation: { depth: 3 },
       limits: { total: 99 },
-      resume: { disabled: true },
     });
     await host.emit("session_start", {}, trusted);
-    assert.equal(host.getActiveTools().includes("message_subagent"), false);
+    assert.ok(host.getActiveTools().includes("message_subagent"));
     await host.emit("before_agent_start", {}, trusted);
     assert.equal(readBudget(budgetEntry.data as { directory: string }).limit, 0, "existing allowance never resets");
-    f.write(path.join(f.project, ".pi"), { delegation: { depth: 3 }, resume: { disabled: false } });
-    await host.emit("session_start", {}, trusted);
-    assert.ok(host.getActiveTools().includes("message_subagent"));
     await host.emit("session_start", {}, untrusted);
     assert.equal(host.getActiveTools().includes("subagents"), false);
     const result = await host.call("subagents", "disabled", { tasks: [task] }, untrusted);
@@ -187,23 +183,21 @@ test("resume prompt and automatic-resume switches apply to lifecycle handlers wi
   }
 });
 
-test("resume env changes refresh registration and activation on the next session", async () => {
+test("legacy resume-disable env and JSON cannot disable named-worker messaging", async () => {
   const f = settingsFixture();
   try {
     process.env.DISABLE_RESUMABLE_SUBAGENTS = "true";
+    f.write(f.agent, { resume: { disabled: true, disableAuto: true } });
     const host = createExtensionHarness();
-    assert.equal(host.tools.has("message_subagent"), false);
+    assert.ok(host.tools.has("message_subagent"));
     const ctx = host.makeCtx([], { cwd: f.project, hasUI: false });
-    await host.emit("session_start", {}, ctx);
-    process.env.DISABLE_RESUMABLE_SUBAGENTS = "false";
-    await host.emit("session_start", {}, ctx);
-    assert.ok(host.getActiveTools().includes("message_subagent"));
-    process.env.DISABLE_RESUMABLE_SUBAGENTS = "true";
-    await host.emit("session_start", {}, ctx);
-    assert.equal(host.getActiveTools().includes("message_subagent"), false);
-    process.env.DISABLE_RESUMABLE_SUBAGENTS = "false";
-    await host.emit("session_start", {}, ctx);
-    assert.ok(host.getActiveTools().includes("message_subagent"));
+    for (const legacyDisabled of ["true", "false", "on", "1"]) {
+      process.env.DISABLE_RESUMABLE_SUBAGENTS = legacyDisabled;
+      f.write(f.agent, { resume: { disabled: legacyDisabled !== "false", disableAuto: true } });
+      await host.emit("session_start", {}, ctx);
+      assert.ok(host.getActiveTools().includes("subagents"));
+      assert.ok(host.getActiveTools().includes("message_subagent"));
+    }
     await host.emit("session_shutdown", {}, ctx);
   } finally {
     f.close();

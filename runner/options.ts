@@ -9,6 +9,10 @@ export type DetailsFactory = ((results: SingleResult[]) => SubagentDetails) & {
 };
 
 export interface RunningSubagentHandle {
+  /** Immediately SIGKILL this worker's process tree. No graceful-stop delay. */
+  kill?(): void;
+  /** Request unloading an idle broker-supervised parent. Admission remains held until confirmed exit. */
+  park?(): boolean;
   isSettling?(): boolean;
   isIdle?(): boolean;
   /** True acknowledges RPC acceptance, not just a stdin write. False means acceptance was not confirmed. */
@@ -44,12 +48,16 @@ export interface RunAgentOptions {
   maxDepth: number;
   /** Whether cycle prevention should be enforced in child processes. */
   preventCycles: boolean;
+  /** Shared root-tree slot, acquired before every attempt and retained until confirmed process exit. */
+  treeAdmission?: import("./tree-admission.js").TreeWorkerAdmission;
   /** Abort signal for cancellation. */
   signal?: AbortSignal;
   /** Streaming update callback. */
   onUpdate?: OnUpdateCallback;
   /** Immediate-child notifications. Invoked in arrival order, never awaited by the runner. */
   onLeadMessage?: (message: string) => void | Promise<void>;
+  /** Actual RPC settlement with live child jobs, and subsequent turn restarts. */
+  onWaitingForChildren?: (waiting: boolean) => void;
   /** Factory to wrap results into durable SubagentDetails. Optional .live keeps transient TUI state. */
   makeDetails: DetailsFactory;
   /** Dedicated session directory for this subagent process. */

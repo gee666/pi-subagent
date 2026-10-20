@@ -18,7 +18,7 @@ const settings = [
 ];
 const flag = (args: string[], name: string) => args[args.indexOf(name) + 1];
 
-test("named resumes retain original settings across preset, parent, definition, and owner changes", async (t) => {
+test("owned resumes retain original settings across configuration changes and reject foreign owners", async (t) => {
   fs.mkdirSync("tmp", { recursive: true });
   const root = fs.mkdtempSync(path.resolve("tmp/intelligence-tools-"));
   const log = path.join(root, "calls.jsonl");
@@ -63,7 +63,6 @@ test("named resumes retain original settings across preset, parent, definition, 
     PI_SUBAGENT_PI_COMMAND: process.execPath,
     PI_SUBAGENT_PI_ARGS_PREFIX: JSON.stringify([script]),
     PI_SUBAGENT_DISABLE_RESUME: "true",
-    DISABLE_RESUMABLE_SUBAGENTS: "false",
   };
   const previous = Object.fromEntries(Object.keys(variables).map((key) => [key, process.env[key]]));
   Object.assign(process.env, variables);
@@ -326,16 +325,14 @@ test("named resumes retain original settings across preset, parent, definition, 
     assert.equal(flag(calls().at(-1)!.args, "--thinking"), "off");
     entries[0] = customEntry(SUBAGENT_NAMES_CUSTOM_TYPE, { namesFile, ownerId: "other-owner" });
     await restarted.emit("session_start", {}, ctx);
-    for (const task of ["private fork", "same private fork"]) {
-      const forked = await restarted.callAndWait("message_subagent", task, { name, message: task }, ctx);
-      assert.equal(forked.isError, false, JSON.stringify(forked.content));
-      assert.equal(forked.details.results[0].intelligence, "junior");
-      assert.equal(flag(calls().at(-1)!.args, "--model"), "org/model");
-      assert.equal(flag(calls().at(-1)!.args, "--thinking"), "high");
+    const beforeForeign = calls().length;
+    for (const task of ["foreign resume", "repeated foreign resume"]) {
+      const rejected = await restarted.callAndWait("message_subagent", task, { name, message: task }, ctx);
+      assert.equal(rejected.isError, true);
+      assert.match(JSON.stringify(rejected.content), /direct children/);
     }
-    const last = calls().slice(-2);
-    assert.equal(flag(last[0].args, "--session-dir"), flag(last[1].args, "--session-dir"));
-    assert.notEqual(flag(last[0].args, "--session-dir"), detail.sessionDir);
+    assert.equal(calls().length, beforeForeign, "foreign resumes must not launch private forks");
+    assert.deepEqual(readNamesRegistry(namesFile).agents[name].forks, {});
     assert.equal(buildSubagentDetail(readNamesRegistry(namesFile).agents[name]).blocks.length, 5);
     await restarted.emit("session_shutdown", {}, ctx);
     assert.equal(fetch.mock.callCount(), 0);

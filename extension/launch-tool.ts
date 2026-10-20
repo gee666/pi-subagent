@@ -18,7 +18,9 @@ import { updateLatestBroadcastTargets } from "./broadcast.js";
 import { makeDetailsFactory } from "./details.js";
 import { executeParallel } from "./execution.js";
 import { startBackground } from "./async-jobs.js";
-import { startedResult } from "./launch-result.js";
+import type { WorkerStatus } from "./scheduler.js";
+import { launchReceipt } from "./launch-result.js";
+import { assertBrokerLaunchReceipts } from "./broker-execution.js";
 import { formatModelFlag } from "./models.js";
 import {
   confirmProjectAgentsIfNeeded,
@@ -97,9 +99,9 @@ export function registerSubagentsTool(state: ExtensionState) {
               );
             }
           }
-          if (tasks.length > state.maxParallelTasks)
+          if (tasks.length > state.maxTasksPerCall)
             throw new SubagentBudgetError(
-              `Too many tasks: ${tasks.length}. Batch capacity is ${state.maxParallelTasks}. No slots were reserved.`,
+              `Too many tasks: ${tasks.length}. Batch capacity is ${state.maxTasksPerCall}. No slots were reserved.`,
             );
           if (signal?.aborted) throw new SubagentBudgetError("Launch canceled. No slots were reserved.");
           const launchGeneration = state.lifecycleGeneration;
@@ -280,6 +282,7 @@ export function registerSubagentsTool(state: ExtensionState) {
             throw new SubagentBudgetError(
               "Launch canceled after reservation. Reserved slots remain assigned to these branches.",
             );
+          const admissions: Array<WorkerStatus | "completed"> = tasks.map(() => "completed");
           startBackground(
             state,
             toolCallId,
@@ -298,31 +301,27 @@ export function registerSubagentsTool(state: ExtensionState) {
                 !!resumePlan,
                 formatModelFlag(getParentModelForSubagent(state, ctx)),
                 topLevelBaseId,
-                { jobId: toolCallId, names, budgets },
+                {
+                  jobId: toolCallId,
+                  names,
+                  budgets,
+                  onScheduled: (index, status) => {
+                    admissions[index] = status;
+                  },
+                },
               ),
           );
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Started ${tasks.length} subagent(s): ${tasks.map((task, index) => names[index] || task.agent || "worker").join(", ")}. Completion messages will arrive asynchronously. Keep working in parallel.`,
-              },
-            ],
-            details: Object.assign(
-              makeDetails(executionMode)(
-                tasks.map((task, index) =>
-                  startedResult(
-                    task,
-                    names[index],
-                    budgets[index],
-                    getSessionDirForTask(state, resumePlan?.previousToolCallId ?? toolCallId, index),
-                    selectIntelligence(state.intelligencePresets, task.intelligence, state.settings)?.name,
-                  ),
-                ),
-              ),
-              { asyncJobId: toolCallId },
-            ),
-          };
+          assertBrokerLaunchReceipts(state, admissions, cyclicTaskIndexes, resumePlan?.details?.results);
+          return launchReceipt(
+            tasks,
+            names,
+            budgets,
+            admissions,
+            (index) => getSessionDirForTask(state, resumePlan?.previousToolCallId ?? toolCallId, index),
+            (index) => selectIntelligence(state.intelligencePresets, tasks[index].intelligence, state.settings)?.name,
+            makeDetails(executionMode),
+            toolCallId,
+          );
         } catch (err) {
           if (err instanceof SubagentBudgetError) {
             return {

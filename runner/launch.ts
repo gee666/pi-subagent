@@ -3,6 +3,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { SUBAGENT_PI_COMMAND_ENV, SUBAGENT_PI_ARGS_PREFIX_ENV } from "./constants.js";
+import { freezeDescendantPids } from "./process-tree.js";
 export interface RuntimeLaunchCommand {
   command: string;
   argsPrefix: string[];
@@ -114,7 +115,34 @@ export function buildChildProcessEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.Proc
   return env;
 }
 
-export function stopProcessTree(proc: ChildProcess, force: boolean): void {
+type ProcessTarget = Pick<ChildProcess, "pid" | "kill">;
+
+/** Stop a remote worker after its PID identity has been checked against the shared ledger. */
+export function killPidTreeImmediately(pid: number): void {
+  if (!Number.isSafeInteger(pid) || pid <= 1) return;
+  killProcessTreeImmediately({ pid, kill: (signal) => process.kill(pid, signal) });
+}
+
+/** Explicit stop also reaches nested workers that created separate POSIX process groups. */
+export function killProcessTreeImmediately(proc: ProcessTarget): void {
+  if (process.platform !== "win32" && proc.pid) {
+    for (const pid of freezeDescendantPids(proc.pid)) {
+      try {
+        process.kill(-pid, "SIGKILL");
+      } catch {
+        /* Not every descendant leads a process group. */
+      }
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        /* Already exited. */
+      }
+    }
+  }
+  stopProcessTree(proc, true);
+}
+
+export function stopProcessTree(proc: ProcessTarget, force: boolean): void {
   const terminationSignal = force ? "SIGKILL" : "SIGTERM";
   if (process.platform === "win32" && proc.pid) {
     // proc.kill() only terminates the immediate Node process on Windows;

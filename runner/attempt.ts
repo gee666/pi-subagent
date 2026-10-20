@@ -3,10 +3,8 @@ import { StringDecoder } from "node:string_decoder";
 import { parseLeadMessageStderrLine } from "./lead-message.js";
 import { JsonlFramer } from "./jsonl-framer.js";
 import { isResultError, type SingleResult } from "../types.js";
-import { SUBAGENT_SESSION_ROOT_ENV } from "../resume.js";
-import { SUBAGENT_NAMES_FILE_ENV } from "../names.js";
-import { SUBAGENT_BUDGET_DIR_ENV } from "../budget.js";
-import { SUBAGENT_RUN_INTELLIGENCE_ENV } from "../intelligence.js";
+import { attemptEnvironment } from "./attempt-env.js";
+import { AttemptParking } from "./attempt-parking.js";
 import {
   configuredNonNegativeInt,
   SIGKILL_TIMEOUT_MS,
@@ -15,13 +13,8 @@ import {
   DEFAULT_IDLE_TIMEOUT_MS,
   SUBAGENT_IDLE_TIMEOUT_ENV,
   MAX_CAPTURED_STDERR_CHARS,
-  SUBAGENT_DEPTH_ENV,
-  SUBAGENT_MAX_DEPTH_ENV,
-  SUBAGENT_STACK_ENV,
-  SUBAGENT_PREVENT_CYCLES_ENV,
-  SUBAGENT_FALLBACK_MODEL_ENV,
 } from "./constants.js";
-import { getPiSpawnCommand, buildChildProcessEnv, stopProcessTree } from "./launch.js";
+import { getPiSpawnCommand, stopProcessTree, killProcessTreeImmediately } from "./launch.js";
 import { appendBoundedStderr } from "./result.js";
 import { isProgressOnlyEvent } from "./events.js";
 import { createProtocolHandler, createSteeringHandle } from "./protocol.js";
@@ -36,22 +29,9 @@ export async function runAttempt(
   prompt: string,
   attempt: number,
   emitUpdate: () => void,
-): Promise<{ exitCode: number; startupTimedOut: boolean; wasAborted: boolean }> {
-  const {
-    cwd,
-    parentDepth,
-    maxDepth,
-    parentAgentStack,
-    agentName,
-    preventCycles,
-    sessionRoot,
-    fallbackModel,
-    piCommandOverride,
-    startupTimeoutMsOverride,
-    idleTimeoutMsOverride,
-    terminationTimeoutMsOverride,
-    signal,
-  } = opts;
+): Promise<{ exitCode: number; startupTimedOut: boolean; wasAborted: boolean; parked?: boolean }> {
+  const { piCommandOverride, startupTimeoutMsOverride, idleTimeoutMsOverride, terminationTimeoutMsOverride, signal } =
+    opts;
   const state: AttemptState = {
     resolved: false,
     receivedFirstEvent: false,
@@ -61,36 +41,30 @@ export async function runAttempt(
     activeToolCallIds: new Set(),
     pendingSteeringRequests: new Map(),
   };
+  try {
+    if (opts.treeAdmission) await opts.treeAdmission.ensure(signal);
+    signal?.throwIfAborted();
+  } catch (error) {
+    if (signal?.aborted) return { exitCode: 130, startupTimedOut: false, wasAborted: true };
+    throw error;
+  }
+  if (result.parked) {
+    result.parked = false;
+    result.idle = false;
+    emitUpdate();
+  }
+  let parked = false;
   const exitCode = await new Promise<number>((resolve) => {
-    const nextDepth = Math.max(0, Math.floor(parentDepth)) + 1;
-    const propagatedMaxDepth = Math.max(0, Math.floor(maxDepth));
-    const propagatedStack = [...parentAgentStack, agentName];
     // Use node + CLI directly on Windows; shell:true corrupts spaced arguments.
     const piSpawn = getPiSpawnCommand(piCommandOverride, opts.settings);
-    const spawnCmd = piSpawn.command;
-    const spawnArgs = [...piSpawn.argsPrefix, ...piArgs];
-    const proc = spawn(spawnCmd, spawnArgs, {
-      cwd,
+    const proc = spawn(piSpawn.command, [...piSpawn.argsPrefix, ...piArgs], {
+      cwd: opts.cwd,
       shell: false,
       // A separate POSIX process group lets timeout/cancel terminate nested
       // agents and tools, rather than only their immediate Pi parent.
       detached: process.platform !== "win32",
       stdio: ["pipe", "pipe", "pipe"],
-      env: buildChildProcessEnv({
-        [SUBAGENT_DEPTH_ENV]: String(nextDepth),
-        [SUBAGENT_MAX_DEPTH_ENV]: String(propagatedMaxDepth),
-        [SUBAGENT_STACK_ENV]: JSON.stringify(propagatedStack),
-        [SUBAGENT_PREVENT_CYCLES_ENV]: preventCycles ? "1" : "0",
-        ...(sessionRoot ? { [SUBAGENT_SESSION_ROOT_ENV]: sessionRoot } : {}),
-        ...(opts.namesFile ? { [SUBAGENT_NAMES_FILE_ENV]: opts.namesFile } : {}),
-        // Never let an unbudgeted child inherit its parent's spendable slots.
-        [SUBAGENT_BUDGET_DIR_ENV]: result.budget?.directory ?? "",
-        // An explicit null prevents an unselected child from inheriting its parent's label.
-        [SUBAGENT_RUN_INTELLIGENCE_ENV]: JSON.stringify(result.intelligence ?? null),
-        ...(fallbackModel ? { [SUBAGENT_FALLBACK_MODEL_ENV]: fallbackModel } : {}),
-        // All other provider/auth/proxy/temp/home variables are inherited.
-        // PI_OFFLINE is inherited, never forced by this runner.
-      }),
+      env: attemptEnvironment(opts, result),
     });
 
     let abortHandler: (() => void) | undefined;
@@ -112,15 +86,13 @@ export async function runAttempt(
       for (const complete of state.pendingSteeringRequests!.values()) complete(false);
     };
 
-    // Startup timeout: kill the process if it never produces its first
-    // model-turn event. Once startup succeeds, the semantic-inactivity
-    // watchdog below takes over.
     const startupTimeoutMs =
       startupTimeoutMsOverride ??
       configuredNonNegativeInt(SUBAGENT_STARTUP_TIMEOUT_ENV, DEFAULT_STARTUP_TIMEOUT_MS, false, opts.settings);
 
     const doResolve = (code: number) => {
-      if (state.resolved) return;
+      if (state.resolved || (parking.requested && !parking.exited)) return;
+      parking.dispose();
       state.resolved = true;
       failPendingSteering();
       if (state.startupTimer) {
@@ -145,11 +117,11 @@ export async function runAttempt(
     };
 
     const stopChild = (force: boolean) => stopProcessTree(proc, force);
-
-    const forceStopAndSettle = (settleCode = state.forcedExitCode ?? 1) => {
+    const forceStopAndSettle = (settleCode = state.forcedExitCode ?? 1, immediately = false) => {
       state.stopping = true;
       failPendingSteering();
-      stopChild(false);
+      if (immediately) killProcessTreeImmediately(proc);
+      else stopChild(false);
       if (state.killTimer) clearTimeout(state.killTimer);
       state.killTimer = setTimeout(() => {
         if (state.resolved) return;
@@ -193,11 +165,13 @@ export async function runAttempt(
       }, quietPeriodMs);
     };
 
+    const parking = new AttemptParking(opts, state, proc, result);
     const flushLine = createProtocolHandler({
       state,
       result,
       promptRequestId,
       onLeadMessage: opts.onLeadMessage,
+      onWaitingForChildren: (waiting) => parking.waiting(waiting, () => forceStopAndSettle(1, true)),
       emitUpdate,
       noteSemanticActivity,
       stopChild,
@@ -205,8 +179,6 @@ export async function runAttempt(
       forceStopAndSettle,
     });
 
-    // The startup deadline covers initialization. The idle watchdog takes over
-    // after the first turn_start or completed assistant turn.
     if (startupTimeoutMs > 0) {
       state.startupTimer = setTimeout(() => {
         if (state.resolved || state.receivedFirstEvent) return;
@@ -280,6 +252,7 @@ export async function runAttempt(
     });
 
     proc.on("exit", (code, exitSignal) => {
+      parked = parking.confirmExit();
       if (state.resolved) return;
       // `close` waits for stdio. A descendant can inherit stdout and keep it
       // open after the immediate Pi process exits, so bound that drain while
@@ -297,13 +270,27 @@ export async function runAttempt(
     });
 
     proc.on("error", (err) => {
+      if (!proc.pid) opts.treeAdmission?.release();
       appendBoundedStderr(result, `Spawn error: ${err.message}`);
       result.stopReason = "error";
       result.errorMessage = `Failed to spawn pi process: ${err.message}`;
       doResolve(1);
     });
 
-    // Abort handling
+    if (proc.pid && opts.treeAdmission) {
+      try {
+        if (!opts.treeAdmission.bindPid(proc.pid)) {
+          state.wasAborted = true;
+          state.forcedExitCode = 130;
+          forceStopAndSettle(130, true);
+        }
+      } catch (error) {
+        result.stopReason = "error";
+        result.errorMessage = `Global worker admission failed: ${error instanceof Error ? error.message : String(error)}`;
+        state.forcedExitCode = 1;
+        forceStopAndSettle(1, true);
+      }
+    }
     if (signal) {
       abortHandler = () => {
         state.wasAborted = true;
@@ -315,8 +302,8 @@ export async function runAttempt(
     }
 
     try {
-      opts.onHandle?.(
-        createSteeringHandle({
+      const handle = {
+        ...createSteeringHandle({
           state,
           result,
           promptRequestId,
@@ -325,7 +312,16 @@ export async function runAttempt(
           timeoutMs: opts.steeringTimeoutMsOverride,
           settleDeferred: () => flushLine(JSON.stringify({ type: "agent_settled" })),
         }),
-      );
+        park: () => parking.park(),
+        kill: () => {
+          if (state.resolved) return;
+          state.wasAborted = true;
+          state.forcedExitCode = 130;
+          forceStopAndSettle(130, true);
+        },
+      };
+      parking.register(handle);
+      opts.onHandle?.(handle);
     } catch (error) {
       state.forcedExitCode = 1;
       result.stopReason = "error";
@@ -337,7 +333,7 @@ export async function runAttempt(
       !state.wasAborted &&
       !state.resolved &&
       !state.stopping &&
-      !sendRpc({ id: promptRequestId, type: "prompt", message: prompt })
+      !sendRpc({ id: promptRequestId, type: "prompt", message: prompt, streamingBehavior: "steer" })
     ) {
       state.forcedExitCode = 1;
       result.stopReason = "error";
@@ -345,5 +341,5 @@ export async function runAttempt(
       forceStopAndSettle(1);
     }
   });
-  return { exitCode, startupTimedOut: state.startupTimedOut, wasAborted: state.wasAborted };
+  return { exitCode, startupTimedOut: state.startupTimedOut, wasAborted: state.wasAborted, parked };
 }

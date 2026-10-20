@@ -17,8 +17,10 @@ export interface Reservation {
 
 export interface BudgetState {
   version: 5;
-  /** Slots for new agents. The branch's existing worker is already paid for. */
+  /** Accounting capacity, including reservations. The branch's own worker is already paid for. */
   limit: number;
+  /** Durable cap, defaulting to limit. Retained when temporary root spending expands capacity. */
+  baselineLimit?: number;
   remaining: number;
   reservations: Record<string, Reservation>;
 }

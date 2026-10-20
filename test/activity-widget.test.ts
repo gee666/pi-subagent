@@ -33,8 +33,8 @@ test("wide formatting shows live names and elapsed time but only counts idle wor
   const original = structuredClone(entries);
   assert.equal(formatActivityLine(entries, 120, 61000), "Running 2: Anna 1m1s · 测试 1s · 1 idle");
   assert.equal(formatActivityLine(entries, 120, 62000), "Running 2: Anna 1m2s · 测试 2s · 1 idle");
-  assert.equal(formatActivityLine([], 120, 0), "Running 0");
-  assert.equal(formatActivityLine([entry("Sleeping", 0, "idle")], 120, 0), "Running 0 · 1 idle");
+  assert.equal(formatActivityLine([], 120, 0), "");
+  assert.equal(formatActivityLine([entry("Sleeping", 0, "idle")], 120, 0), "");
   assert.deepEqual(entries, original);
 });
 
@@ -54,14 +54,19 @@ test("narrow formatting reserves overflow and idle counts and respects Unicode c
   }
 });
 
-type LifecycleEvent = Extract<ExtensionEvent, { type: "session_start" | "session_shutdown" }>;
+type LifecycleEvent = Extract<
+  ExtensionEvent,
+  { type: "session_start" | "session_shutdown" | "turn_start" | "agent_settled" | "before_agent_start" }
+>;
 type Handler = (event: LifecycleEvent, ctx: ExtensionContext) => unknown;
 
 function fixture(t: TestContext) {
   t.mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"], now: 10000 });
   const handlers = new Map<string, Handler>();
   const on = (name: string, handler: Handler) => {
-    assert.ok(name === "session_start" || name === "session_shutdown");
+    assert.ok(
+      ["session_start", "session_shutdown", "before_agent_start", "turn_start", "agent_settled"].includes(name),
+    );
     assert.ok(!handlers.has(name));
     handlers.set(name, handler);
   };
@@ -90,7 +95,9 @@ function fixture(t: TestContext) {
     assert.equal(typeof content === "function" || content === undefined, true);
     widget = typeof content === "function" ? content(tui, theme) : undefined;
   };
+  let idle = false;
   const ctx = hostDouble<ExtensionContext>({
+    isIdle: () => idle,
     mode: "tui",
     hasUI: true,
     ui: hostDouble<ExtensionContext["ui"]>({ setWidget }),
@@ -107,20 +114,104 @@ function fixture(t: TestContext) {
   function add(name: string) {
     state.activeSubagents.set(1, { name, agent: "worker", task: "work", startedAt: 10000, handle: { steer() {} } });
   }
-  const screen = () => {
+  const screen = (width = 120) => {
     assert.ok(widget);
-    return widget.render(120).join("\n");
+    return widget.render(width).join("\n");
   };
-  return { state, calls, colors, start, shutdown, add, screen, renders: () => renders };
+  return {
+    state,
+    calls,
+    colors,
+    start,
+    shutdown,
+    add,
+    screen,
+    setIdle: (value: boolean) => {
+      idle = value;
+    },
+    turn: () => emit({ type: "turn_start", turnIndex: 0, timestamp: Date.now() }),
+    settled: () => emit({ type: "agent_settled" }),
+    renders: () => renders,
+  };
 }
+
+test("idle waiting uses the native Loader frames above unchanged activity, without touching native Working", (t) => {
+  const f = fixture(t);
+  f.add("Anna");
+  f.setIdle(true);
+  f.start();
+  const first = f.screen().split("\n");
+  assert.match(first[0], /⠋ Waiting for subagents - don't close the session/);
+  assert.equal(first[1], "Running 1: Anna 0s");
+  t.mock.timers.tick(80);
+  assert.match(f.screen(), /⠙ Waiting for subagents/);
+  for (const width of [0, 1, 8, 25, 80])
+    for (const line of f.screen(width).split("\n")) assert.ok(visibleWidth(line) <= width);
+  f.turn();
+  assert.equal(f.screen(), "Running 1: Anna 0s", "turn events hide waiting before isIdle catches up");
+  f.setIdle(false);
+  t.mock.timers.tick(1000);
+  assert.doesNotMatch(f.screen(), /Waiting/);
+  f.setIdle(true);
+  f.settled();
+  assert.match(f.screen(), /Waiting for subagents/);
+  f.shutdown();
+  const renders = f.renders();
+  t.mock.timers.tick(10000);
+  assert.equal(f.renders(), renders, "both Loader animation and refresh timers stop");
+});
+
+test("queued and parked pending jobs show waiting without active handles or disk reads", (t) => {
+  const f = fixture(t);
+  f.setIdle(true);
+  f.start();
+  assert.equal(f.screen(), "");
+  f.state.backgroundJobs.set("pending", {
+    names: ["Queued", "Parked"],
+    controller: new AbortController(),
+    promise: Promise.resolve(),
+  });
+  f.state.onActivityChanged?.();
+  t.mock.timers.tick(250);
+  assert.match(f.screen(), /Waiting for subagents[^\n]*$/);
+  assert.doesNotMatch(
+    f.screen(),
+    /Running|\n/,
+    "queued work keeps only the waiting indicator, with no blank running row",
+  );
+  f.state.backgroundJobs.clear();
+  f.state.onActivityChanged?.();
+  t.mock.timers.tick(250);
+  assert.equal(f.screen(), "");
+  const renders = f.renders();
+  t.mock.timers.tick(5000);
+  assert.equal(f.renders(), renders);
+});
+
+test("idle polling detects context changes and session replacement stops the old waiting animation", (t) => {
+  const f = fixture(t);
+  f.add("Anna");
+  f.setIdle(true);
+  f.start();
+  f.setIdle(false);
+  assert.equal(f.screen(), "Running 1: Anna 0s");
+  t.mock.timers.tick(1000);
+  f.state.activeSubagents.clear();
+  f.state.lifecycleGeneration++;
+  f.start();
+  assert.equal(f.screen(), "");
+  const renders = f.renders();
+  t.mock.timers.tick(5000);
+  assert.equal(f.renders(), renders);
+});
 
 test("registration installs one widget above the editor and does not poll while empty", (t) => {
   const f = fixture(t);
   f.start();
   assert.deepEqual(f.calls, [{ key: "subagent-running", installed: true, placement: "aboveEditor" }]);
   assert.equal(typeof f.state.onActivityChanged, "function");
-  assert.equal(f.screen(), "Running 0");
-  assert.deepEqual(f.colors, ["accent"]);
+  assert.equal(f.screen(), "");
+  assert.deepEqual(f.colors, []);
   const renders = f.renders();
   t.mock.timers.tick(5000);
   assert.equal(f.renders(), renders);
@@ -157,7 +248,7 @@ test("live activity starts ticking, updates names and time, then stops when empt
   f.state.activeSubagents.clear();
   f.state.onActivityChanged?.();
   t.mock.timers.tick(250);
-  assert.equal(f.screen(), "Running 0");
+  assert.equal(f.screen(), "");
   const renders = f.renders();
   t.mock.timers.tick(5000);
   assert.equal(f.renders(), renders);

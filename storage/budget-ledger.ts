@@ -64,6 +64,8 @@ function decodeState(value: unknown): BudgetState {
     !isRecord(value) ||
     (value.version !== 1 && value.version !== 2 && value.version !== 3 && value.version !== 4 && value.version !== 5) ||
     !isBudgetAmount(value.limit) ||
+    (value.baselineLimit !== undefined &&
+      (!isBudgetAmount(value.baselineLimit) || value.baselineLimit > value.limit)) ||
     !isBudgetAmount(value.remaining) ||
     value.remaining > value.limit ||
     !isRecord(value.reservations)

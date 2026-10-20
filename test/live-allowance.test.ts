@@ -4,10 +4,12 @@ import * as path from "node:path";
 import { createBudget, overrideResumeBudgets, reserveSubagentBudgets } from "../budget.js";
 import { createExtensionHarness } from "./helpers/extension.js";
 import { settingsFixture } from "./helpers/settings.js";
+import { simulatedTreeWorker } from "./helpers/tree-concurrency.js";
 
 test("a running leaf gains delegation tools when its lead increases its allowance", async () => {
   const f = settingsFixture();
   const host = createExtensionHarness();
+  const tree = simulatedTreeWorker(path.join(f.root, "concurrency"));
   try {
     const parent = createBudget(path.join(f.root, "parent"), 3);
     const [child] = reserveSubagentBudgets(
@@ -16,6 +18,7 @@ test("a running leaf gains delegation tools when its lead increases its allowanc
       [{ agent: "", task: "work", max_subagents_allowed: 0 }],
       "main",
     );
+    Object.assign(process.env, tree.env);
     process.env.PI_SUBAGENT_DEPTH = "1";
     process.env.PI_SUBAGENT_MAX_DEPTH = "3";
     process.env.PI_SUBAGENT_BUDGET_DIR = child.directory;
@@ -32,6 +35,7 @@ test("a running leaf gains delegation tools when its lead increases its allowanc
     assert.match(prompt.systemPrompt, /message_subagent/);
     await host.emit("session_shutdown", {}, ctx);
   } finally {
+    tree.close();
     f.close();
   }
 });

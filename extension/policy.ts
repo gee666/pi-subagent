@@ -2,7 +2,7 @@ import { configuredEnv, type SubagentSettings } from "../settings.js";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { type AgentConfig, filterAdvertisedAgents, isAgentEnabledAtLayer } from "../agents.js";
 import { parseBoolean, parseNonNegativeInt } from "../shared.js";
-import { MESSAGE_SUBAGENT_TOOL_NAME, SUBAGENT_TOOL_NAME } from "../types.js";
+import { MESSAGE_SUBAGENT_TOOL_NAME, STOP_SUBAGENT_TOOL_NAME, SUBAGENT_TOOL_NAME } from "../types.js";
 
 export const DEFAULT_MAX_DELEGATION_DEPTH = 3;
 
@@ -23,12 +23,6 @@ export const SUBAGENT_CONFIRM_PROJECT_AGENTS_ENV = "PI_SUBAGENT_CONFIRM_PROJECT_
 export type ProjectAgentConfirmationSetting = "ask" | "never" | "session";
 
 export type ProjectAgentApproval = "once" | "session" | "no";
-
-export const DISABLE_RESUMABLE_SUBAGENTS_ENV = "DISABLE_RESUMABLE_SUBAGENTS";
-
-export function resumableSubagentsDisabled(settings?: SubagentSettings): boolean {
-  return parseBoolean(configuredEnv(DISABLE_RESUMABLE_SUBAGENTS_ENV, settings)) === true;
-}
 
 export interface DelegationDepthConfig {
   currentDepth: number;
@@ -252,11 +246,9 @@ export function getProjectAgentSessionKey(projectAgentsDir: string | null): stri
   return projectAgentsDir ?? "(unknown-project-agents-dir)";
 }
 
-export function ensureSubagentToolActive(pi: ExtensionAPI, settings?: SubagentSettings): void {
+export function ensureSubagentToolActive(pi: ExtensionAPI): void {
   const activeTools = pi.getActiveTools();
-  const wanted = resumableSubagentsDisabled(settings)
-    ? [SUBAGENT_TOOL_NAME]
-    : [SUBAGENT_TOOL_NAME, MESSAGE_SUBAGENT_TOOL_NAME];
+  const wanted = [SUBAGENT_TOOL_NAME, MESSAGE_SUBAGENT_TOOL_NAME, STOP_SUBAGENT_TOOL_NAME];
   const missing = wanted.filter((tool) => !activeTools.includes(tool));
   if (missing.length > 0) {
     pi.setActiveTools([...activeTools, ...missing]);

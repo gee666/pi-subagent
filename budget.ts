@@ -61,9 +61,50 @@ export function createBudget(directory: string, limit: number): SubagentBudget {
   return budget;
 }
 
-export function readBudget(budget: SubagentBudget): { limit: number; remaining: number } {
+// Process-local only. Session owners must clear their override when leaving a session.
+const sessionBudgetLimits = new Map<string, number>();
+
+/** Change a root's live cap without changing its default or refunding reservations. */
+export function setSessionBudgetLimit(budget: SubagentBudget, limit: number): void {
+  if (!isBudgetAmount(limit)) throw new SubagentBudgetError("Budget must be a non-negative safe integer.");
+  const directory = path.resolve(budget.directory);
+  if (path.basename(path.dirname(directory)) === "children") {
+    throw new SubagentBudgetError(
+      "Session budget limits apply only to roots. Child allowances require parent funding.",
+    );
+  }
   const { state } = latestState(budget);
-  return { limit: state.limit, remaining: state.remaining };
+  const spent = state.limit - state.remaining;
+  if (limit < spent) {
+    throw new SubagentBudgetError(`Cannot set budget to ${limit}: ${spent} slots are already spent or reserved.`);
+  }
+  sessionBudgetLimits.set(directory, limit);
+}
+
+/** Restore the durable cap. Slots reserved under an override remain spent. */
+export function clearSessionBudgetLimit(budget: SubagentBudget): void {
+  sessionBudgetLimits.delete(path.resolve(budget.directory));
+}
+
+function effectiveBudget(budget: SubagentBudget, state: BudgetState): { limit: number; remaining: number } {
+  const limit = sessionBudgetLimits.get(path.resolve(budget.directory)) ?? state.baselineLimit ?? state.limit;
+  return { limit, remaining: Math.max(0, limit - (state.limit - state.remaining)) };
+}
+
+/** Expand accounting capacity only when spending requires it, never the durable cap. */
+function chargeBudget(state: BudgetState, amount: number): BudgetState {
+  const spent = state.limit - state.remaining + amount;
+  const limit = Math.max(state.limit, spent);
+  return {
+    ...state,
+    ...(limit > state.limit ? { baselineLimit: state.baselineLimit ?? state.limit } : {}),
+    limit,
+    remaining: limit - spent,
+  };
+}
+
+export function readBudget(budget: SubagentBudget): { limit: number; remaining: number } {
+  return effectiveBudget(budget, latestState(budget).state);
 }
 
 type BudgetAudience = "main" | "subagent";
@@ -103,8 +144,8 @@ function checkOverrideFloor(update: ResumeBudgetOverride): void {
       "Resume max_subagents_allowed must be a non-negative safe integer below Number.MAX_SAFE_INTEGER, excluding the resumed subagent. Omit it to keep the current allowance.",
     );
   }
-  const { limit, remaining } = readBudget(update.budget);
-  const minimum = limit - remaining;
+  const { state } = latestState(update.budget);
+  const minimum = state.limit - state.remaining;
   if (update.max_subagents_allowed < minimum) {
     throw new SubagentBudgetError(
       `Cannot set max_subagents_allowed to ${update.max_subagents_allowed}: this subagent already needs ${minimum} descendant slots spent or reserved for its workers. Choose at least ${minimum}, or omit the override.`,
@@ -161,15 +202,16 @@ export function overrideResumeBudgets(
       reservation.reservedSizes ??= reservation.tasks.map((task) => task.max_subagents_allowed + 1);
       reservation.reservedSizes[index] = Math.max(reserved, requested);
     }
-    if (extra > state.remaining) {
-      const available = showRemainingBudget(state.remaining, audience)
-        ? `The original launcher has ${state.remaining} unassigned slots.`
+    const { remaining } = effectiveBudget(parent, state);
+    if (extra > remaining) {
+      const available = showRemainingBudget(remaining, audience)
+        ? `The original launcher has ${remaining} unassigned slots.`
         : "This exceeds the original launcher's remaining allowance.";
       throw new SubagentBudgetError(
         `Resume budget increase needs ${extra} extra slots. ${available} Reduce or omit max_subagents_allowed. No budgets were changed.`,
       );
     }
-    if (extra === 0 || commit(parent, revision + 1, { ...state, remaining: state.remaining - extra })) break;
+    if (extra === 0 || commit(parent, revision + 1, chargeBudget(state, extra))) break;
   }
   for (const update of updates) {
     for (;;) {
@@ -221,9 +263,10 @@ export function reserveSubagentBudgets(
       for (const child of existing.children) readBudget(child);
       return existing.children;
     }
-    if (required > state.remaining) {
-      const available = showRemainingBudget(state.remaining, audience)
-        ? `Your branch has ${state.remaining} slots left.`
+    const { remaining } = effectiveBudget(budget, state);
+    if (required > remaining) {
+      const available = showRemainingBudget(remaining, audience)
+        ? `Your branch has ${remaining} slots left.`
         : "This exceeds your remaining allowance.";
       throw new SubagentBudgetError(
         `Subagent budget exceeded: this call needs ${required} slots in total. ${available} Reduce the number of tasks or their max_subagents_allowed values. Use 0 for direct workers. No agents were launched and no slots were reserved by this call.`,
@@ -233,8 +276,7 @@ export function reserveSubagentBudgets(
       directory: path.join(budget.directory, "children", `${key}-${index}`),
     }));
     const next: BudgetState = {
-      ...state,
-      remaining: state.remaining - required,
+      ...chargeBudget(state, required),
       reservations: { ...state.reservations, [key]: { tasks, children } },
     };
     // Prepare children before publishing the grant. They cannot run until the

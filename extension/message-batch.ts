@@ -29,6 +29,10 @@ export function registerMessageBatchTool(state: ExtensionState, single: SingleTo
       try {
         const validated = validatePreparedArguments(MessageSubagentParams, params);
         const names = [...new Set(validated.name)];
+        if (names.length > state.maxTasksPerCall)
+          throw new Error(
+            `Too many recipients: ${names.length}. Max tasks per call is ${state.maxTasksPerCall}. No messages were sent.`,
+          );
         if (names.length === 1) return single.execute(id, { ...validated, name: names[0] }, signal, onUpdate, ctx);
         const results = await Promise.all(
           names.map(async (name, index) => {
@@ -44,6 +48,8 @@ export function registerMessageBatchTool(state: ExtensionState, single: SingleTo
           ...(isRecord(result.details) && isRecord(result.details.recipient) ? result.details.recipient : {}),
           name: names[index],
           isError: Reflect.get(result, "isError") === true,
+          executionStatus: isRecord(result.details) ? result.details.executionStatus : undefined,
+          queued: isRecord(result.details) && result.details.queued === true,
           status: result.content
             .filter((part) => part.type === "text")
             .map((part) => part.text)

@@ -76,6 +76,7 @@ export function compactSingleResultForDurableDetails(result: SingleResult): Sing
     ...(result.name !== undefined ? { name: result.name } : {}),
     ...(result.intelligence !== undefined ? { intelligence: result.intelligence } : {}),
     ...(result.startedAt !== undefined ? { startedAt: result.startedAt } : {}),
+    ...(result.submittedAt !== undefined ? { submittedAt: result.submittedAt } : {}),
     ...(result.lastActionAt !== undefined ? { lastActionAt: result.lastActionAt } : {}),
     ...(result.stopReason !== undefined ? { stopReason: result.stopReason } : {}),
     ...(result.errorMessage !== undefined ? { errorMessage: result.errorMessage } : {}),

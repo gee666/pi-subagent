@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { acquireNamesLock } from "./names-lock.js";
 import { emptyNamesRegistry, type NamesRegistry, type SubagentNameRecord } from "./name-records.js";
 import { isRecord } from "./values.js";
+import { readWorkerStops } from "./worker-stops.js";
 
 function isNameRecord(value: unknown): value is SubagentNameRecord {
   if (!isRecord(value)) return false;
@@ -22,6 +23,8 @@ function isNameRecord(value: unknown): value is SubagentNameRecord {
         (marker) => isRecord(marker) && typeof marker.pid === "number" && typeof marker.at === "number",
       ))
   )
+    return false;
+  if (value.stoppedAt !== undefined && (typeof value.stoppedAt !== "number" || !Number.isFinite(value.stoppedAt)))
     return false;
   if (value.budget !== undefined && (!isRecord(value.budget) || typeof value.budget.directory !== "string"))
     return false;
@@ -53,9 +56,16 @@ export function readNamesRegistry(file: string): NamesRegistry {
   } catch {
     return emptyNamesRegistry(); // missing — start fresh
   }
+  const stops = readWorkerStops(file);
   try {
     const parsed: unknown = JSON.parse(raw);
-    if (isNamesRegistry(parsed)) return parsed;
+    if (isNamesRegistry(parsed)) {
+      for (const record of Object.values(parsed.agents)) {
+        const at = stops.get(record.name);
+        if (at !== undefined) record.stoppedAt = Math.max(record.stoppedAt ?? 0, at);
+      }
+      return parsed;
+    }
   } catch {
     /* fall through to corruption handling */
   }

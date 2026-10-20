@@ -94,6 +94,8 @@ const defaults = {
   session_shutdown: { type: "session_shutdown", reason: "quit" },
   session_tree: { type: "session_tree", newLeafId: null, oldLeafId: null },
   message_end: { type: "message_end", message: fauxAssistantMessage("") },
+  message_start: { type: "message_start", message: fauxAssistantMessage("") },
+  context: { type: "context", messages: [] },
   before_agent_start: {
     type: "before_agent_start",
     prompt: "",
@@ -112,7 +114,15 @@ const defaults = {
   },
 } satisfies {
   [
-    K in "input" | "session_start" | "session_shutdown" | "session_tree" | "message_end" | "before_agent_start"
+    K in
+      | "input"
+      | "session_start"
+      | "session_shutdown"
+      | "session_tree"
+      | "message_end"
+      | "message_start"
+      | "context"
+      | "before_agent_start"
   ]: EventOf<K>;
 };
 
@@ -128,6 +138,7 @@ export function createExtensionHarness(options: { confirmAnswer?: boolean } = {}
   const handlers = new Map<EventName, Array<(event: ExtensionEvent, ctx: ExtensionContext) => unknown>>();
   const providers = new Map<string, Provider>();
   const tools = new Map<string, CapturedTool>();
+  const commands = new Map<string, Parameters<ExtensionAPI["registerCommand"]>[1]>();
   let activeTools = ["read", "bash", "subagent"];
   const calls = {
     setModel: [] as Model<Api>[],
@@ -162,38 +173,39 @@ export function createExtensionHarness(options: { confirmAnswer?: boolean } = {}
     });
   }
 
-  subagentExtension(
-    hostDouble<ExtensionAPI>({
-      registerFlag() {},
-      registerCommand() {},
-      getFlag: () => undefined,
-      registerProvider(provider) {
-        assert.notEqual(typeof provider, "string", "These tests exercise public Provider registration only");
-        if (typeof provider !== "string") providers.set(provider.id, provider);
-      },
-      registerTool,
-      // SDK overloads describe the same event-key association checked by the dispatcher above.
-      on: on as ExtensionAPI["on"],
-      getActiveTools: () => [...activeTools],
-      setActiveTools(names) {
-        activeTools = [...names];
-      },
-      async setModel(value) {
-        calls.setModel.push(value);
-        return true;
-      },
-      sendUserMessage(text) {
-        assert.equal(typeof text, "string");
-        if (typeof text === "string") calls.sentUserMessages.push(text);
-      },
-      sendMessage(message, options) {
-        calls.sentMessages.push({ message, options });
-      },
-      appendEntry(customType, data) {
-        entriesToAppend?.push(customEntry(customType, data));
-      },
-    }),
-  );
+  const pi = hostDouble<ExtensionAPI>({
+    registerFlag() {},
+    registerCommand(name, command) {
+      commands.set(name, command);
+    },
+    getFlag: () => undefined,
+    registerProvider(provider) {
+      assert.notEqual(typeof provider, "string", "These tests exercise public Provider registration only");
+      if (typeof provider !== "string") providers.set(provider.id, provider);
+    },
+    registerTool,
+    // SDK overloads describe the same event-key association checked by the dispatcher above.
+    on: on as ExtensionAPI["on"],
+    getActiveTools: () => [...activeTools],
+    setActiveTools(names) {
+      activeTools = [...names];
+    },
+    async setModel(value) {
+      calls.setModel.push(value);
+      return true;
+    },
+    sendUserMessage(text) {
+      assert.equal(typeof text, "string");
+      if (typeof text === "string") calls.sentUserMessages.push(text);
+    },
+    sendMessage(message, options) {
+      calls.sentMessages.push({ message, options });
+    },
+    appendEntry(customType, data) {
+      entriesToAppend?.push(customEntry(customType, data));
+    },
+  });
+  subagentExtension(pi);
 
   function makeCtx(entries: SessionEntry[], overrides: Partial<ExtensionContext> = {}): ExtensionContext {
     entriesToAppend = entries;
@@ -213,6 +225,7 @@ export function createExtensionHarness(options: { confirmAnswer?: boolean } = {}
         getBranch: () => entries,
         getEntries: () => entries,
         getSessionId: () => "session-1",
+        getSessionFile: () => undefined,
         getSessionDir: () => path.resolve("tmp", "harness-sessions", String(process.pid)),
         getHeader: () => null,
       }),
@@ -234,6 +247,8 @@ export function createExtensionHarness(options: { confirmAnswer?: boolean } = {}
   return {
     calls,
     tools,
+    commands,
+    pi,
     getActiveTools: () => [...activeTools],
     makeCtx,
     provider(id: string): Provider {
@@ -249,7 +264,10 @@ export function createExtensionHarness(options: { confirmAnswer?: boolean } = {}
     async emit<K extends keyof typeof defaults>(name: K, fields: Partial<EventOf<K>>, ctx: ExtensionContext) {
       const event = { ...defaults[name], ...fields, type: name };
       const results: unknown[] = [];
-      for (const handler of handlers.get(name) ?? []) results.push(await handler(event, ctx));
+      for (const handler of handlers.get(name) ?? []) {
+        const result = await handler(event, ctx);
+        if (result !== undefined) results.push(result);
+      }
       return results;
     },
     /** Keep call() immediate; completion-sensitive tests opt into this async boundary. */
@@ -257,7 +275,10 @@ export function createExtensionHarness(options: { confirmAnswer?: boolean } = {}
       const after = calls.sentMessages.length;
       const started = await this.call(name, id, args, ctx);
       if (started.isError) return { ...started, started, completions: [] };
-      assert.match(JSON.stringify(started.content), /Started .*subagent|started in the background/);
+      assert.match(
+        JSON.stringify(started.content),
+        name === "subagents" ? /\d+ started, \d+ queued:/ : /started in the background/,
+      );
       for (const result of started.details.results) assert.equal(result.exitCode, -1);
       const expected = name === "subagents" ? started.details.results.length : 1;
       assert.ok(expected > 0);

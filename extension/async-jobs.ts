@@ -3,6 +3,8 @@ import { SUBAGENT_COMPLETION_TYPE, SUBAGENT_MESSAGE_TYPE } from "../types.js";
 import type { ProgressUpdate } from "./contracts.js";
 import type { ExtensionState } from "./state.js";
 import { updateCombinedUsageStatus } from "./runtime.js";
+import { ackBrokerJob } from "../broker/files.js";
+import { inheritedBrokerEndpoint, BROKER_CONSUMED_ENTRY } from "./broker-jobs.js";
 
 export interface BackgroundJob {
   names: string[];
@@ -64,11 +66,31 @@ export function releaseCompletionDelivery(state: ExtensionState, token: string, 
 
 /** Register once from registerSessionEvents. Starting an unrelated run must not drain this counter. */
 export function registerAsyncDeliveryEvents(state: ExtensionState): void {
+  state.pi.on("context", (event) => {
+    const messages = event.messages.filter(
+      (message) =>
+        !(
+          message.role === "custom" &&
+          message.customType === SUBAGENT_COMPLETION_TYPE &&
+          message.details &&
+          typeof message.details === "object" &&
+          "silentStopped" in message.details &&
+          message.details.silentStopped === true
+        ),
+    );
+    if (messages.length !== event.messages.length) return { messages };
+  });
   state.pi.on("message_start", (event) => {
     const message = event.message;
     if (!state.sessionActive || message.role !== "custom" || message.customType !== SUBAGENT_COMPLETION_TYPE) return;
     const details: unknown = message.details;
     if (!details || typeof details !== "object" || !("asyncDeliveryId" in details)) return;
+    if ("brokerJobId" in details && typeof details.brokerJobId === "string") {
+      // Persist the dedupe marker before acknowledging the root's durable mailbox.
+      state.pi.appendEntry(BROKER_CONSUMED_ENTRY, { id: details.brokerJobId });
+      const endpoint = inheritedBrokerEndpoint();
+      if (endpoint) ackBrokerJob(endpoint, details.brokerJobId);
+    }
     if (typeof details.asyncDeliveryId !== "string") return;
     // Pi emits message_start on consumption, after turn_start, for both an idle
     // prompt and a steering message drained within an already-running agent.
@@ -100,9 +122,15 @@ export function startBackground(
   const job: BackgroundJob = { names, controller, promise: Promise.resolve() };
   state.backgroundJobs.set(key, job);
   emitBackgroundCount(state);
-  // Defer execution one microtask so the job is visible before its first handle.
-  job.promise = Promise.resolve()
-    .then(() => run(controller.signal))
+  // Admission is synchronous so queued workers are visible before the tool receipt.
+  // Subprocess execution itself remains deferred by the scheduler.
+  let execution: Promise<ProgressUpdate>;
+  try {
+    execution = run(controller.signal);
+  } catch (error) {
+    execution = Promise.reject(error);
+  }
+  job.promise = execution
     .then(() => undefined)
     .catch((error) => {
       notifyLead(

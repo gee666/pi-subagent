@@ -8,11 +8,10 @@ export const SETTING_DEFINITIONS = [
   ["extension", "exclude", "PI_SUBAGENT_EXCLUDE_EXTENSIONS", "list"],
   ["agents", "confirmProject", "PI_SUBAGENT_CONFIRM_PROJECT_AGENTS", "confirmation"],
   ["limits", "total", "PI_SUBAGENT_MAX_TOTAL_AGENTS", "integer"],
-  ["limits", "parallel", "PI_SUBAGENT_MAX_PARALLEL_TASKS", "integer"],
+  ["limits", "tasksPerCall", "PI_SUBAGENT_MAX_TASKS_PER_CALL", "integer"],
   ["limits", "concurrency", "PI_SUBAGENT_MAX_CONCURRENCY", "integer"],
   ["delegation", "depth", "PI_SUBAGENT_MAX_DEPTH", "integer"],
   ["delegation", "preventCycles", "PI_SUBAGENT_PREVENT_CYCLES", "boolean"],
-  ["resume", "disabled", "DISABLE_RESUMABLE_SUBAGENTS", "boolean"],
   ["resume", "disableAuto", "PI_SUBAGENT_DISABLE_RESUME", "boolean"],
   ["resume", "prompt", "PI_SUBAGENT_RESUME_PROMPT", "boolean"],
   ["models", "intelligence", "PI_SUBAGENT_INTELLIGENCE", "boolean"],
@@ -26,7 +25,15 @@ export const SETTING_DEFINITIONS = [
 
 export type SettingEnv = (typeof SETTING_DEFINITIONS)[number][2];
 /** Validated JSON settings encoded for the existing environment parsers. Never written to process.env. */
-export type SubagentSettings = Partial<Record<SettingEnv, string>>;
+export const SESSION_SETTING_OVERRIDES = Symbol("subagent session settings");
+export type SubagentSettings = Partial<Record<SettingEnv, string>> & {
+  [SESSION_SETTING_OVERRIDES]?: Partial<Record<SettingEnv, string>>;
+};
+
+export function withSessionSettings(settings: SubagentSettings, overrides: SubagentSettings = {}): SubagentSettings {
+  if (!Object.keys(overrides).length) return settings;
+  return { ...settings, ...overrides, [SESSION_SETTING_OVERRIDES]: overrides };
+}
 
 function record(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -85,5 +92,5 @@ export function configuredEnv(
   settings: SubagentSettings = loadSubagentSettings(),
   env: NodeJS.ProcessEnv = process.env,
 ): string | undefined {
-  return env[name] ?? settings[name as SettingEnv];
+  return settings[SESSION_SETTING_OVERRIDES]?.[name as SettingEnv] ?? env[name] ?? settings[name as SettingEnv];
 }

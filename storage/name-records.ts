@@ -26,6 +26,8 @@ export interface SubagentNameRecord extends SubagentModelSettings {
   /** Session directory holding the subagent's own session files. */
   sessionDir: string;
   createdAt: number;
+  /** Explicit subtree stop, shared across owner and nested session recovery. */
+  stoppedAt?: number;
   /** Last prompt this subagent received via resume_subagents (owner path). */
   lastResumePrompt?: string;
   /** Forks keyed by the resuming process's session id. One fork per resumer. */

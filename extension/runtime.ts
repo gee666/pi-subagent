@@ -1,7 +1,8 @@
-import { configuredEnv } from "../settings.js";
+import { configuredEnv, loadSubagentSettings } from "../settings.js";
 import * as path from "node:path";
 import {
   configuredTotalBudget,
+  setSessionBudgetLimit,
   createBudget,
   readBudget,
   SUBAGENT_BUDGET_CUSTOM_TYPE,
@@ -75,10 +76,21 @@ export function ensureBudget(state: ExtensionState): SubagentBudget {
         "Session budget is not initialized. Start or reload the session before launching agents.",
       );
     // Older nested sessions without a recorded grant must not get a new root allowance.
-    const limit =
-      state.currentDepth === 0
-        ? configuredTotalBudget(configuredEnv("PI_SUBAGENT_MAX_TOTAL_AGENTS", state.settings))
-        : 0;
+    let limit = 0;
+    if (state.currentDepth === 0) {
+      try {
+        limit = configuredTotalBudget(
+          configuredEnv(
+            "PI_SUBAGENT_MAX_TOTAL_AGENTS",
+            loadSubagentSettings(state.latestSessionCtx?.cwd, state.latestSessionCtx?.isProjectTrusted() === true),
+          ),
+        );
+      } catch (error) {
+        // A valid session command can repair an invalid configured allowance,
+        // without making that temporary grant the saved baseline.
+        if (state.sessionSettings?.PI_SUBAGENT_MAX_TOTAL_AGENTS === undefined) throw error;
+      }
+    }
     state.currentBudget = createBudget(
       path.join(
         state.currentSubagentSessionRoot,
@@ -88,6 +100,8 @@ export function ensureBudget(state: ExtensionState): SubagentBudget {
       limit,
     );
     state.pi.appendEntry?.(SUBAGENT_BUDGET_CUSTOM_TYPE, state.currentBudget);
+    if (state.currentDepth === 0 && state.sessionSettings?.PI_SUBAGENT_MAX_TOTAL_AGENTS !== undefined)
+      setSessionBudgetLimit(state.currentBudget, Number(state.sessionSettings.PI_SUBAGENT_MAX_TOTAL_AGENTS));
   }
   readBudget(state.currentBudget);
   return state.currentBudget;

@@ -1,5 +1,5 @@
 export const BASE_SUBAGENTS_TOOL_DESCRIPTION =
-  "Start agents asynchronously in separate processes. Returns their names immediately, without waiting for completion. Each completion arrives as a steering message and wakes you if idle. Keep working in parallel. Use message_subagent(name, message) to steer a running worker or wake an idle one.";
+  "Submit agents asynchronously in separate processes. Returns their names immediately, without waiting for completion. All depths share one live-process cap; extra work queues. Idle parents may unload so children run first. Do not wait with bash sleep or polling. Finish your turn and go idle; messages and completions wake you automatically. Keep the session open. Use message_subagent for your direct children only; suspended parents reject manual messages. stop_subagent stops a direct child and its subtree.";
 
 export const SUBAGENT_USAGE_GUIDANCE = [
   "When to launch new subagents:",
@@ -7,6 +7,7 @@ export const SUBAGENT_USAGE_GUIDANCE = [
   "2. Before launching, say what each agent will do and why delegation helps. Set max_subagents_allowed on every task: count all descendants, excluding the assigned agent. Use 0 for a direct worker, or 1 for a worker that launches its own reviewer. Each task reserves one slot for the worker plus its descendant cap. Siblings get separate shares; unused shares stay reserved for resumes. Count only workers the planned work needs, not speculative teams. The whole call is rejected if the total exceeds your remaining slots. Respect any tighter user limit.",
   "3. Prefer a few independent workers, not workers each building teams. Another management layer must save enough attention to pay for itself. Passing your whole task unchanged to another agent just adds a relay. Do not launch new agents merely to read a file, run a command, or make a small edit.",
   "4. Delegate before deep research. Agents do not inherit your conversation. If you already gathered findings, share them in the task or a handoff file under the project's tmp/ directory, using its absolute path. Include scope, constraints, relevant files, decisions, completed checks, and expected output. Ask agents to check evidence and fill gaps, not repeat your research.",
+  "5. Stop unneeded work with stop_subagent using one direct-child name or an array. It kills the child's subtree, including queued work; other branches survive. No spent or reserved slots are refunded. Explicit messaging may resume saved workers.",
 ].join("\n");
 
 export function getSubagentsToolDescription(hasAgentTypes = true): string {

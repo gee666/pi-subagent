@@ -11,6 +11,8 @@ export function settingsFixture() {
   for (const dir of [home, agent, project]) fs.mkdirSync(dir);
   const keys = new Set([
     ...SETTING_DEFINITIONS.map(([, , env]) => env),
+    // Legacy-switch regression tests must not leak this env into later tests.
+    "DISABLE_RESUMABLE_SUBAGENTS",
     "PI-SUBAGENT-DISABLED",
     "PI-SUBAGENT-EXCLUDE-EXTENSIONS",
     "PI_SUBAGENT_DEPTH",
@@ -19,6 +21,10 @@ export function settingsFixture() {
     "PI_SUBAGENT_NAMES_FILE",
     "PI_SUBAGENT_SESSION_ROOT",
     "PI_SUBAGENT_RUN_INTELLIGENCE",
+    "PI_SUBAGENT_CONCURRENCY_DIR",
+    "PI_SUBAGENT_WORKER_TOKEN",
+    "PI_SUBAGENT_BROKER_DIR",
+    "PI_SUBAGENT_BROKER_SECRET",
     "HOME",
     "USERPROFILE",
     "PI_CODING_AGENT_DIR",

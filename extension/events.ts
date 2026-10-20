@@ -20,7 +20,8 @@ export function registerSessionEvents(state: ExtensionState): void {
       // Skip extension-driven navigation (e.g. compaction) and any state where
       // a resume is already pending or subagents are still running.
       if (event?.fromExtension) return;
-      if (state.activeSubagents.size > 0) return;
+      if (state.activeSubagents.size > 0 || state.backgroundJobs.size > 0 || state.pendingCompletionDeliveries.size > 0)
+        return;
       if (state.pendingResumePlans.length > 0) return;
       if (state.pendingInteractiveResumePrompt) return;
       if (ctx.model?.provider === RESUME_PROVIDER) return;
@@ -71,7 +72,7 @@ export function registerSessionEvents(state: ExtensionState): void {
       state,
       () => {
         try {
-          state.pi.sendUserMessage(prompt);
+          state.pi.sendUserMessage(prompt, { deliverAs: "steer" });
         } catch (err) {
           console.error("[pi-subagent] Failed to start deferred resume turn:", err);
           void restoreModelAfterResumeFailure(state, ctx);

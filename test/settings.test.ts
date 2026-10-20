@@ -54,10 +54,10 @@ test("both permanent filenames support settings, retain singular collision prior
     const projectPi = path.join(f.project, ".pi");
     f.write(
       homePi,
-      { limits: { parallel: 7, concurrency: 2 }, "tool-prompts": { subagents: "home" } },
+      { limits: { tasksPerCall: 7, concurrency: 2 }, "tool-prompts": { subagents: "home" } },
       "pi-subagents.json",
     );
-    f.write(f.agent, { limits: { parallel: 9 }, models: { intelligence: false }, "subagents-models": presets });
+    f.write(f.agent, { limits: { tasksPerCall: 9 }, models: { intelligence: false }, "subagents-models": presets });
     f.write(
       projectPi,
       { limits: { total: 4 }, models: { intelligence: true }, "tool-prompts": { subagents: "project" } },
@@ -72,7 +72,7 @@ test("both permanent filenames support settings, retain singular collision prior
     assert.equal(trusted.toolPrompts.subagents, "project");
     assert.equal(trusted.intelligencePresets[0].name, "tiny");
     assert.deepEqual(trusted.settings, {
-      PI_SUBAGENT_MAX_PARALLEL_TASKS: "9",
+      PI_SUBAGENT_MAX_TASKS_PER_CALL: "9",
       PI_SUBAGENT_MAX_CONCURRENCY: "2",
       PI_SUBAGENT_MAX_TOTAL_AGENTS: "4",
       PI_SUBAGENT_INTELLIGENCE: "true",
@@ -80,9 +80,9 @@ test("both permanent filenames support settings, retain singular collision prior
     assert.deepEqual(loadPiSubagentsConfig(nested).intelligencePresets, []);
     process.env.PI_SUBAGENT_INTELLIGENCE = "false";
     assert.deepEqual(loadPiSubagentsConfig(nested, true).intelligencePresets, []);
-    f.write(projectPi, { limits: { parallel: 1 } });
+    f.write(projectPi, { limits: { tasksPerCall: 1 } });
     assert.equal(findProjectConfig(nested), path.join(projectPi, "pi-subagent.json"));
-    assert.equal(loadSubagentSettings(nested, true).PI_SUBAGENT_MAX_PARALLEL_TASKS, "1");
+    assert.equal(loadSubagentSettings(nested, true).PI_SUBAGENT_MAX_TASKS_PER_CALL, "1");
     assert.equal(loadSubagentSettings(nested, true).PI_SUBAGENT_MAX_TOTAL_AGENTS, undefined);
     f.write(path.join(nested, ".pi"), { limits: { total: 0 } }, "pi-subagents.json");
     assert.equal(loadSubagentSettings(nested, true).PI_SUBAGENT_MAX_TOTAL_AGENTS, "0");
@@ -182,8 +182,7 @@ test("the production extension env inventory contains only mapped settings, alia
       if (entry.isDirectory() && ![".git", "node_modules", "test", "tmp"].includes(entry.name)) scan(file);
       else if (entry.isFile() && entry.name.endsWith(".ts")) {
         const source = fs.readFileSync(file, "utf8");
-        for (const match of source.matchAll(/["']((?:PI[_-]SUBAGENT[_-][A-Z_-]+|DISABLE_RESUMABLE_SUBAGENTS))["']/g))
-          found.add(match[1]);
+        for (const match of source.matchAll(/["'](PI[_-]SUBAGENT[_-][A-Z_-]+)["']/g)) found.add(match[1]);
       }
     }
   };
@@ -198,8 +197,53 @@ test("the production extension env inventory contains only mapped settings, alia
     "PI_SUBAGENT_SESSION_ROOT",
     "PI_SUBAGENT_BUDGET_DIR",
     "PI_SUBAGENT_RUN_INTELLIGENCE",
+    "PI_SUBAGENT_CONCURRENCY_DIR",
+    "PI_SUBAGENT_WORKER_TOKEN",
+    "PI_SUBAGENT_BROKER_DIR",
+    "PI_SUBAGENT_BROKER_SECRET",
   ]);
   assert.deepEqual([...found].sort(), [...expected].sort());
+});
+
+test("removed resume.disabled JSON is ignored while recovery settings remain supported", () => {
+  const settings = readSettings({ resume: { disabled: true, disableAuto: true, prompt: false } }, "test");
+  assert.deepEqual(settings, { PI_SUBAGENT_DISABLE_RESUME: "true", PI_SUBAGENT_RESUME_PROMPT: "false" });
+  assert.equal(
+    SETTING_DEFINITIONS.some(([, , env]) => String(env) === "DISABLE_RESUMABLE_SUBAGENTS"),
+    false,
+  );
+});
+
+test("settings fixtures isolate and restore inherited tree concurrency metadata", () => {
+  const keys = [
+    "PI_SUBAGENT_CONCURRENCY_DIR",
+    "PI_SUBAGENT_WORKER_TOKEN",
+    "PI_SUBAGENT_BROKER_DIR",
+    "PI_SUBAGENT_BROKER_SECRET",
+  ];
+  const previous = keys.map((key) => process.env[key]);
+  const inherited = [
+    path.resolve("tmp/inherited-concurrency"),
+    "inherited-worker",
+    path.resolve("tmp/inherited-broker"),
+    "inherited-secret",
+  ];
+  try {
+    keys.forEach((key, index) => (process.env[key] = inherited[index]));
+    const f = settingsFixture();
+    try {
+      for (const key of keys) assert.equal(process.env[key], undefined);
+      for (const key of keys) process.env[key] = "fixture-worker";
+    } finally {
+      f.close();
+    }
+    keys.forEach((key, index) => assert.equal(process.env[key], inherited[index]));
+  } finally {
+    keys.forEach((key, index) => {
+      if (previous[index] === undefined) delete process.env[key];
+      else process.env[key] = previous[index];
+    });
+  }
 });
 
 test("runtime identity and ledger paths cannot be supplied through JSON", () => {
@@ -210,8 +254,18 @@ test("runtime identity and ledger paths cannot be supplied through JSON", () => 
     PI_SUBAGENT_SESSION_ROOT: "/other",
     PI_SUBAGENT_BUDGET_DIR: "/other",
     PI_SUBAGENT_RUN_INTELLIGENCE: "fake",
+    PI_SUBAGENT_CONCURRENCY_DIR: "/other",
+    PI_SUBAGENT_WORKER_TOKEN: "fake",
+    PI_SUBAGENT_BROKER_DIR: "/other",
+    PI_SUBAGENT_BROKER_SECRET: "fake",
     delegation: { currentDepth: 0, stack: [] },
-    limits: { budgetDir: "/other" },
+    limits: {
+      budgetDir: "/other",
+      concurrencyDir: "/other",
+      workerToken: "fake",
+      brokerDir: "/other",
+      brokerSecret: "fake",
+    },
   };
   assert.deepEqual(readSettings(raw, "test"), {});
 });

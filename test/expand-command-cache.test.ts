@@ -28,7 +28,7 @@ function fixture(t: TestContext, names = ["Anna"]) {
   const pi = {
     getFlag: () => undefined,
     registerCommand: (name: string, value: Command) => {
-      assert.equal(name, "subagent-expand");
+      assert.equal(name, "subagent:expand");
       command = value;
     },
   } as unknown as ExtensionAPI;

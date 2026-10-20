@@ -261,7 +261,7 @@ export function renderResult(
     container.addChild(new Text(renderTreeLines(nodes, theme, showOutputPreview, 0, "", verbose).join("\n"), 0, 0));
     if (!verbose) {
       container.addChild(
-        new Text(theme.fg("muted", "  /subagent-expand <name> for the full work of one subagent"), 0, 0),
+        new Text(theme.fg("muted", "  /subagent:expand <name> for the full work of one subagent"), 0, 0),
       );
     }
     return container;

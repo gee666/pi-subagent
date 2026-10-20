@@ -70,7 +70,7 @@ test("parallel success and failure responses share optional identity qualifiers"
   }
 });
 
-test("async failures retain names and intelligence in completion details without blank labels", async () => {
+test("legacy resume-disable env and JSON preserve names, messaging tools and prompt guidance on failed launches", async () => {
   const f = settingsFixture();
   const script = path.join(f.root, "failure.cjs");
   fs.writeFileSync(
@@ -83,13 +83,13 @@ test("async failures retain names and intelligence in completion details without
     });`,
   );
   try {
-    for (const named of [true, false]) {
+    for (const legacyDisabled of ["false", "true"]) {
       for (const intelligence of [undefined, "senior"]) {
-        process.env.DISABLE_RESUMABLE_SUBAGENTS = String(!named);
+        process.env.DISABLE_RESUMABLE_SUBAGENTS = legacyDisabled;
         f.write(f.agent, {
           runner: { command: process.execPath, argsPrefix: [script] },
           limits: { total: 4 },
-          resume: { disableAuto: true },
+          resume: { disabled: true, disableAuto: true },
           ...(intelligence
             ? { "subagents-models": [{ senior: { model: "test", provider: "local", "reasoning-level": "off" } }] }
             : {}),
@@ -98,6 +98,11 @@ test("async failures retain names and intelligence in completion details without
         const ctx = host.makeCtx([], { cwd: f.project, hasUI: false });
         try {
           await host.emit("session_start", {}, ctx);
+          assert.ok(host.getActiveTools().includes("subagents"));
+          assert.ok(host.getActiveTools().includes("message_subagent"));
+          const prompt = (await host.emit("before_agent_start", {}, ctx)).at(-1) as { systemPrompt: string };
+          assert.match(prompt.systemPrompt, /durable worker names/);
+          assert.match(prompt.systemPrompt, /Use `message_subagent`/);
           const response = await host.callAndWait(
             "subagents",
             "failed-call",
@@ -107,10 +112,11 @@ test("async failures retain names and intelligence in completion details without
           const result = response.details.results[0];
           assert.equal(result.agent, "");
           assert.equal(result.intelligence, intelligence);
-          assert.equal(Boolean(result.name), named);
+          assert.ok(result.name, "workers always receive durable names");
           assert.equal(response.started.isError, false, "launch acknowledges work before it fails");
           assert.equal(response.started.details.results[0].exitCode, -1);
-          assert.equal(response.content[0].text, `Subagent ${result.name ?? result.agent} failed:\nFailed task.`);
+          assert.equal(response.started.details.results[0].name, result.name);
+          assert.equal(response.content[0].text, `Subagent ${result.name} failed:\nFailed task.`);
           assert.equal(result.errorMessage, "Failed task.");
           assert.equal(response.isError, true);
           assert.doesNotMatch(response.content[0].text, /\(\)|Senior\//);

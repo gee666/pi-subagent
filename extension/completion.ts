@@ -10,12 +10,25 @@ import {
 import { releaseCompletionDelivery, retainCompletionDelivery } from "./async-jobs.js";
 import { scheduleSessionTask } from "./runtime.js";
 import type { ExtensionState } from "./state.js";
+import { readWorkerStops } from "../storage/worker-stops.js";
+
+function explicitlyStopped(state: ExtensionState, result: SingleResult): boolean {
+  const submittedAt = result.submittedAt ?? result.startedAt;
+  if (!isResultError(result) || !result.name || !state.currentNamesFile || submittedAt === undefined) return false;
+  try {
+    return (readWorkerStops(state.currentNamesFile).get(result.name) ?? -1) >= submittedAt;
+  } catch (error) {
+    console.error("[pi-subagent] Cannot check explicit stop marker:", error);
+    return false;
+  }
+}
 
 export function publishCompletion(
   state: ExtensionState,
   result: SingleResult,
   generation: number,
   executionKey?: AsyncExecutionKey,
+  brokerJobId?: string,
 ): void {
   if (!state.sessionActive || generation !== state.lifecycleGeneration) return;
   const failed = isResultError(result);
@@ -27,6 +40,7 @@ export function publishCompletion(
   const details = Object.assign(
     buildSubagentDetails("single", DEFAULT_DELEGATION_MODE, null, [stored]),
     executionKey ? { asyncJobId: executionKey.jobId, asyncTaskIndex: executionKey.taskIndex } : {},
+    brokerJobId ? { brokerJobId } : {},
   );
   const deliveryId = retainCompletionDelivery(state, generation);
   scheduleSessionTask(
@@ -34,14 +48,15 @@ export function publishCompletion(
     () => {
       if (state.pendingCompletionDeliveries.get(deliveryId) !== generation) return;
       try {
+        const silent = explicitlyStopped(state, result);
         state.pi.sendMessage(
           {
             customType: SUBAGENT_COMPLETION_TYPE,
-            content,
-            display: true,
-            details: Object.assign(details, { asyncDeliveryId: deliveryId }),
+            content: silent ? `Subagent ${result.name} stopped as requested.` : content,
+            display: !silent,
+            details: Object.assign(details, { asyncDeliveryId: deliveryId }, silent ? { silentStopped: true } : {}),
           },
-          { deliverAs: "steer", triggerTurn: true },
+          silent ? { triggerTurn: false } : { deliverAs: "steer", triggerTurn: true },
         );
         // sendMessage returns before queued messages are consumed. Only the
         // matching message_start handler may release a successful delivery.

@@ -5,16 +5,18 @@ import * as path from "node:path";
 import { createBudget, overrideResumeBudgets, reserveSubagentBudgets, SUBAGENT_BUDGET_CUSTOM_TYPE } from "../budget.js";
 import { createExtensionHarness, customEntry } from "./helpers/extension.js";
 import { isRecord } from "../extension/contracts.js";
+import { simulatedTreeWorker } from "./helpers/tree-concurrency.js";
 
-test("zero-allowance workers hide tools and guidance, then regain them on resume", async () => {
+test("zero-allowance workers retain stop controls but hide delegation until resumed with an allowance", async () => {
   fs.mkdirSync(path.join(process.cwd(), "tmp"), { recursive: true });
   const dir = fs.mkdtempSync(path.join(process.cwd(), "tmp", "budget-visibility-"));
+  const tree = simulatedTreeWorker(path.join(dir, "concurrency"));
   const variables = {
     PI_SUBAGENT_DEPTH: "1",
     PI_SUBAGENT_MAX_DEPTH: "3",
     PI_SUBAGENT_BUDGET_DIR: "",
     PI_SUBAGENT_DISABLE_RESUME: "true",
-    DISABLE_RESUMABLE_SUBAGENTS: "false",
+    ...tree.env,
   };
   const previous = Object.fromEntries(Object.keys(variables).map((key) => [key, process.env[key]]));
   Object.assign(process.env, variables);
@@ -27,9 +29,13 @@ test("zero-allowance workers hide tools and guidance, then regain them on resume
     const entries = [customEntry(SUBAGENT_BUDGET_CUSTOM_TYPE, budget)];
     const ctx = host.makeCtx(entries, { cwd: dir, hasUI: false });
     await host.emit("session_start", { reason: "startup" }, ctx);
-    assert.deepEqual(host.getActiveTools(), ["read", "bash", "message_lead_agent"]);
+    assert.deepEqual(host.getActiveTools(), ["read", "bash", "message_lead_agent", "stop_subagent"]);
     const prompts = await host.emit("before_agent_start", { systemPrompt: "base" }, ctx);
-    assert.ok(prompts.every((result) => result === undefined));
+    const leafGuidance = prompts.at(-1);
+    assert.ok(isRecord(leafGuidance) && typeof leafGuidance.systemPrompt === "string");
+    assert.match(leafGuidance.systemPrompt, /Delegation is disabled/);
+    assert.match(leafGuidance.systemPrompt, /stop_subagent/);
+    assert.doesNotMatch(leafGuidance.systemPrompt, /Available Subagents|Subagent messages|Delegation guards/);
 
     overrideResumeBudgets(parent, [{ budget, max_subagents_allowed: 1 }]);
     // A production resume starts a fresh process with the persisted budget.
@@ -52,6 +58,7 @@ test("zero-allowance workers hide tools and guidance, then regain them on resume
     await host.emit("session_start", { reason: "reload" }, ctx);
     assert.ok(host.getActiveTools().includes("message_subagent"));
   } finally {
+    tree.close();
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;

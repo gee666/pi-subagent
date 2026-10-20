@@ -8,6 +8,7 @@ import type { TranscriptMessage } from "./transcript.js";
 export const SUBAGENT_TOOL_NAME = "subagents";
 export const RESUME_SUBAGENTS_TOOL_NAME = "resume_subagents"; // Historical transcripts only.
 export const MESSAGE_SUBAGENT_TOOL_NAME = "message_subagent";
+export const STOP_SUBAGENT_TOOL_NAME = "stop_subagent";
 export const SUBAGENT_COMPLETION_TYPE = "subagent_completion";
 export const SUBAGENT_MESSAGE_TYPE = "subagent_message";
 
@@ -16,9 +17,14 @@ export function isSubagentLaunchToolName(name: unknown): boolean {
   return name === SUBAGENT_TOOL_NAME || name === "subagent";
 }
 
-/** Matches any delegation tool: launch (current or legacy) or resume. */
+/** Matches current delegation tools and historical launch/resume names. */
 export function isSubagentToolName(name: unknown): boolean {
-  return isSubagentLaunchToolName(name) || name === RESUME_SUBAGENTS_TOOL_NAME || name === MESSAGE_SUBAGENT_TOOL_NAME;
+  return (
+    isSubagentLaunchToolName(name) ||
+    name === RESUME_SUBAGENTS_TOOL_NAME ||
+    name === MESSAGE_SUBAGENT_TOOL_NAME ||
+    name === STOP_SUBAGENT_TOOL_NAME
+  );
 }
 
 /** Context mode for delegated runs. */
@@ -77,8 +83,12 @@ export interface SingleResult {
   budget?: import("../budget.js").SubagentBudget;
   /** Epoch ms when this subagent run started (used for TUI timestamps). */
   startedAt?: number;
+  /** Logical submission time, including time spent queued in the root broker. */
+  submittedAt?: number;
   /** Live process is waiting for descendants, not executing a model or tool. Never persisted. */
   idle?: boolean;
+  /** Checkpointed parent has exited to make room for its children. Not a final result. */
+  parked?: boolean;
   /** Most recent semantic activity in this agent's entire live run. */
   lastActionAt?: number;
   exitCode: number;

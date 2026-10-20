@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import * as path from "node:path";
+import { brokerActivity, registerBrokerHandle } from "../broker/root.js";
+import { cachedBrokerEndpoint, treeStoreFor, shutdownScheduler } from "../extension/scheduler.js";
+import { settingsFixture } from "./helpers/settings.js";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getActivitySnapshot } from "../extension/activity.js";
+import { formatActivityLine } from "../extension/activity-widget.js";
 import type { BroadcastTarget } from "../extension/broadcast.js";
 import { createExtensionState, type ExtensionState } from "../extension/state.js";
 import { hostDouble } from "./helpers/extension.js";
@@ -41,6 +46,66 @@ test("snapshot uses live names, paths, start times and idle status in depth/root
     { name: "Bea", path: ["Zoe", "Bea"], depth: 1, topLevelId: 2, startedAt: 1000, status: "running" },
     { name: "Deep", path: ["Anna", "Amy", "Deep"], depth: 2, topLevelId: 1, startedAt: 500, status: "running" },
   ]);
+});
+
+test("four parked parents retain their idle rows while actual broker children supply running names", async (t) => {
+  const f = settingsFixture();
+  const state = fixture();
+  state.currentSubagentSessionRoot = path.join(f.root, "sessions");
+  try {
+    const store = treeStoreFor(state);
+    const endpoint = cachedBrokerEndpoint(state)!;
+    const children: string[] = [];
+    for (let i = 1; i <= 4; i++) {
+      const parent = store.enqueue(`Parent${i}`);
+      assert.equal(store.claim(parent), "running");
+      store.bindPid(parent, process.pid);
+      const parentHandle = { steer() {}, isIdle: () => true };
+      state.activeSubagents.set(i, { ...active(`Parent${i}`), handle: parentHandle });
+      registerBrokerHandle(endpoint, parent, parentHandle);
+      registerBrokerHandle(endpoint, parent); // Parked parent has exited; its cached lineage survives.
+      const child = store.enqueue(`Child${i}`, parent);
+      assert.equal(store.claim(child), "running");
+      store.bindPid(child, process.pid);
+      registerBrokerHandle(endpoint, child, { steer() {}, isIdle: () => false });
+      children.push(child);
+    }
+    state.latestBroadcastTargets.all = [
+      target(1, ["Parent1", "Wrong-path", "Child2"], { idle: true, startedAt: 1 }),
+      target(1, ["Parent1", "Finished-ghost"]),
+    ];
+    t.mock.method(store, "snapshot", () => {
+      throw new Error("UI tick must not read the global ledger");
+    });
+    t.mock.method(store, "get", () => {
+      throw new Error("UI tick must not read worker metadata from disk");
+    });
+    const entries = getActivitySnapshot(state, 1000);
+    assert.deepEqual(
+      entries.filter((entry) => entry.status === "idle").map((entry) => entry.name),
+      ["Parent1", "Parent2", "Parent3", "Parent4"],
+    );
+    assert.deepEqual(
+      entries.filter((entry) => entry.status === "running").map((entry) => entry.name),
+      ["Child1", "Child2", "Child3", "Child4"],
+    );
+    assert.deepEqual(entries.find((entry) => entry.name === "Child2")?.path, ["Parent2", "Child2"]);
+    assert.equal(new Set(entries.map((entry) => entry.name)).size, 8);
+    assert.equal(
+      formatActivityLine(entries, 240, 1000),
+      "Running 4: Child1 0s · Child2 0s · Child3 0s · Child4 0s · 4 idle",
+    );
+    assert.equal(brokerActivity(endpoint).length, 4);
+    for (const token of children) registerBrokerHandle(endpoint, token);
+    assert.deepEqual(
+      getActivitySnapshot(state, 1001).map((entry) => entry.name),
+      ["Parent1", "Parent2", "Parent3", "Parent4"],
+    );
+  } finally {
+    t.mock.restoreAll();
+    await shutdownScheduler(state);
+    f.close();
+  }
 });
 
 test("handle idle state takes precedence, with target and agent-name fallbacks", () => {

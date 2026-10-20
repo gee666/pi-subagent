@@ -11,6 +11,7 @@ import { registerMessageSubagentTool } from "../../extension/message-tool.js";
 import { createExtensionState } from "../../extension/state.js";
 import type { RunningSubagentHandle } from "../../runner/options.js";
 import { registerSubagentsTool } from "../../extension/launch-tool.js";
+import { shutdownScheduler } from "../../extension/scheduler.js";
 import { settingsFixture } from "./settings.js";
 
 export async function fixture() {
@@ -76,6 +77,7 @@ export async function fixture() {
       for (const job of state.backgroundJobs.values()) job.controller.abort();
       await Promise.allSettled(Array.from(state.backgroundJobs.values(), (job) => job.promise));
       for (const timer of state.scheduledTasks) clearTimeout(timer);
+      shutdownScheduler(state);
       f.close();
     },
   };

@@ -13,6 +13,7 @@ interface ProtocolOptions {
   result: SingleResult;
   promptRequestId: string;
   onLeadMessage?: RunAgentOptions["onLeadMessage"];
+  onWaitingForChildren?: (waiting: boolean) => void;
   emitUpdate(): void;
   noteSemanticActivity(minimumQuietPeriodMs?: number): void;
   stopChild(force: boolean): void;
@@ -97,6 +98,7 @@ export function createProtocolHandler(options: ProtocolOptions): (line: string) 
     if (event.type === "turn_start") {
       result.idle = false;
       state.waitingForChildren = false;
+      options.onWaitingForChildren?.(false);
       state.pendingAgentSettled = false;
     }
 
@@ -158,6 +160,7 @@ export function createProtocolHandler(options: ProtocolOptions): (line: string) 
     }
 
     if (event?.type === "agent_settled") {
+      options.onWaitingForChildren?.((state.backgroundJobs ?? 0) > 0);
       if ((state.backgroundJobs ?? 0) > 0 && !result.idle) {
         result.idle = true;
         state.waitingForChildren = true;

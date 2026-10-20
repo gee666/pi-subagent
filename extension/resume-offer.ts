@@ -65,7 +65,7 @@ export async function maybeOfferSubagentResume(
   state.resumeState.trigger = injectOnNextRequest ? "nextRequest" : "resumePrompt";
   state.modelToRestoreAfterResume = restorableModel ?? ctx.model;
   state.resumeModelRegistry = ctx.modelRegistry;
-  ensureSubagentToolActive(state.pi, state.settings);
+  ensureSubagentToolActive(state.pi);
   const resumeModel = ctx.modelRegistry.find(RESUME_PROVIDER, RESUME_MODEL_ID);
   if (!resumeModel || !(await state.pi.setModel(resumeModel))) {
     ctx.ui.notify("Failed to switch to synthetic subagent resume model.", "error");
@@ -91,7 +91,7 @@ export async function maybeOfferSubagentResume(
       state,
       () => {
         try {
-          state.pi.sendUserMessage(`Resuming ${totalTaskCount} subagents...`);
+          state.pi.sendUserMessage(`Resuming ${totalTaskCount} subagents...`, { deliverAs: "steer" });
         } catch (err) {
           console.error("[pi-subagent] Failed to start resume turn after tree navigation:", err);
           void restoreModelAfterResumeFailure(state, ctx);

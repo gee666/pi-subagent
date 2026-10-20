@@ -8,10 +8,10 @@
 // Parallel execution limits
 // ---------------------------------------------------------------------------
 
-export const DEFAULT_MAX_PARALLEL_TASKS = 30;
+export const DEFAULT_MAX_TASKS_PER_CALL = 20;
 export const DEFAULT_MAX_CONCURRENCY = 8;
 export const PARALLEL_HEARTBEAT_MS = 1000;
-export const SUBAGENT_MAX_PARALLEL_TASKS_ENV = "PI_SUBAGENT_MAX_PARALLEL_TASKS";
+export const SUBAGENT_MAX_TASKS_PER_CALL_ENV = "PI_SUBAGENT_MAX_TASKS_PER_CALL";
 export const SUBAGENT_MAX_CONCURRENCY_ENV = "PI_SUBAGENT_MAX_CONCURRENCY";
 export const RESUME_PROVIDER = "pi-subagent-resume";
 export const RESUME_MODEL_ID = "synthetic-tool-call";

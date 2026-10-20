@@ -82,7 +82,7 @@ export function buildExpandPickerItems(registry: NamesRegistry, activity: Activi
 export function registerSubagentExpandCommand(state: ExtensionState): void {
   if (typeof state.pi.registerCommand !== "function") return;
 
-  state.pi.registerCommand("subagent-expand", {
+  state.pi.registerCommand("subagent:expand", {
     description: "Show the full work of one named subagent (prompt, tools, children, resumes)",
     getArgumentCompletions: (prefix: string) => {
       const registry = readCurrentRegistry(state);
@@ -100,7 +100,7 @@ export function registerSubagentExpandCommand(state: ExtensionState): void {
       const name = (args ?? "").trim().split(/\s+/)[0] ?? "";
       const uiAvailable = ctx?.mode === "tui" && ctx?.ui && typeof ctx.ui.custom === "function";
       if (!uiAvailable) {
-        const message = "/subagent-expand is a UI-only feature (interactive TUI mode).";
+        const message = "/subagent:expand is a UI-only feature (interactive TUI mode).";
         if (typeof ctx?.ui?.notify === "function") ctx.ui.notify(message, "warning");
         else console.log(`[pi-subagent] ${message}`);
         return;

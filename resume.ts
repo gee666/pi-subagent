@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { DEFAULT_AGENT } from "./agents.js";
+import { excludeStoppedWorkers } from "./storage/stopped-workers.js";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { parseBoolean, RESUME_PROVIDER } from "./shared.js";
 import { isBudgetAmount } from "./budget.js";
@@ -17,9 +18,7 @@ import {
 export const SUBAGENT_RESUME_PROMPT_ENV = "PI_SUBAGENT_RESUME_PROMPT";
 export const SUBAGENT_RESUME_DISABLE_ENV = "PI_SUBAGENT_DISABLE_RESUME";
 export const SUBAGENT_SESSION_ROOT_ENV = "PI_SUBAGENT_SESSION_ROOT";
-
 type SessionEntry = ReturnType<ExtensionContext["sessionManager"]["getEntries"]>[number];
-
 export interface ResumableTask {
   agent: string;
   task: string;
@@ -297,7 +296,7 @@ export function findLatestResumableSubagentCalls(ctx: ExtensionContext): Resumab
         ),
   );
   const latest = candidates.sort((a, b) => a.activityOrder - b.activityOrder).at(-1);
-  if (!latest) return pendingAsyncCalls;
+  if (!latest) return excludeStoppedWorkers(pendingAsyncCalls, entries, calls);
 
   // If one assistant message issued several subagent tool calls, Pi records
   // separate tool results for them. Resuming only the last one leaves sibling
@@ -317,20 +316,23 @@ export function findLatestResumableSubagentCalls(ctx: ExtensionContext): Resumab
   );
   if (!hasOnlyIgnorableTrailingEntries(entries, latestBatchActivity)) return pendingAsyncCalls;
 
-  return [
-    ...pendingAsyncCalls,
-    ...batch.map(({ previousToolCallId, tasks, details }) => ({
-      previousToolCallId,
-      tasks,
-      details,
-    })),
-  ];
+  return excludeStoppedWorkers(
+    [
+      ...pendingAsyncCalls,
+      ...batch.map(({ previousToolCallId, tasks, details }) => ({
+        previousToolCallId,
+        tasks,
+        details,
+      })),
+    ],
+    entries,
+    calls,
+  );
 }
 
 export function findLatestResumableSubagentCall(ctx: ExtensionContext): ResumableSubagentCall | null {
   return findLatestResumableSubagentCalls(ctx).at(-1) ?? null;
 }
-
 export function sameTasks(a: ResumableTask[], b: ResumableTask[]): boolean {
   if (a.length !== b.length) return false;
   return a.every((task, index) => {
@@ -343,7 +345,6 @@ export function sameTasks(a: ResumableTask[], b: ResumableTask[]): boolean {
     );
   });
 }
-
 export function isFinishedResult(result: SingleResult | undefined): boolean {
   return !!result && result.exitCode === 0 && !isResultError(result);
 }

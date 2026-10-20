@@ -9,6 +9,7 @@ import { registerSubagentsTool } from "./launch-tool.js";
 import { sameToolPrompts } from "./prompts.js";
 import { registerMessageSubagentTool } from "./message-tool.js";
 import { registerLeadMessageTool } from "./lead-message-tool.js";
+import { registerStopSubagentTool } from "./stop-tool.js";
 import type { ExtensionState } from "./state.js";
 
 export function registerToolsWithConfig(
@@ -16,10 +17,10 @@ export function registerToolsWithConfig(
   cwd?: string,
   includeProject = false,
   force = false,
-  config: PiSubagentsConfig = loadPiSubagentsConfig(cwd, includeProject),
+  config: PiSubagentsConfig = loadPiSubagentsConfig(cwd, includeProject, state.sessionSettings),
 ): void {
   state.discoveredAgents = filterAgentsForPrompt(
-    discoverAgents(cwd ?? process.cwd(), "both").agents,
+    discoverAgents(cwd ?? process.cwd(), "both", config.settings).agents,
     state.currentDepth,
     state.maxDepth,
     state.ancestorAgentStack,
@@ -44,6 +45,7 @@ export function registerToolsWithConfig(
   state.toolsRegistered = true;
   registerSubagentsTool(state);
   registerMessageSubagentTool(state);
+  registerStopSubagentTool(state);
 }
 
 /** A running leaf can receive a larger allowance without losing its session. */
@@ -59,7 +61,7 @@ export function refreshWorkerAllowance(state: ExtensionState, ctx: SessionContex
   state.canDelegate = allowed;
   if (allowed) {
     registerToolsWithConfig(state, ctx.cwd, ctx.isProjectTrusted(), true);
-    ensureSubagentToolActive(state.pi, state.settings);
+    ensureSubagentToolActive(state.pi);
   } else {
     state.pi.setActiveTools(
       state.pi.getActiveTools().filter((name) => name !== "subagents" && name !== "message_subagent"),

@@ -111,12 +111,15 @@ describe("subagent steering handle RPC transport", () => {
     assert.ok("streamingBehavior" in steered);
     assert.equal(steered.streamingBehavior, "steer");
 
-    // The initial task prompt is still delivered as a plain prompt.
+    // Initial and resumed task prompts must also queue as steering if startup is already busy.
     const initial = received.find(
       (cmd) => "message" in cmd && typeof cmd.message === "string" && cmd.message.includes("test task"),
     );
     assert.ok(initial, "expected the initial task prompt");
     assert.ok("type" in initial);
     assert.equal(initial.type, "prompt");
+    assert.ok("streamingBehavior" in initial);
+    assert.equal(initial.streamingBehavior, "steer");
+    assert.ok(received.every((command) => "streamingBehavior" in command && command.streamingBehavior === "steer"));
   });
 });

@@ -1,4 +1,4 @@
-import { loadSubagentSettings, type SubagentSettings } from "../settings.js";
+import { loadSubagentSettings, SESSION_SETTING_OVERRIDES, type SubagentSettings } from "../settings.js";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -31,6 +31,8 @@ export function subagentDisabled(
   env: NodeJS.ProcessEnv = process.env,
   settings: SubagentSettings = loadSubagentSettings(),
 ): boolean {
+  const override = settings[SESSION_SETTING_OVERRIDES]?.PI_SUBAGENT_DISABLED;
+  if (override !== undefined) return override === "true";
   const values = [env.PI_SUBAGENT_DISABLED, env["PI-SUBAGENT-DISABLED"]];
   if (!values.some((value) => value !== undefined)) values.push(settings.PI_SUBAGENT_DISABLED);
   return values.some((value) => value === "1" || value?.toLowerCase() === "true");

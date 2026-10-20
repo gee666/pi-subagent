@@ -1,31 +1,31 @@
 import { loadSubagentSettings } from "../settings.js";
 import type { AgentConfig } from "../agents.js";
 import { selectIntelligence } from "../intelligence.js";
-import { formatSubagentLabel } from "../ui/agent-label.js";
+import { parallelResultContent } from "./parallel-result.js";
 import {
   type SingleResult,
   type SubagentDetails,
   emptyUsage,
   isResultSuccess,
-  getFinalOutput,
   compactSingleResultForDurableDetails,
   isResultError,
   usageSummaryToUsageStats,
 } from "../types.js";
 import type { SubagentBudget } from "../budget.js";
 import {
-  DEFAULT_MAX_PARALLEL_TASKS,
+  DEFAULT_MAX_TASKS_PER_CALL,
   DEFAULT_MAX_CONCURRENCY,
   PARALLEL_HEARTBEAT_MS,
-  SUBAGENT_MAX_PARALLEL_TASKS_ENV,
+  SUBAGENT_MAX_TASKS_PER_CALL_ENV,
   SUBAGENT_MAX_CONCURRENCY_ENV,
-  mapConcurrent,
 } from "../shared.js";
 import type { DetailsFactory, OnUpdateCallback, RunningSubagentHandle, RunAgentOptions } from "./options.js";
 import { configuredNonNegativeInt } from "./constants.js";
 import { sessionDirExists } from "./files.js";
 import { runAgentSubprocess } from "./single.js";
 import { ProgressCoalescer } from "./progress-coalescer.js";
+import { WorkerScheduler, type WorkerStatus } from "./worker-scheduler.js";
+import { TreeAdmissionError, type TreeWorkerAdmission } from "./tree-admission.js";
 export async function executeParallelSubprocess(
   tasks: Array<{ agent: string; task: string; intelligence?: string }>,
   agents: AgentConfig[],
@@ -45,6 +45,10 @@ export async function executeParallelSubprocess(
   onHandleForTask?: (index: number, task: { agent: string; task: string }, handle: RunningSubagentHandle) => void,
   onTaskDone?: (index: number, task: { agent: string; task: string }) => void,
   extras?: {
+    /** Extension owners share one scheduler across every call. Direct API calls use a local scheduler. */
+    scheduler?: WorkerScheduler;
+    onScheduled?: (index: number, status: WorkerStatus) => void;
+    onCancelTask?: (index: number) => void;
     /** Per-task resumable names (aligned with tasks by index). */
     names?: Array<string | undefined>;
     /** Send each task text to the child verbatim (resume_subagents flow). */
@@ -73,9 +77,9 @@ export async function executeParallelSubprocess(
     ...extras,
     settings: extras?.settings ?? loadSubagentSettings(defaultCwd, extras?.projectTrusted === true),
   };
-  const maxParallelTasks = configuredNonNegativeInt(
-    SUBAGENT_MAX_PARALLEL_TASKS_ENV,
-    DEFAULT_MAX_PARALLEL_TASKS,
+  const maxTasksPerCall = configuredNonNegativeInt(
+    SUBAGENT_MAX_TASKS_PER_CALL_ENV,
+    DEFAULT_MAX_TASKS_PER_CALL,
     true,
     extras?.settings,
   );
@@ -86,12 +90,12 @@ export async function executeParallelSubprocess(
     extras?.settings,
   );
 
-  if (tasks.length > maxParallelTasks) {
+  if (tasks.length > maxTasksPerCall) {
     return {
       content: [
         {
           type: "text" as const,
-          text: `Too many parallel tasks (${tasks.length}). Max is ${maxParallelTasks}.`,
+          text: `Too many tasks (${tasks.length}). Max tasks per call is ${maxTasksPerCall}.`,
         },
       ],
       details: makeDetails([]),
@@ -217,7 +221,12 @@ export async function executeParallelSubprocess(
         signal?.addEventListener("abort", stopProgress, { once: true });
       }
     }
-    const runTask = async (t: (typeof tasks)[number], index: number): Promise<SingleResult> => {
+    const runTask = async (
+      t: (typeof tasks)[number],
+      index: number,
+      taskSignal: AbortSignal,
+      treeAdmission?: TreeWorkerAdmission,
+    ): Promise<SingleResult> => {
       const previousResult = resumeResults?.[index];
       if (previousResult && isResultSuccess(previousResult)) {
         extras?.onResult?.(index, previousResult);
@@ -234,6 +243,7 @@ export async function executeParallelSubprocess(
       const onLeadMessage = extras?.onLeadMessage;
       try {
         result = await runAgentSubprocess({
+          treeAdmission,
           cwd: defaultCwd,
           projectTrusted: extras?.projectTrusted,
           settings: extras?.settings,
@@ -250,7 +260,7 @@ export async function executeParallelSubprocess(
           preventCycles,
           // Composite signals use weak dependencies rather than N listeners on
           // one caller signal when concurrency is configured into the hundreds.
-          signal: batchSignal ? AbortSignal.any([batchSignal]) : undefined,
+          signal: taskSignal,
           sessionDir,
           sessionRoot,
           resumeSession: shouldResumeThisSession && !!sessionDir,
@@ -259,7 +269,10 @@ export async function executeParallelSubprocess(
           intelligence: t.intelligence,
           intelligencePresets: extras?.intelligencePresets,
           resumeSettings: extras?.resumeSettings?.[index],
-          onHandle: (handle) => onHandleForTask?.(index, t, handle),
+          onHandle: (handle) => {
+            if (taskSignal.aborted) handle.kill?.();
+            onHandleForTask?.(index, t, handle);
+          },
           onLeadMessage: onLeadMessage ? (message) => onLeadMessage(index, t, message) : undefined,
           onUpdate: onUpdate
             ? (partial) => {
@@ -280,9 +293,34 @@ export async function executeParallelSubprocess(
       progress?.request();
       return retained;
     };
-    results = await mapConcurrent(tasks, maxConcurrency, (task, index) => {
-      if (cancellation?.signal.aborted) throw new Error("Parallel batch was cancelled after a task failure.");
-      const pending = runTask(task, index);
+    const scheduler = extras?.scheduler ?? new WorkerScheduler(maxConcurrency);
+    // Admit every task synchronously before returning control to the async tool receipt.
+    // Limiting the map itself would hide queued siblings from stop/message APIs.
+    const pendingTasks = tasks.map((task, index) => {
+      if (resumeResults?.[index] && isResultSuccess(resumeResults[index])) {
+        return runTask(task, index, new AbortController().signal);
+      }
+      const name = extras?.names?.[index] ?? `batch-${crypto.randomUUID()}-${index}`;
+      const ticket = scheduler.schedule(name, (taskSignal, admission) => runTask(task, index, taskSignal, admission), {
+        signal: batchSignal,
+        onCancel: () => extras?.onCancelTask?.(index),
+      });
+      extras?.onScheduled?.(index, ticket.status);
+      const pending = ticket.promise.catch((error) => {
+        if (!ticket.controller.signal.aborted && !(error instanceof TreeAdmissionError)) throw error;
+        // A queued stop is a task completion, not a batch infrastructure failure.
+        const result: SingleResult = {
+          ...allResults[index],
+          exitCode: error instanceof TreeAdmissionError ? 1 : 130,
+          stopReason: error instanceof TreeAdmissionError ? "error" : "aborted",
+          errorMessage: error instanceof TreeAdmissionError ? error.message : "Subagent was aborted.",
+        };
+        onTaskDone?.(index, task);
+        extras?.onResult?.(index, result);
+        allResults[index] = completed(result);
+        progress?.request();
+        return allResults[index];
+      });
       running.add(pending);
       void pending.then(
         () => running.delete(pending),
@@ -290,6 +328,7 @@ export async function executeParallelSubprocess(
       );
       return pending;
     });
+    results = await Promise.all(pendingTasks);
     progress?.flush(); // Publish final results before disposing the limiter.
   } catch (error) {
     stopProgress();
@@ -303,26 +342,5 @@ export async function executeParallelSubprocess(
     stopProgress();
   }
 
-  const successCount = results.filter(isResultSuccess).length;
-  const summaries = results.map((r) => {
-    const succeeded = isResultSuccess(r);
-    const output = succeeded
-      ? getFinalOutput(r.messages, r.finalOutput)
-      : r.errorMessage || r.stderr || getFinalOutput(r.messages, r.finalOutput);
-    const label = formatSubagentLabel(r);
-    const identity = r.name || r.agent || r.intelligence ? `[${label}]` : label;
-    const status = succeeded ? "completed" : r.exitCode === -1 ? "unfinished" : "failed";
-    return `${identity} ${status}: ${output || "(no output)"}`;
-  });
-
-  return {
-    content: [
-      {
-        type: "text" as const,
-        text: `Parallel: ${successCount}/${results.length} succeeded\n\n${summaries.join("\n\n")}`,
-      },
-    ],
-    details: batchDetails(results),
-    ...(successCount === results.length ? {} : { isError: true }),
-  };
+  return { ...parallelResultContent(results), details: batchDetails(results) };
 }

@@ -107,7 +107,6 @@ test("saved explicit choice recovers through the provider and tool with sole, ze
     PI_SUBAGENT_PI_COMMAND: process.execPath,
     PI_SUBAGENT_PI_ARGS_PREFIX: JSON.stringify([script]),
     PI_SUBAGENT_DISABLE_RESUME: "true",
-    DISABLE_RESUMABLE_SUBAGENTS: "false",
   };
   const previous = Object.fromEntries(Object.keys(variables).map((key) => [key, process.env[key]]));
   Object.assign(process.env, variables);

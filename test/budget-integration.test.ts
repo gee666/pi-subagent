@@ -8,25 +8,29 @@ import { SubagentParams } from "../extension/schemas.js";
 import { isRecord } from "../extension/contracts.js";
 import { findPersistedBudget, readBudget, SUBAGENT_BUDGET_CUSTOM_TYPE, type SubagentBudget } from "../budget.js";
 import { readNamesRegistry, SUBAGENT_NAMES_CUSTOM_TYPE } from "../names.js";
+import { simulatedTreeWorker } from "./helpers/tree-concurrency.js";
 
 function workspace(): string {
   fs.mkdirSync(path.join(process.cwd(), "tmp"), { recursive: true });
   return fs.mkdtempSync(path.join(process.cwd(), "tmp", "budget-integration-"));
 }
 
-async function withSetup(run: (dir: string, log: string) => Promise<void>) {
+async function withSetup(
+  run: (dir: string, log: string, parent: ReturnType<typeof simulatedTreeWorker>) => Promise<void>,
+) {
   const dir = workspace();
+  const parent = simulatedTreeWorker(path.join(dir, "concurrency"));
   const log = path.join(dir, "launches.jsonl");
   const variables: Record<string, string> = {
     PI_SUBAGENT_INTELLIGENCE: "false",
     PI_SUBAGENT_MAX_TOTAL_AGENTS: "5",
     PI_SUBAGENT_DEPTH: "0",
+    ...parent.env,
     PI_SUBAGENT_STACK: "[]",
     PI_SUBAGENT_BUDGET_DIR: "",
     PI_SUBAGENT_CONFIRM_PROJECT_AGENTS: "false",
     PI_SUBAGENT_PI_COMMAND: process.execPath,
     PI_SUBAGENT_DISABLE_RESUME: "true",
-    DISABLE_RESUMABLE_SUBAGENTS: "false",
   };
   const script = path.join(dir, "fake-pi.cjs");
   fs.writeFileSync(
@@ -58,8 +62,9 @@ async function withSetup(run: (dir: string, log: string) => Promise<void>) {
     "---\nname: budget-worker\ndescription: Test worker\n---\nDo the work.\n",
   );
   try {
-    await run(dir, log);
+    await run(dir, log, parent);
   } finally {
+    parent.close();
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
@@ -200,8 +205,8 @@ describe("budget tool integration", () => {
     });
   });
 
-  test("passes private branch budgets through launches, nested calls, resumes, forks, and reloads", async () => {
-    await withSetup(async (dir, log) => {
+  test("preserves branch budgets through nested calls, owned resumes, foreign-owner rejection, and reloads", async () => {
+    await withSetup(async (dir, log, parent) => {
       const root = await harness(dir, "root");
       const result = await root.call("subagents", "first", { tasks: [task(2), task(1)] });
       assert.notEqual(result.isError, true, JSON.stringify(result.content));
@@ -236,6 +241,9 @@ describe("budget tool integration", () => {
       assert.match(tooLarge.content[0].text, /needs 3 slots.*has 2 slots left/);
       const leaves = await branch.call("subagents", "leaves", { tasks: [task(0), task(0)] });
       assert.notEqual(leaves.isError, true, JSON.stringify(leaves.content));
+      assert.equal(parent.store.get(parent.token)?.status, "running");
+      assert.equal(parent.store.snapshot().filter((entry) => entry.parentToken === parent.token).length, 2);
+      assert.equal(parent.store.getLimit(), 50);
       assert.equal(readBudget(a.budget).remaining, 0);
       assert.equal(readBudget(b.budget).remaining, 1);
       assert.equal(readBudget(rootBudget).remaining, 0);
@@ -251,13 +259,15 @@ describe("budget tool integration", () => {
       assert.doesNotMatch(lastCall(log).prompt, /Set max_subagents_allowed on each task/);
       assert.equal(readBudget(rootBudget).remaining, 0);
 
-      // A different owner gets a session fork, not a fresh descendant allowance.
-      const forked = await branch.call("message_subagent", "fork", {
+      // A branch cannot resume a sibling owned by the root.
+      const beforeForeign = calls(log).length;
+      const foreign = await branch.call("message_subagent", "fork", {
         name: b.name,
         message: "follow up",
       });
-      assert.notEqual(forked.isError, true, JSON.stringify(forked.content));
-      assert.deepEqual(forked.details.results[0].budget, b.budget);
+      assert.equal(foreign.isError, true);
+      assert.match(foreign.content[0].text, /direct children/);
+      assert.equal(calls(log).length, beforeForeign);
       assert.equal(readBudget(b.budget).remaining, 1);
 
       process.env.PI_SUBAGENT_MAX_TOTAL_AGENTS = "500";
@@ -319,15 +329,15 @@ describe("budget tool integration", () => {
     });
   });
 
-  test("budgets still apply with named resumes disabled", async () => {
+  test("budgets apply to named workers even when new launches are exhausted", async () => {
     await withSetup(async (dir, log) => {
-      process.env.DISABLE_RESUMABLE_SUBAGENTS = "true";
       process.env.PI_SUBAGENT_MAX_TOTAL_AGENTS = "1";
       const h = await harness(dir, "root");
-      assert.equal(h.tools.has("message_subagent"), false);
+      assert.ok(h.tools.has("message_subagent"));
       const result = await h.call("subagents", "one", { tasks: [task(0)] });
       assert.notEqual(result.isError, true, JSON.stringify(result.content));
       assert.ok(result.details.results[0].budget);
+      assert.ok(result.details.results[0].name);
       const denied = await h.call("subagents", "two", { tasks: [task(0)] });
       assert.equal(denied.isError, true);
       assert.equal(calls(log).length, 1);

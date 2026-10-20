@@ -142,7 +142,7 @@ describe("renderResult collapsed/expanded views", () => {
     assert.match(nestedExpanded, /tool-6/);
 
     // Neither collapsed nor Ctrl+O-expanded rows may read child transcripts.
-    // Full transcript hydration is reserved for /subagent-expand <name>.
+    // Full transcript hydration is reserved for /subagent:expand <name>.
     const tmpDir = path.join(process.cwd(), "tmp");
     fs.mkdirSync(tmpDir, { recursive: true });
     const sessionDir = fs.mkdtempSync(path.join(tmpDir, "pi-subagent-render-lazy-"));

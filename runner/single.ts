@@ -131,7 +131,8 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
     const target = resolveSessionTarget(opts.cwd, sessionDir, shouldContinueSession, !!opts.resumeSettings);
     // Approval is scoped to the caller's project, never transferable to a saved project's cwd.
     const projectTrusted = target.cwd === path.resolve(opts.cwd) && opts.projectTrusted === true;
-    const childOpts = { ...opts, cwd: target.cwd, sessionDir: target.sessionDir, projectTrusted };
+    let childOpts = { ...opts, cwd: target.cwd, sessionDir: target.sessionDir, projectTrusted };
+    result.sessionDir = target.sessionDir;
     const extensionArgs = await resolveChildExtensionArgs(target.cwd, projectTrusted, true, opts.settings);
     if (opts.signal?.aborted) {
       result.exitCode = 130;
@@ -148,7 +149,7 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
     result.model = settings.model;
     result.thinking = settings.thinking;
     emitUpdate();
-    const { args: piArgs, prompt: taskPrompt } = buildPiArgs(
+    const initialArgs = buildPiArgs(
       agent,
       promptTmpPath,
       task,
@@ -162,7 +163,9 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       target.sessionFile,
       opts.settings,
     );
-    const prompt =
+    let piArgs = initialArgs.args;
+    const taskPrompt = initialArgs.prompt;
+    let prompt =
       opts.rawPrompt !== true && result.budget && readBudget(result.budget).limit > 0
         ? `${taskPrompt}\n\n${budgetPrompt(result.budget)}`
         : taskPrompt;
@@ -174,7 +177,10 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       opts.settings,
     );
     let startupTimedOut = false;
-    let exitCode = -1;
+    let exitCode = -1,
+      parkedOnce = false,
+      startupRetry = 0,
+      attemptMessageCount = initialMessageCount;
 
     for (let attempt = 0; ; attempt++) {
       startupTimedOut = false;
@@ -190,22 +196,55 @@ export async function runAgentSubprocess(opts: RunAgentOptions): Promise<SingleR
       startupTimedOut = outcome.startupTimedOut;
       wasAborted = outcome.wasAborted;
 
-      const noProgress = result.messages.length <= initialMessageCount;
-      const canRetry = startupTimedOut && !wasAborted && noProgress && attempt < startupRetries;
+      if (outcome.parked) {
+        parkedOnce = true;
+        result.parked = true;
+        result.idle = true;
+        result.exitCode = -1;
+        emitUpdate();
+        const saved = resolveSessionTarget(opts.cwd, result.sessionDir, true, true);
+        if (!saved.sessionFile) throw new Error("Cannot resume parked parent: no saved session file.");
+        const continuation = buildPiArgs(
+          agent,
+          promptTmpPath,
+          "You were unloaded while waiting for your children to free memory. Your saved session is restored. Continue from pending child completions; do not repeat the original task or launch duplicate children.",
+          saved.sessionDir,
+          true,
+          settings.model,
+          true,
+          undefined,
+          extensionArgs,
+          settings,
+          saved.sessionFile,
+          opts.settings,
+        );
+        piArgs = continuation.args;
+        prompt = continuation.prompt;
+        childOpts = { ...childOpts, cwd: saved.cwd, sessionDir: saved.sessionDir };
+        startupRetry = 0;
+        attemptMessageCount = result.messages.length;
+        continue;
+      }
+      const noProgress = result.messages.length <= attemptMessageCount;
+      if (startupTimedOut && parkedOnce && !wasAborted)
+        result.errorMessage =
+          "Parked parent resume timed out at startup. It was not retried because replacing its logical token would invalidate child ownership.";
+      const canRetry = !parkedOnce && startupTimedOut && !wasAborted && noProgress && startupRetry < startupRetries;
       if (!canRetry) break;
 
       // Transient cold-start stall: clear the error markers the startup timer
       // set on `result`, then re-spawn a clean child. The per-attempt startup
       // window is unchanged; we just give the child another chance to boot.
+      startupRetry++;
       result.exitCode = -1;
       result.stopReason = undefined;
       result.errorMessage = undefined;
       appendBoundedStderr(
         result,
-        `\n[pi-subagent] Startup timeout; retrying (attempt ${attempt + 2}/${startupRetries + 1}).`,
+        `\n[pi-subagent] Startup timeout; retrying (attempt ${startupRetry + 1}/${startupRetries + 1}).`,
       );
       emitUpdate();
-      await new Promise<void>((resolve) => setTimeout(resolve, STARTUP_RETRY_BASE_BACKOFF_MS * (attempt + 1)));
+      await new Promise<void>((resolve) => setTimeout(resolve, STARTUP_RETRY_BASE_BACKOFF_MS * startupRetry));
     }
 
     result.exitCode = exitCode;

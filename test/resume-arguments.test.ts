@@ -36,7 +36,6 @@ test("registered messaging validates arguments before side effects and retains s
     PI_SUBAGENT_STACK: "[]",
     PI_SUBAGENT_SESSION_ROOT: path.join(root, "sessions"),
     PI_SUBAGENT_DISABLE_RESUME: "true",
-    DISABLE_RESUMABLE_SUBAGENTS: "false",
     PI_SUBAGENT_RUN_INTELLIGENCE: "null",
     PI_SUBAGENT_PI_COMMAND: process.execPath,
     PI_SUBAGENT_PI_ARGS_PREFIX: JSON.stringify([script]),

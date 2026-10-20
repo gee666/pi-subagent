@@ -53,9 +53,9 @@ For each setting, an explicitly set environment variable wins over JSON, then th
 {
   "extension": { "disabled": false, "exclude": [] },
   "agents": { "confirmProject": "ask" },
-  "limits": { "total": 50, "parallel": 30, "concurrency": 8 },
+  "limits": { "total": 50, "tasksPerCall": 20, "concurrency": 8 },
   "delegation": { "depth": 3, "preventCycles": true },
-  "resume": { "disabled": false, "disableAuto": false, "prompt": true },
+  "resume": { "disableAuto": false, "prompt": true },
   "models": { "intelligence": true },
   "runner": {
     "startupTimeoutMs": 120000,
@@ -71,11 +71,10 @@ For each setting, an explicitly set environment variable wins over JSON, then th
 | `extension.exclude` | `PI_SUBAGENT_EXCLUDE_EXTENSIONS` / `PI-SUBAGENT-EXCLUDE-EXTENSIONS` | `[]` |
 | `agents.confirmProject` | `PI_SUBAGENT_CONFIRM_PROJECT_AGENTS` | `"ask"` |
 | `limits.total` | `PI_SUBAGENT_MAX_TOTAL_AGENTS` | `50` |
-| `limits.parallel` | `PI_SUBAGENT_MAX_PARALLEL_TASKS` | `30` |
+| `limits.tasksPerCall` | `PI_SUBAGENT_MAX_TASKS_PER_CALL` | `20` |
 | `limits.concurrency` | `PI_SUBAGENT_MAX_CONCURRENCY` | `8` |
 | `delegation.depth` | `PI_SUBAGENT_MAX_DEPTH` | `3` |
 | `delegation.preventCycles` | `PI_SUBAGENT_PREVENT_CYCLES` | `true` |
-| `resume.disabled` | `DISABLE_RESUMABLE_SUBAGENTS` | `false` |
 | `resume.disableAuto` | `PI_SUBAGENT_DISABLE_RESUME` | `false` |
 | `resume.prompt` | `PI_SUBAGENT_RESUME_PROMPT` | `true` |
 | `models.intelligence` | `PI_SUBAGENT_INTELLIGENCE` | `true` |
@@ -94,7 +93,37 @@ JSON switches require booleans; counts and timeouts require non-negative safe in
 
 JSON `extension.disabled` disables session features after project settings resolve, so a trusted project can override a personal value. Environment disabling prevents registration altogether. Reload Pi after changing settings.
 
-Only user-configurable extension variables have JSON counterparts. Inherited runtime metadata stays internal: `PI_SUBAGENT_DEPTH`, `PI_SUBAGENT_STACK`, `PI_SUBAGENT_BUDGET_DIR`, `PI_SUBAGENT_NAMES_FILE`, `PI_SUBAGENT_SESSION_ROOT`, and `PI_SUBAGENT_RUN_INTELLIGENCE`. OS and Pi SDK variables such as `HOME`, `PATH`, `PI_CODING_AGENT_DIR`, provider credentials, and proxy settings remain environment variables.
+Only user-configurable extension variables have JSON counterparts. Inherited runtime metadata stays internal: `PI_SUBAGENT_DEPTH`, `PI_SUBAGENT_STACK`, `PI_SUBAGENT_BUDGET_DIR`, `PI_SUBAGENT_NAMES_FILE`, `PI_SUBAGENT_SESSION_ROOT`, `PI_SUBAGENT_RUN_INTELLIGENCE`, `PI_SUBAGENT_CONCURRENCY_DIR`, `PI_SUBAGENT_WORKER_TOKEN`, `PI_SUBAGENT_BROKER_DIR`, and `PI_SUBAGENT_BROKER_SECRET`. OS and Pi SDK variables such as `HOME`, `PATH`, `PI_CODING_AGENT_DIR`, provider credentials, and proxy settings remain environment variables.
+
+## Session settings commands
+
+Use `/subagent:settings` to list controls and their current values. Separate `/subagent:enable` and `/subagent:disable` commands avoid an ambiguous toggle. Disabling blocks new launches and resumes without stopping running workers. Whenever delegation is enabled, workers receive durable names and `message_subagent` is available. Automatic recovery and its confirmation prompt have separate controls below.
+
+| Command | Setting or behavior |
+| --- | --- |
+| `/subagent:max-total 80` | Total agent budget, including nested agents |
+| `/subagent:max-tasks-per-call 20` | Maximum tasks submitted in one call |
+| `/subagent:max-concurency 4` | Root-only session override for the shared cap of 4 live workers across the entire tree; extra launches and saved-worker resumes wait in one cross-process FIFO queue |
+| `/subagent:max-depth 2` | Maximum delegation depth |
+| `/subagent:prevent-cycles on` | Block delegation cycles |
+| `/subagent:auto-resume off` | Stop automatic recovery of unfinished tasks when reopening a chat or navigating history |
+| `/subagent:resume-prompt on` | Ask before recovery in the interactive terminal. `off` recovers without asking; it does not disable recovery |
+| `/subagent:intelligence on` | Use configured worker model presets, such as junior and senior |
+| `/subagent:confirm-project session` | Approval for repository-defined agents. `ask` requests approval, `session` preapproves for the session, `never` skips prompts rather than blocking agents |
+
+Omit a value to inspect it. Boolean commands accept `on` and `off`, also `true` and `false`. Counts require non-negative safe integers; tasks per call and concurrency require at least 1. `/subagent:max-tasks-per-call` limits submissions per call, default 20, using `limits.tasksPerCall` or `PI_SUBAGENT_MAX_TASKS_PER_CALL`. `/subagent:max-concurency` is the exact command spelling. The root initializes the shared tree-global concurrency cap, default 8, from `limits.concurrency` or `PI_SUBAGENT_MAX_CONCURRENCY`. The root command changes that shared cap for this session only; nested workers cannot loosen it.
+
+The root creates one shared cross-process FIFO queue and descendants inherit it. All calls throughout the tree use that queue, including resumes of saved idle workers. Every live worker process counts toward the cap. A waiting parent can save context and exit its process to park, releasing its slot. Launch acknowledgements distinguish `started` from `queued`; they do not wait for completion. Steering a live worker does not take another concurrency slot. `message_subagent` and `stop_subagent` target only the caller's own direct children, checked against both saved owner identity and backend parent token. Grandchildren, siblings, and foreign saved workers are not valid targets. Stopping a direct child still stops its entire subtree, including queued descendants and resumes, without refunding budget reservations.
+
+Waiting parents park instead of rejecting blocked descendants or exceeding the cap. Parking saves context and exits the actual parent process; the root broker owns child process descriptors so children and queued work survive. Parent wakes have lower priority than queued children. Spare capacity can wake a parent before all children finish. Manual messages to parked parents fail, as does a child's `message_lead_agent` while its immediate parent is parked. Wait until the parent resumes.
+
+Preset definitions, the fallback model, extension exclusions, runner executables, retry counts and timeouts remain file settings.
+
+Commands apply to the main session. `/subagent:max-concurency` and `/subagent:max-total` take effect even while the main agent is busy; other settings commands require it to be idle. They override startup environment values and CLI delegation flags for this session, without changing `process.env`. A startup environment disable prevents the entire extension from loading, so commands are unavailable in that case. Child sessions cannot use commands to change inherited grants.
+
+Changes are session-only and clear on session replacement, resume or reload. The concurrency cap is shared across processes, not saved to configuration unless explicitly requested. Lowering the live cap does not stop active workers. Queued work waits until the live-worker count falls below the new cap. Raising the cap admits queued work immediately. Changing the tasks-per-call limit affects new submissions only, not already accepted batches. Budget changes preserve all spent and reserved slots, cannot go below that spending, and cannot enlarge a child's grant. Temporary budget increases disappear when the session ends, but any slots used under them remain spent.
+
+Nothing writes configuration until you run `/subagent:save-settings`. It asks you to choose `project` or `global`; you can also pass the scope directly, such as `/subagent:save-settings project`. Esc cancels. Only settings changed by these commands are saved, preserving unrelated fields. Project saving updates the nearest existing project config, or creates `.pi/pi-subagent.json` in the working directory. Global saving uses Pi's agent config directory. Normal environment and trusted-project precedence applies again in future sessions.
 
 ## Tool descriptions
 
@@ -112,13 +141,13 @@ Only user-configurable extension variables have JSON counterparts. Inherited run
 
 Missing descriptions retain their defaults. Overrides change written guidance, not schemas, budget checks, or runtime limits. Keep instructions to estimate worker counts and avoid unnecessary delegation.
 
-Describe launch results as immediate `started` acknowledgements, not final output. Completion arrives as lead steering. `message_subagent` steers running workers or resumes idle ones; the child-only `message_lead_agent` sends nonblocking lead steering. Both completion and child messages wake an idle lead.
+Describe launch results as immediate `started` or `queued` acknowledgements, not final output. Completion arrives as lead steering. `message_subagent` steers running workers or resumes idle ones; the child-only `message_lead_agent` sends nonblocking lead steering. Both completion and child messages wake an idle lead.
 
 ## Human messaging and live activity
 
 `/message_subagent` selects live targets before asking for message text. Choose `All (+nested)` for all live workers, `All` for top-level workers, `Youngest` for live workers without running descendants, or `Names (e.g. John, Maria)` for comma-separated names or nested paths. There is no `No` choice; Esc cancels. Automatic broadcast interception of ordinary user input has been removed. This human command is separate from the `message_subagent` model tool, which can also resume a saved worker.
 
-The TUI shows one live line above the editor, such as `Running 2: John 12s · Maria 8s`, with an overflow count and a separate idle count when needed. Timer ticks use live handles and snapshots, not session metadata or disk reads. `/subagent-expand` lists running workers by depth, top levels before nested workers, then live idle parents waiting for children, then completed or stopped history.
+The TUI shows one live line above the editor, such as `Running 2: John 12s · Maria 8s`, with an overflow count and a separate idle count when needed. Timer ticks use live handles and snapshots, not session metadata or disk reads. `/subagent:expand` lists running workers by depth, top levels before nested workers, then live idle parents waiting for children, then completed or stopped history.
 
 ## Caller-selected intelligence
 
@@ -164,9 +193,9 @@ Use models available in your Pi installation. Names are arbitrary, unique, non-e
 
 A selected or automatic preset overrides the parent model and agent model/thinking settings for a launch. The parent's explicit `--provider` and `--api-key` are not forwarded when a preset is selected. Named resumes use their saved provider and retain a CLI `--api-key` only when that provider matches the parent's explicit `--provider`; otherwise they drop the key. Worker providers use their configured Pi credentials. With multiple presets, omitted or `null` choices reject the entire launch batch before any worker starts or budget changes.
 
-`message_subagent` retains the worker's original effective model, thinking level, and intelligence label, whether it steers a running worker or resumes an idle one. This also applies to private forks and after restart, preset changes, disabling intelligence, changing the parent model, or editing/deleting the agent definition. A worker launched without a preset remains unlabelled. Pass only `{ name, message }` and an optional `max_subagents_allowed`; any `intelligence` argument, including `null`, is invalid.
+`message_subagent` retains the worker's original effective model, thinking level, and intelligence label, whether it steers a running worker or resumes an idle one. This also applies after restart, preset changes, disabling intelligence, changing the parent model, or editing/deleting the agent definition. A worker launched without a preset remains unlabelled. Pass only `{ name, message }` and an optional `max_subagents_allowed`; any `intelligence` argument, including `null`, is invalid.
 
-Tool result rows show the selected preset, for example `Nicolas (Junior/code-writer)`. Display names capitalize only the first character; configured spelling and argument values otherwise stay unchanged. Runs without a preset show `Nicolas (code-writer)`. Runs without an agent type show `Nicolas (Junior)`, or just `Nicolas` when neither qualifier exists. Agent types come only from user-created definitions. With no available types, the launch schema omits `agent` and uses a default worker without agent-specific instructions. Durable results retain their own preset name, and the name registry retains the initial choice. The `/subagent-expand` picker shows the initial preset beside each agent type and lets you search by preset name. Its transcript view shows each task's or resumed turn's recorded intelligence alongside its actual transcript model and thinking level. Later messages do not relabel earlier work. Missing model or thinking metadata remains `unknown`, even when a preset name is known.
+Tool result rows show the selected preset, for example `Nicolas (Junior/code-writer)`. Display names capitalize only the first character; configured spelling and argument values otherwise stay unchanged. Runs without a preset show `Nicolas (code-writer)`. Runs without an agent type show `Nicolas (Junior)`, or just `Nicolas` when neither qualifier exists. Agent types come only from user-created definitions. With no available types, the launch schema omits `agent` and uses a default worker without agent-specific instructions. Durable results retain their own preset name, and the name registry retains the initial choice. The `/subagent:expand` picker shows the initial preset beside each agent type and lets you search by preset name. Its transcript view shows each task's or resumed turn's recorded intelligence alongside its actual transcript model and thinking level. Later messages do not relabel earlier work. Missing model or thinking metadata remains `unknown`, even when a preset name is known.
 
 `PI_SUBAGENT_INTELLIGENCE=true` enables presets when they exist, which is the default. Set it to `false` or `0` to treat the configuration as having no presets for new launches: the launch tool hides the argument and no automatic preset applies. Named workers still retain their original settings when messaged or resumed. Unknown choices or attempts to pass a named hidden argument fail before launching workers. When the argument is hidden, omission or `null` still uses the automatic sole preset or existing defaults.
 
@@ -179,8 +208,8 @@ The old `smart-decision` block is ignored. Remove it and its router credentials 
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `PI_SUBAGENT_MAX_TOTAL_AGENTS` | `50` | New-agent budget for a new main session's entire tree |
-| `PI_SUBAGENT_MAX_PARALLEL_TASKS` | `30` | Tasks per call |
-| `PI_SUBAGENT_MAX_CONCURRENCY` | `8` | Simultaneously running workers per call |
+| `PI_SUBAGENT_MAX_TASKS_PER_CALL` | `20` | Tasks submitted per call |
+| `PI_SUBAGENT_MAX_CONCURRENCY` | `8` | Live worker processes across the entire session tree, including parents still live while waiting; parked parents have exited and do not count. Descendants inherit the root's shared FIFO queue and cap |
 | `PI_SUBAGENT_MAX_DEPTH` / `--subagent-max-depth` | `3` | Maximum delegation depth; `0` blocks delegation |
 | `PI_SUBAGENT_PREVENT_CYCLES` / `--subagent-prevent-cycles` | `true` | Block agent types already in the delegation stack |
 | `PI_SUBAGENT_CONFIRM_PROJECT_AGENTS` | `ask` | `true` / `ask` prompts for approval; `false` / `never` trusts projects; `session` remembers approval |
@@ -207,7 +236,7 @@ The idle watchdog pauses during tool execution. When the last concurrent tool fi
 
 Worker-turn completion waits for `agent_settled`, not `agent_end`, because Pi may retry, compact, or continue after a low-level run ends. This wait happens in the background, not inside the lead's launch or messaging tool call.
 
-If descendants are still active at `agent_settled`, the runner reports `Idle, waiting for children.` with the worker's own last answer to the lead via steering. The child process stays alive and its idle watchdog pauses while it waits. Child messages and completions can wake it. Final `Finished` status and completion steering wait until the whole subtree and resulting continuations have settled. Rejected prompts, signal exits, and exit before settlement are failures. A finished durable worker remains available for later resume through `message_subagent`.
+If descendants are still active at `agent_settled`, the runner reports `Idle, waiting for children.` with the worker's own last answer to the lead via steering. A live waiting parent counts toward the cap. Parking saves its context and exits the process, freeing a slot while the root broker preserves child execution. Automatic parent wakes wait behind queued children but may use spare capacity before all children finish. Manual messages and child-to-lead tool calls fail while the parent is parked. Final `Finished` status and completion steering wait until the whole subtree and resulting continuations have settled. Rejected prompts, signal exits, and exit before settlement are failures. A finished durable worker remains available for later resume through `message_subagent`.
 
 Children inherit provider, authentication, proxy, home, temporary-directory, and Pi environment settings. On Windows, the runner normalizes `Path`/`PATH` and adds Node, `PNPM_HOME`, npm's user bin, `%LOCALAPPDATA%\\pnpm`, and `%SystemRoot%\\System32` to executable search paths.
 

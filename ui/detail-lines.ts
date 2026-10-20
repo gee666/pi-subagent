@@ -226,7 +226,7 @@ export function renderToolDetailLines(
       const label = formatSubagentLabel(child);
       out.push(`  ${statusIcon(child.status)} ${theme.fg("accent", label)}`);
       if (child.task) out.wrap(child.task, "     ", "toolOutput");
-      if (child.name) out.push(`     ${theme.fg("muted", `/subagent-expand ${child.name}`)}`);
+      if (child.name) out.push(`     ${theme.fg("muted", `/subagent:expand ${child.name}`)}`);
     }
   }
   return out.lines;

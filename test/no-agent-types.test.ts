@@ -17,6 +17,7 @@ import {
 } from "../extension/schemas.js";
 import { createExtensionHarness, messageEntry, model } from "./helpers/extension.js";
 import { settingsFixture } from "./helpers/settings.js";
+import { simulatedTreeWorker } from "./helpers/tree-concurrency.js";
 
 const configured = [
   { cheap: { model: "small", provider: "local", "reasoning-level": "off" } },
@@ -157,7 +158,9 @@ test("untyped workers retain task-only prompts, budgets, names, models, and name
     );
     assert.equal(branch.isError, false, JSON.stringify(branch.content));
     const branchBudget = branch.details.results[0].budget!;
+    const parent = simulatedTreeWorker(path.join(f.root, "concurrency"));
     Object.assign(process.env, {
+      ...parent.env,
       PI_SUBAGENT_DEPTH: "1",
       PI_SUBAGENT_BUDGET_DIR: branchBudget.directory,
       PI_SUBAGENT_STACK: '[""]',
@@ -176,15 +179,23 @@ test("untyped workers retain task-only prompts, budgets, names, models, and name
       assert.equal(leaf.isError, false, JSON.stringify(leaf.content));
       assert.equal(calls().at(-1)!.prompt, "Nested neutral worker.");
       assert.equal(calls().at(-1)!.depth, "2");
+      assert.equal(parent.store.get(parent.token)?.status, "running");
+      assert.equal(parent.store.snapshot().filter((entry) => entry.parentToken === parent.token).length, 1);
+      assert.equal(parent.store.getLimit(), 50);
       assert.equal(readBudget(branchBudget).remaining, 0);
       assert.equal(readBudget(budget).remaining, 5);
     } finally {
       await child.emit("session_shutdown", {}, childCtx);
+      parent.close();
       for (const key of [
         "PI_SUBAGENT_DEPTH",
         "PI_SUBAGENT_BUDGET_DIR",
         "PI_SUBAGENT_STACK",
         "PI_SUBAGENT_NAMES_FILE",
+        "PI_SUBAGENT_CONCURRENCY_DIR",
+        "PI_SUBAGENT_WORKER_TOKEN",
+        "PI_SUBAGENT_BROKER_DIR",
+        "PI_SUBAGENT_BROKER_SECRET",
       ]) {
         delete process.env[key];
       }

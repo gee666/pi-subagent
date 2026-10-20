@@ -1,6 +1,6 @@
 import { intelligenceEnabled, parseIntelligencePresets, type IntelligencePreset } from "./intelligence.js";
 import { configPaths, readConfig } from "./storage/config-files.js";
-import { readSettings, type SubagentSettings } from "./settings.js";
+import { readSettings, withSessionSettings, type SubagentSettings } from "./settings.js";
 export { PI_SUBAGENTS_CONFIG_FILE, PI_SUBAGENT_CONFIG_FILE, findProjectConfig } from "./storage/config-files.js";
 
 export interface PiSubagentsConfig {
@@ -33,7 +33,11 @@ function readToolPrompts(config: Record<string, unknown>, filePath: string): Rec
 }
 
 /** Load personal settings, then the nearest project configuration when trusted. */
-export function loadPiSubagentsConfig(cwd?: string, includeProject = false): PiSubagentsConfig {
+export function loadPiSubagentsConfig(
+  cwd?: string,
+  includeProject = false,
+  overrides?: SubagentSettings,
+): PiSubagentsConfig {
   const paths = configPaths(cwd, includeProject);
   const personalPaths = new Set(configPaths());
   const settings: SubagentSettings = {};
@@ -52,9 +56,10 @@ export function loadPiSubagentsConfig(cwd?: string, includeProject = false): PiS
       }
     }
   }
+  const effectiveSettings = withSessionSettings(settings, overrides);
   return {
     toolPrompts,
-    settings,
-    intelligencePresets: intelligenceEnabled(intelligencePresets, settings) ? intelligencePresets : [],
+    settings: effectiveSettings,
+    intelligencePresets: intelligenceEnabled(intelligencePresets, effectiveSettings) ? intelligencePresets : [],
   };
 }

@@ -27,7 +27,7 @@ test("runner command and argsPrefix are personal-only even when config-only SDK 
     f.write(f.agent, {
       runner: { command: process.execPath, argsPrefix: ["-e", safe, "--"] },
       limits: { total: 1 },
-      resume: { disabled: true, disableAuto: true },
+      resume: { disableAuto: true },
     });
     for (const filename of ["pi-subagent.json", "pi-subagents.json"]) {
       const projectPi = path.join(f.project, ".pi");

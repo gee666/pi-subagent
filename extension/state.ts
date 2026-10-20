@@ -6,7 +6,7 @@ import type { SubagentBudget } from "../budget.js";
 import { loadPiSubagentsConfig, type PiSubagentsConfig } from "../config.js";
 import type { ResumableSubagentCall } from "../resume.js";
 import type { RunningSubagentHandle } from "../runner.js";
-import { DEFAULT_MAX_PARALLEL_TASKS, parseNonNegativeInt, SUBAGENT_MAX_PARALLEL_TASKS_ENV } from "../shared.js";
+import { DEFAULT_MAX_TASKS_PER_CALL, parseNonNegativeInt, SUBAGENT_MAX_TASKS_PER_CALL_ENV } from "../shared.js";
 import type { SubagentUsageSummary } from "../types.js";
 import type { BroadcastTarget } from "./broadcast.js";
 import type { ResumeModel, ResumeModelRegistry, SessionContext } from "./contracts.js";
@@ -21,11 +21,10 @@ export interface ExtensionState extends DelegationDepthConfig {
   pendingCompletionDeliveries: Map<string, number>;
   pi: ExtensionAPI;
   settings?: SubagentSettings;
+  sessionSettings?: SubagentSettings;
   disabled?: boolean;
   toolsRegistered?: boolean;
   registeredConfigKey?: string;
-  resumeToolRegistered?: boolean;
-  resumesEnabled?: boolean;
   configuredToolPrompts: Record<string, string>;
   intelligencePresets?: PiSubagentsConfig["intelligencePresets"];
   refreshRegisteredToolPrompts?: (cwd: string, includeProject: boolean, config?: PiSubagentsConfig) => void;
@@ -37,7 +36,7 @@ export interface ExtensionState extends DelegationDepthConfig {
   sessionActive: boolean;
   scheduledTasks: Set<ReturnType<typeof setTimeout>>;
   resumeState: SyntheticResumeState;
-  maxParallelTasks: number;
+  maxTasksPerCall: number;
   discoveredAgents: AgentConfig[];
   currentSessionId: string;
   currentSubagentSessionRoot: string;
@@ -77,9 +76,9 @@ export function createExtensionState(pi: ExtensionAPI): ExtensionState {
     sessionActive: false,
     scheduledTasks: new Set(),
     resumeState: { plans: [], phase: "tool", trigger: "resumePrompt" },
-    maxParallelTasks:
-      parseNonNegativeInt(configuredEnv(SUBAGENT_MAX_PARALLEL_TASKS_ENV, config.settings)) ??
-      DEFAULT_MAX_PARALLEL_TASKS,
+    maxTasksPerCall:
+      parseNonNegativeInt(configuredEnv(SUBAGENT_MAX_TASKS_PER_CALL_ENV, config.settings)) ??
+      DEFAULT_MAX_TASKS_PER_CALL,
     discoveredAgents: [],
     currentSessionId: "ephemeral",
     currentSubagentSessionRoot: "",

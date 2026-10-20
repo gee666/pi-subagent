@@ -1,6 +1,5 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
 import { Text } from "@earendil-works/pi-tui";
 import { discoverAgents, isAgentEnabledAtLayer, type AgentConfig } from "../agents.js";
 import { createBudget, overrideResumeBudgets, SubagentBudgetError } from "../budget.js";
@@ -18,20 +17,19 @@ import { formatSubagentLabel } from "../ui/agent-label.js";
 import { resolveMessageRecipient, type MessageRecipient } from "./message-identity.js";
 import { recordToolCallStart, renderMessageResult } from "../render.js";
 import { buildSubagentDetails, DEFAULT_DELEGATION_MODE } from "../types.js";
-import { startBackground } from "./async-jobs.js";
+import { notifyLead, startBackground } from "./async-jobs.js";
+import { schedulerFor, type WorkerTicket, type WorkerStatus } from "./scheduler.js";
 import { updateLatestBroadcastTargets } from "./broadcast.js";
 import { makeDetailsFactory } from "./details.js";
 import { executeParallel } from "./execution.js";
-import { resumableSubagentsDisabled } from "./policy.js";
 import { trackProgress } from "./progress.js";
 import { ensureBudget } from "./runtime.js";
 import { SingleMessageSubagentParams as MessageSubagentParams, validatePreparedArguments } from "./schemas.js";
 import { registerMessageBatchTool } from "./message-batch.js";
 import type { ExtensionState } from "./state.js";
+import { assertChildCanReceiveMessage } from "./child-ownership.js";
 
 export function registerMessageSubagentTool(state: ExtensionState) {
-  if (resumableSubagentsDisabled(state.settings) && !state.resumeToolRegistered) return;
-  state.resumeToolRegistered = true;
   registerMessageBatchTool(state, {
     name: "message_subagent",
     label: "Message subagent",
@@ -56,6 +54,7 @@ export function registerMessageSubagentTool(state: ExtensionState) {
       let guardedName: string | undefined;
       let marked = false;
       let backgroundOwnsCleanup = false;
+      let preparation: WorkerTicket<unknown> | undefined;
       const cleanup = async () => {
         try {
           if (marked && guardedName) await clearResumeActive(namesFile, guardedName, ownerId);
@@ -66,42 +65,28 @@ export function registerMessageSubagentTool(state: ExtensionState) {
       };
       const checkCurrent = () => {
         signal?.throwIfAborted();
+        preparation?.controller.signal.throwIfAborted();
         if (generation !== state.lifecycleGeneration) throw new Error("Message canceled: session changed.");
       };
-      const result = (text: string) => ({
+      const result = (text: string, status?: WorkerStatus | "sent") => ({
         content: [{ type: "text" as const, text }],
         details: Object.assign(
           buildSubagentDetails("parallel", DEFAULT_DELEGATION_MODE, null, []),
           recipient ? { recipient } : {},
+          status ? { executionStatus: status, queued: status === "queued" } : {},
         ),
       });
       try {
         const { name, message, max_subagents_allowed } = validatePreparedArguments(MessageSubagentParams, rawParams);
         recipient = resolveMessageRecipient(state, name);
         checkCurrent();
-        if (!state.canDelegate || resumableSubagentsDisabled(state.settings))
-          throw new Error("Subagent messaging is disabled for this session.");
+        if (!state.canDelegate) throw new Error("Subagent messaging is disabled for this session.");
+        assertChildCanReceiveMessage(state, name);
         recordToolCallStart(toolCallId);
         updateLatestBroadcastTargets(state, undefined);
 
         const runningHandle = () => Array.from(state.activeSubagents.values()).find((item) => item.name === name);
         const pendingJob = () => Array.from(state.backgroundJobs.values()).find((job) => job.names.includes(name));
-        const waitForJob = async (job: NonNullable<ReturnType<typeof pendingJob>>, untilHandle: boolean) => {
-          let settled = false;
-          void job.promise.then(
-            () => {
-              settled = true;
-            },
-            () => {
-              settled = true;
-            },
-          );
-          while (!settled && job.names.includes(name) && !(untilHandle && runningHandle())) {
-            checkCurrent();
-            await delay(10, undefined, { signal });
-          }
-          checkCurrent();
-        };
         const overrideBudget = (budget: Parameters<typeof overrideResumeBudgets>[1][number]["budget"] | undefined) => {
           if (max_subagents_allowed === undefined) return;
           if (!budget)
@@ -115,29 +100,49 @@ export function registerMessageSubagentTool(state: ExtensionState) {
           );
         };
 
-        // A launch may be queued behind another task, or a handle may already
-        // be settling. Never open its session file until its job releases it.
-        for (;;) {
-          checkCurrent();
-          const running = runningHandle();
-          const job = pendingJob();
-          if (running) {
-            if (max_subagents_allowed !== undefined) {
-              if (!namesFile) throw new Error("No subagent name registry is available in this session.");
-              overrideBudget(readNamesRegistry(namesFile).agents[name]?.budget);
-            }
-            const accepted = await running.handle.steer(message);
-            if (accepted !== false) return result(`Message sent to subagent "${name}".`);
-            if (running.handle.isSettling?.() === false)
-              throw new Error(`Subagent "${name}" could not accept steering. Retry when it is ready.`);
-            if (!job) throw new Error(`Subagent "${name}" is settling. Retry when it finishes.`);
-            await waitForJob(job, false);
-          } else if (job) {
-            await waitForJob(job, true);
-          } else {
-            break;
+        // Steering already-running workers never needs another admission slot.
+        const running = runningHandle();
+        if (running) {
+          if (max_subagents_allowed !== undefined) {
+            if (!namesFile) throw new Error("No subagent name registry is available in this session.");
+            overrideBudget(readNamesRegistry(namesFile).agents[name]?.budget);
           }
+          const accepted = await running.handle.steer(message);
+          if (accepted !== false) {
+            const queued = schedulerFor(state)
+              .treeStore?.snapshot()
+              .some((entry) => entry.name === name && entry.status === "queued");
+            return result(
+              `Message ${queued ? "queued for" : "sent to"} subagent "${name}".`,
+              queued ? "queued" : "sent",
+            );
+          }
+          throw new Error(`Subagent "${name}" could not accept steering. Retry when it finishes.`);
         }
+        const scheduler = schedulerFor(state);
+        const scheduled = scheduler.snapshot().find((item) => item.name === name);
+        if (scheduled) {
+          if (max_subagents_allowed !== undefined) {
+            if (!namesFile) throw new Error("No subagent name registry is available in this session.");
+            overrideBudget(readNamesRegistry(namesFile).agents[name]?.budget);
+          }
+          const delivery = scheduler.message(name, message);
+          if (!delivery) throw new Error(`Subagent "${name}" is stopping.`);
+          void delivery.promise
+            .then((accepted) => {
+              if (accepted === false) throw new Error("steering was not accepted");
+            })
+            .catch((error) => {
+              if (delivery.signal.aborted) return;
+              notifyLead(
+                state,
+                `Message to subagent "${name}" failed: ${error instanceof Error ? error.message : String(error)}`,
+                generation,
+              );
+            });
+          return result(`Message queued for subagent "${name}".`, "queued");
+        }
+        if (pendingJob()) throw new Error(`Subagent "${name}" is settling. Retry when it finishes.`);
 
         if (!namesFile)
           throw new Error(
@@ -147,6 +152,8 @@ export function registerMessageSubagentTool(state: ExtensionState) {
           throw new Error(`Subagent "${name}" is already being resumed. Retry when it starts.`);
         localGuards.add(name);
         guardedName = name;
+        // Stop must see the name even while registry/fork preparation is awaiting I/O.
+        preparation = scheduler.prepare(name, { signal });
         const discovery = discoverAgents(ctx.cwd, "both", state.settings);
         const makeDetails = makeDetailsFactory(discovery.projectAgentsDir, DEFAULT_DELEGATION_MODE);
         const resolution = await resolveResumeTarget(namesFile, name, ownerId);
@@ -211,6 +218,8 @@ export function registerMessageSubagentTool(state: ExtensionState) {
           });
         const baseId = state.nextActiveSubagentId++;
         const trackedOnUpdate = trackProgress(state, toolCallId, baseId, ctx);
+        let admission: WorkerStatus = "queued";
+        let brokerSubmitted = state.currentDepth === 0;
         startBackground(
           state,
           toolCallId,
@@ -232,19 +241,37 @@ export function registerMessageSubagentTool(state: ExtensionState) {
               true,
               undefined,
               baseId,
-              { jobId: toolCallId, names: [name], budgets: [budget], rawPrompts: true, resumeSettings: [settings] },
+              {
+                jobId: toolCallId,
+                names: [name],
+                budgets: [budget],
+                rawPrompts: true,
+                resumeSettings: [settings],
+                onScheduled: (_index, status) => {
+                  admission = status;
+                  brokerSubmitted = true;
+                },
+              },
             );
           },
           cleanup,
         );
+        if (!brokerSubmitted)
+          throw new Error("The root broker did not durably acknowledge this resume. No launch receipt was issued.");
         backgroundOwnsCleanup = true;
-        return result(`Subagent "${name}" started in the background.`);
+        return result(
+          `Subagent "${name}" ${admission === "queued" ? "queued" : "started"} in the background.`,
+          admission,
+        );
       } catch (error) {
         state.forcedErrorToolCallIds.add(toolCallId);
         const message = error instanceof Error ? error.message : String(error);
         return { ...result(message), isError: true };
       } finally {
-        if (!backgroundOwnsCleanup) await cleanup();
+        if (!backgroundOwnsCleanup) {
+          preparation?.controller.abort();
+          await cleanup();
+        }
       }
     },
 

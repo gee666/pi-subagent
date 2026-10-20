@@ -156,7 +156,7 @@ function child(
     const send = (event) => process.stdout.write(JSON.stringify(event) + "\\n");
     require("node:readline").createInterface({ input: process.stdin }).on("line", (line) => {
       const command = JSON.parse(line);
-      if (!command.streamingBehavior) {
+      if (!command.id?.includes("-steer-")) {
         send({ type: "response", command: "prompt", id: command.id, success: true });
         send({ type: "turn_start" });
       } else { ${steeringCode} }
@@ -300,7 +300,7 @@ test("initial prompt rejection also fails outstanding steering", { timeout: 1000
         `
         require("node:readline").createInterface({ input: process.stdin }).on("line", (line) => {
           const command = JSON.parse(line);
-          if (!command.streamingBehavior) console.log(JSON.stringify({
+          if (!command.id?.includes("-steer-")) console.log(JSON.stringify({
             type: "response", command: "prompt", id: command.id, success: false, error: "no model"
           }));
         });

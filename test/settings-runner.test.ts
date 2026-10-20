@@ -119,7 +119,7 @@ test("startup timeout/retries and idle timeout use JSON without import-time snap
   }
 });
 
-test("parallel capacity and concurrency use JSON, reject oversized batches before spawning", async () => {
+test("tasks-per-call capacity and concurrency use JSON, reject oversized batches before spawning", async () => {
   const f = settingsFixture();
   try {
     const log = path.join(f.root, "concurrency.jsonl");
@@ -136,7 +136,7 @@ test("parallel capacity and concurrency use JSON, reject oversized batches befor
     `;
     f.write(f.agent, {
       runner: { command: process.execPath, argsPrefix: ["-e", delayed, "--"] },
-      limits: { parallel: 2, concurrency: 1 },
+      limits: { tasksPerCall: 2, concurrency: 1 },
     });
     const makeDetails = (results: Parameters<RunAgentOptions["makeDetails"]>[0]) =>
       buildSubagentDetails("parallel", "spawn", null, results);
@@ -163,7 +163,7 @@ test("parallel capacity and concurrency use JSON, reject oversized batches befor
       .split("\n")
       .map((line) => JSON.parse(line).event);
     assert.deepEqual(events, ["start", "end", "start", "end"]);
-    process.env.PI_SUBAGENT_MAX_PARALLEL_TASKS = "0";
+    process.env.PI_SUBAGENT_MAX_TASKS_PER_CALL = "0";
     assert.equal((await run(1)).isError, true);
   } finally {
     f.close();
