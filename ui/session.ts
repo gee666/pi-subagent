@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { asRecord } from "./value.js";
+import { sessionEntryMessages } from "../storage/session-entries.js";
 
 export function sessionFilesIn(sessionDir: string): string[] {
   try {
@@ -40,5 +41,5 @@ export function readSessionEntries(file: string): Record<string, unknown>[] {
 }
 
 export function readSessionMessages(file: string): unknown[] {
-  return readSessionEntries(file).filter((entry) => entry.type === "message" && entry.message);
+  return sessionEntryMessages(readSessionEntries(file));
 }

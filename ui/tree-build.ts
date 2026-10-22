@@ -236,7 +236,7 @@ function loadNestedNodesFromSession(sessionDir: string): TreeNode[] {
   const files = sessionFilesIn(sessionDir);
   const file = files[files.length - 1];
   if (!file) return [];
-  const messages = readSessionMessages(file).map((entry) => asRecord(entry).message);
+  const messages = readSessionMessages(file);
   return buildNestedChildren({ exitCode: 0, messages }, true);
 }
 

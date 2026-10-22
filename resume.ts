@@ -5,6 +5,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { parseBoolean, RESUME_PROVIDER } from "./shared.js";
 import { isBudgetAmount } from "./budget.js";
 import { isRecord, sanitizePathComponent } from "./storage/values.js";
+import { sessionEntryMessages } from "./storage/session-entries.js";
 import {
   asyncJobId,
   getNestedSubagentResults,
@@ -253,9 +254,7 @@ export function findLatestResumableSubagentCalls(ctx: ExtensionContext): Resumab
 
   // Completion messages may arrive long after the launch tool returned. Merge
   // by launch ID and task index rather than treating them as unrelated progress.
-  for (const nested of getNestedSubagentResults(
-    entries.flatMap((entry) => (entry.type === "message" ? [entry.message] : [])),
-  )) {
+  for (const nested of getNestedSubagentResults(sessionEntryMessages(entries))) {
     const recorded = results.get(nested.toolCallId);
     if (recorded && asyncJobId(nested.details)) {
       results.set(nested.toolCallId, { ...recorded, details: nested.details, isError: nested.isError });

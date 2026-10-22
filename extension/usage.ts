@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import { sessionEntryMessage } from "../storage/session-entries.js";
 import { findPersistedNamesIdentity } from "../names.js";
 import { RESUME_PROVIDER } from "../shared.js";
 import { formatCombinedUsageStatusLine } from "../tree.js";
@@ -284,9 +285,8 @@ export function collectCombinedUsageStatusLine(
         addRawUsage(entry.usage, false);
         continue;
       }
-      if (entry?.type !== "message") continue;
-      const msg = entry.message;
-      if (!isRecord(msg)) continue;
+      const msg = sessionEntryMessage(entry);
+      if (!msg) continue;
       if (
         (msg.role === "toolResult" && isSubagentToolName(msg.toolName)) ||
         (msg.role === "custom" && msg.customType === "subagent_completion")

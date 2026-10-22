@@ -3,6 +3,7 @@ import { ackBrokerJob, listBrokerJobs, watchBrokerJob } from "../broker/files.js
 import { steerBrokerJob } from "../broker/commands.js";
 import { WORKER_TOKEN_ENV } from "../runner/tree-admission.js";
 import { branchEntries } from "../resume.js";
+import { sessionEntryMessage } from "../storage/session-entries.js";
 import { buildSubagentDetails, DEFAULT_DELEGATION_MODE } from "../types.js";
 import { startBackground, notifyLead } from "./async-jobs.js";
 import { publishCompletion } from "./completion.js";
@@ -50,8 +51,9 @@ export function brokerProxyHandle(endpoint: BrokerEndpoint, spec: BrokerJobSpec)
 function consumedIds(ctx: SessionContext): Set<string> {
   const consumed = new Set<string>();
   for (const entry of branchEntries(ctx)) {
-    if (entry.type === "message" && entry.message.role === "custom") {
-      const details = entry.message.details;
+    const message = sessionEntryMessage(entry);
+    if (message?.role === "custom") {
+      const details = message.details;
       if (details && typeof details === "object" && "brokerJobId" in details && typeof details.brokerJobId === "string")
         consumed.add(details.brokerJobId);
     }
