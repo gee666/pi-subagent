@@ -221,6 +221,26 @@ test("late settlement from interrupted work cannot wake the main agent", async (
   }
 });
 
+test("extension input without a pending automatic resume cannot read an interrupt epoch", async () => {
+  const f = await setup();
+  try {
+    assert.equal(f.state.pendingAutomaticResume, undefined);
+    for (const input of [
+      { source: "extension" },
+      { source: "extension", text: "" },
+      { source: "extension", text: "hi" },
+    ]) {
+      assert.equal(f.event("input", input), undefined);
+    }
+    f.event("before_agent_start", { messageType: "user" });
+    f.event("agent_start", {});
+    assert.equal(f.aborts, 0);
+  } finally {
+    f.emit("session_shutdown");
+    await f.close();
+  }
+});
+
 test("automatic prompts retain their submission epoch through delayed preflight", async () => {
   const f = await setup();
   f.state.pi.sendUserMessage = () => {};

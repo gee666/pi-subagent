@@ -96,8 +96,9 @@ export function registerSubagentInterrupt(state: ExtensionState): void {
   state.pi.on("input", (event) => {
     const pending = state.pendingAutomaticResume;
     if (
+      pending &&
       event.source === "extension" &&
-      event.text === pending?.prompt &&
+      event.text === pending.prompt &&
       pending.interruptEpoch !== (state.interruptEpoch ?? 0)
     ) {
       state.pendingAutomaticResume = undefined;
