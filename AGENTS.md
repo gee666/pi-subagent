@@ -1,5 +1,10 @@
 # Repository instructions
 
+## Repository synchronization
+
+- Before starting any work, pull the latest changes from `origin` with `git pull --ff-only`. Preserve local edits; stop and resolve safely if the pull is blocked.
+- After each completed, validated piece of work, commit your changes and push to `origin` immediately. Work happens on multiple machines; do not leave finished work unsynchronized.
+
 ## Pi compatibility and releases
 
 - Test only against the latest npm Pi release. Do not maintain an older-version test matrix or claim compatibility with an untested minimum.
