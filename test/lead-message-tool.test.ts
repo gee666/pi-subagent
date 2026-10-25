@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { toolContext } from "./helpers/tool-context.js";
 import { createLeadMessageTool, registerLeadMessageTool } from "../extension/lead-message-tool.js";
 import {
   encodeLeadMessage,
@@ -13,7 +13,7 @@ import {
 
 import { SUBAGENT_DEPTH_ENV } from "../runner/constants.js";
 
-const ctx = {} as ExtensionContext;
+const ctx = toolContext({});
 
 function setChildDepth(t: { after(fn: () => void): void }, value: string | undefined): void {
   const previous = process.env[SUBAGENT_DEPTH_ENV];

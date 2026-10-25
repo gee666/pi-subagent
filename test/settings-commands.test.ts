@@ -283,15 +283,18 @@ test("validation, inspection and child restrictions leave settings untouched", a
     const childCtx = child.makeCtx([], { cwd: s.f.project });
     await child.emit("session_start", {}, childCtx);
     const notices: string[] = [];
-    await child.commands.get("subagent:max-depth")!.handler("99", {
-      ...childCtx,
-      ui: {
-        ...childCtx.ui,
-        notify: (text: string) => {
-          notices.push(text);
+    await child.commands.get("subagent:max-depth")!.handler(
+      "99",
+      hostDouble<ExtensionCommandContext>({
+        ...childCtx,
+        ui: {
+          ...childCtx.ui,
+          notify: (text: string) => {
+            notices.push(text);
+          },
         },
-      },
-    } as ExtensionCommandContext);
+      }),
+    );
     assert.match(notices.at(-1)!, /inherited grant/);
     await child.emit("session_shutdown", {}, childCtx);
     assert.equal(configuredEnv("PI_SUBAGENT_MAX_DEPTH", {}), undefined);

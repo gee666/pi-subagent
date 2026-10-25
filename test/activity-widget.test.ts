@@ -130,7 +130,7 @@ function fixture(t: TestContext) {
       idle = value;
     },
     turn: () => emit({ type: "turn_start", turnIndex: 0, timestamp: Date.now() }),
-    settled: () => emit({ type: "agent_settled" }),
+    settled: () => emit({ type: "agent_settled", aborted: false }),
     renders: () => renders,
   };
 }

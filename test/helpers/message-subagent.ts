@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { validateToolArguments } from "@earendil-works/pi-ai";
 import { createBudget, reserveSubagentBudgets } from "../../budget.js";
 import { allocateSubagentNames } from "../../names.js";
@@ -13,6 +13,7 @@ import type { RunningSubagentHandle } from "../../runner/options.js";
 import { registerSubagentsTool } from "../../extension/launch-tool.js";
 import { shutdownScheduler } from "../../extension/scheduler.js";
 import { settingsFixture } from "./settings.js";
+import { toolContext } from "./tool-context.js";
 
 export async function fixture() {
   const f = settingsFixture();
@@ -50,7 +51,7 @@ export async function fixture() {
       tools: ["read"],
     },
   ]);
-  const ctx = { cwd: f.project, hasUI: false, isProjectTrusted: () => true } as ExtensionContext;
+  const ctx = toolContext({ cwd: f.project, mode: "print", hasUI: false, isProjectTrusted: () => true });
   state.latestSessionCtx = ctx;
   registerMessageSubagentTool(state);
   assert.ok(registered);

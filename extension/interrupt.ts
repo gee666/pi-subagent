@@ -106,7 +106,8 @@ export function registerSubagentInterrupt(state: ExtensionState): void {
   });
   state.pi.on("before_agent_start", (event) => {
     const pending = state.pendingAutomaticResume;
-    startingResumeEpoch = event.prompt === pending?.prompt ? pending.interruptEpoch : undefined;
+    startingResumeEpoch =
+      event.messageType === "user" && pending && event.prompt === pending.prompt ? pending.interruptEpoch : undefined;
     if (startingResumeEpoch !== undefined) state.pendingAutomaticResume = undefined;
   });
   state.pi.on("agent_start", (_event, ctx) => {

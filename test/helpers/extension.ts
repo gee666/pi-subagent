@@ -6,6 +6,7 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type {
   ExtensionAPI,
   ExtensionContext,
+  ExtensionToolContext,
   ExtensionEvent,
   SessionEntry,
   SessionMessageEntry,
@@ -17,15 +18,9 @@ import { buildSubagentDetails, isSubagentDetails, isResultError, type SubagentDe
 import { makeResult } from "./results.js";
 import { serializedDetails } from "./json.js";
 
-/** A partial host double, not a full host implementation. Unexpected API access fails immediately. */
-export function hostDouble<T extends object>(members: Partial<T>): T {
-  return new Proxy(members, {
-    get(target, key, receiver) {
-      assert.ok(key in target, `Unexpected test host access: ${String(key)}`);
-      return Reflect.get(target, key, receiver);
-    },
-  }) as T;
-}
+import { hostDouble } from "./host-double.js";
+import { toolContext } from "./tool-context.js";
+export { hostDouble } from "./host-double.js";
 
 export function model(provider = "anthropic", id = "claude-sonnet-4-6", api = "anthropic-messages"): Model<Api> {
   return createFauxCore({ provider, api, models: [{ id }] }).getModel();
@@ -99,11 +94,13 @@ const defaults = {
   resources_discover: { type: "resources_discover", cwd: process.cwd(), reason: "startup" },
   before_agent_start: {
     type: "before_agent_start",
+    messageType: "user",
     prompt: "",
     systemPrompt: "base",
     systemPromptOptions: {
       cwd: process.cwd(),
       selectedTools: [],
+      hiddenTools: [],
       toolSnippets: {},
       toolGuidelines: {},
       promptGuidelines: [],
@@ -170,7 +167,7 @@ export function createExtensionHarness(options: { confirmAnswer?: boolean } = {}
       async execute(id, args, ctx) {
         // Both tools validate here. Do not bypass their SDK argument-preparation boundary.
         assert.ok(tool.prepareArguments, `Missing argument preparation for ${tool.name}`);
-        return tool.execute(id, tool.prepareArguments(args), undefined, undefined, ctx);
+        return tool.execute(id, tool.prepareArguments(args), undefined, undefined, toolContext(ctx));
       },
     });
   }
@@ -209,9 +206,9 @@ export function createExtensionHarness(options: { confirmAnswer?: boolean } = {}
   });
   subagentExtension(pi);
 
-  function makeCtx(entries: SessionEntry[], overrides: Partial<ExtensionContext> = {}): ExtensionContext {
+  function makeCtx(entries: SessionEntry[], overrides: Partial<ExtensionContext> = {}): ExtensionToolContext {
     entriesToAppend = entries;
-    return hostDouble<ExtensionContext>({
+    return toolContext({
       cwd: process.cwd(),
       hasUI: true,
       mode: "tui",

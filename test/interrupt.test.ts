@@ -232,16 +232,39 @@ test("automatic prompts retain their submission epoch through delayed preflight"
     sendAutomaticResumePrompt(f.state, prompt);
     f.key("\u001b");
     // An earlier input hook already ran before Escape, so only loop-entry cancellation remains.
-    f.event("before_agent_start", { prompt });
+    f.event("before_agent_start", { messageType: "user", prompt });
     const before = f.aborts;
     f.event("agent_start", {});
     assert.equal(f.aborts, before + 1);
     sendAutomaticResumePrompt(f.state, prompt);
-    f.event("before_agent_start", { prompt });
+    f.event("before_agent_start", { messageType: "user", prompt });
     f.key("\u001b");
     const interrupted = f.aborts;
     f.event("agent_start", {});
     assert.equal(f.aborts, interrupted + 1, "Escape during later preflight also cancels loop entry");
+  } finally {
+    f.emit("session_shutdown");
+    await f.close();
+  }
+});
+
+test("custom-message starts do not consume a pending automatic user prompt", async () => {
+  const f = await setup();
+  f.state.pi.sendUserMessage = () => {};
+  try {
+    const prompt = "Resuming 2 subagents...";
+    sendAutomaticResumePrompt(f.state, prompt);
+    const pending = f.state.pendingAutomaticResume;
+    f.event("before_agent_start", {
+      messageType: "custom",
+      message: { customType: "subagent_completion", content: "done", display: true },
+    });
+    assert.equal(f.state.pendingAutomaticResume, pending);
+    const before = f.aborts;
+    f.event("agent_start", {});
+    assert.equal(f.aborts, before);
+    f.event("before_agent_start", { messageType: "user", prompt });
+    assert.equal(f.state.pendingAutomaticResume, undefined);
   } finally {
     f.emit("session_shutdown");
     await f.close();

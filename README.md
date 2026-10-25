@@ -4,7 +4,9 @@ Delegate tasks to agents running in separate Pi processes. Each worker has its o
 
 Launches return immediately. Completion and worker messages arrive as steering that wakes an idle lead.
 
-Requires Pi 0.87.1 or newer, using the `@earendil-works` SDK packages.
+Requires Pi 1.4.0 or newer, using the `@earendil-works` SDK packages. Only the latest npm Pi release is tested.
+
+Tested against Pi 1.4.0
 
 ## Install
 
@@ -171,7 +173,9 @@ npm ci
 npm run check
 ```
 
-Tests use the real SDK packages installed as development dependencies. No host loader or permissive type shims are needed. Run tests outside a delegated worker environment, or unset inherited `PI_SUBAGENT_*` storage and budget variables first.
+`npm test` first installs the four declared Pi SDK packages at `@latest` with `--save-dev --ignore-scripts`, then typechecks before running tests. `npm run check` uses that same path and also checks formatting and file size. Network access is required, and a newer Pi release can update `package.json` and `package-lock.json`. Keep those changes together.
+
+Tests use the real SDK packages installed as development dependencies. SDK/loader integration tests exercise extension loading and argument validation. Terminal rendering tests use test themes, including ANSI styling, width limits and theme invalidation. They do not verify every installed theme or a live interactive terminal. Prompt guidance tests check generated text, not model behavior. No host loader or permissive type shims are needed. Run tests outside a delegated worker environment, or unset inherited `PI_SUBAGENT_*` storage and budget variables first.
 
 Source organization:
 
