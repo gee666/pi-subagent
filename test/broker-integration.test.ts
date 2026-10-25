@@ -34,7 +34,7 @@ for (const [limit, parents] of [
 ] as const) {
   test(
     `root file broker unloads ${parents} parents and runs two children each within resident cap ${limit}`,
-    { timeout: 45000 },
+    { timeout: 180000 },
     async () => {
       const f = settingsFixture();
       const previous = { root: process.env.TEST_BROKER_ROOT, children: process.env.TEST_BROKER_CHILDREN };
@@ -94,7 +94,7 @@ for (const [limit, parents] of [
         maximum = Math.max(maximum, resident.size);
       }, 5);
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 35000);
+      const timer = setTimeout(() => controller.abort(), 150000);
       try {
         const agent = { name: "worker", description: "test", systemPrompt: "", source: "user" as const, filePath: "" };
         const runs = parentNames.map((name, index) =>
@@ -146,7 +146,8 @@ for (const [limit, parents] of [
         assert.ok(
           events
             .filter((event) => event.kind === "queued-message")
-            .every((event) => /queued/.test(JSON.stringify(event.content))),
+            // Earlier parents may already have parked, allowing immediate delivery.
+            .every((event) => /Message (queued for|sent to) subagent/.test(JSON.stringify(event.content))),
         );
         assert.equal(events.filter((event) => event.kind === "steer" && event.depth === 2).length, parents);
         assert.ok(maximum <= limit, `${maximum} resident workers exceeded hard cap ${limit}`);

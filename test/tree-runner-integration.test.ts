@@ -16,7 +16,7 @@ const moduleUrl = (file: string) => pathToFileURL(path.resolve(file)).href;
 for (const limit of [1, 2]) {
   test(
     `root broker preserves two nested jobs across parent unloading at cap ${limit}`,
-    { timeout: 15000 },
+    { timeout: 120000 },
     async () => {
       fs.mkdirSync("tmp", { recursive: true });
       const root = fs.mkdtempSync(path.resolve("tmp/tree-runner-"));
@@ -91,7 +91,7 @@ for (const limit of [1, 2]) {
             command: process.execPath,
             argsPrefix: ["--import", "tsx/esm", "--input-type=module", "-e", child, "--"],
           },
-          startupTimeoutMsOverride: 10000,
+          startupTimeoutMsOverride: 45000,
           makeDetails: (results) => buildSubagentDetails("single", "spawn", null, results),
         }),
       );

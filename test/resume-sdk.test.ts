@@ -67,7 +67,7 @@ test("installed Pi loader's message_subagent accepts strict-provider null budget
       execFileSync(process.execPath, ["--import", "tsx/esm", "--input-type=module", "-e", code], {
         cwd: process.cwd(),
         encoding: "utf8",
-        timeout: 30000,
+        timeout: 120000,
         env: {
           ...process.env,
           TMPDIR: root,

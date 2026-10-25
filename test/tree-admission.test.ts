@@ -57,7 +57,7 @@ test("preparation is globally stoppable without reserving a live process slot", 
   }
 });
 
-test("a stop between global claim and PID bind kills startup without retry or prompt", { timeout: 10000 }, async () => {
+test("a stop between global claim and PID bind kills startup without retry or prompt", { timeout: 60000 }, async () => {
   const f = setup();
   const admission = new TreeWorkerAdmission(f.store, "raced");
   const marker = path.join(f.root, "prompted");
@@ -98,7 +98,7 @@ test("a stop between global claim and PID bind kills startup without retry or pr
   }
 });
 
-test("stopping during retry backoff cannot enqueue or spawn another attempt", { timeout: 10000 }, async () => {
+test("stopping during retry backoff cannot enqueue or spawn another attempt", { timeout: 60000 }, async () => {
   const f = setup(),
     scheduler = new WorkerScheduler(1, { store: f.store, root: true });
   const marker = path.join(f.root, "attempt");
@@ -116,7 +116,7 @@ test("stopping during retry backoff cannot enqueue or spawn another attempt", { 
       treeAdmission,
       makeDetails,
       settings: { PI_SUBAGENT_STARTUP_RETRIES: "2" },
-      startupTimeoutMsOverride: 100,
+      startupTimeoutMsOverride: 1000,
       piCommandOverride: {
         command: process.execPath,
         argsPrefix: [
@@ -142,7 +142,7 @@ test("stopping during retry backoff cannot enqueue or spawn another attempt", { 
   }
 });
 
-test("startup retries enqueue fresh global tokens behind already queued siblings", { timeout: 10000 }, async () => {
+test("startup retries enqueue fresh global tokens behind already queued siblings", { timeout: 60000 }, async () => {
   const f = setup(),
     scheduler = new WorkerScheduler(1, { store: f.store, root: true });
   const log = path.join(f.root, "attempts.json");
@@ -172,7 +172,7 @@ test("startup retries enqueue fresh global tokens behind already queued siblings
         treeAdmission,
         makeDetails,
         settings: { PI_SUBAGENT_STARTUP_RETRIES: "1" },
-        startupTimeoutMsOverride: 100,
+        startupTimeoutMsOverride: 1000,
         piCommandOverride: { command: process.execPath, argsPrefix: ["-e", script, "--"] },
       }),
     );

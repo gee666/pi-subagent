@@ -175,6 +175,8 @@ npm run check
 
 `npm test` first installs the four declared Pi SDK packages at `@latest` with `--save-dev --ignore-scripts`, then typechecks before running tests. `npm run check` uses that same path and also checks formatting and file size. Network access is required, and a newer Pi release can update `package.json` and `package-lock.json`. Keep those changes together.
 
+`npm run test:evergreen` typechecks and runs all unit/integration tests in an isolated temporary workspace, then runs real-Pi delegation and saved-worker resume e2e tests. Set `EVERGREEN_E2E_MODEL` to an authenticated `provider/model[:thinking]`; `EVERGREEN_PI_BIN` selects the globally installed Pi executable (defaults to `pi` on PATH). E2E keeps sessions enabled, ignores stdin, and uses a disposable agent directory with copies of your auth/model configuration. It makes real model calls and requires network access. See [EVERGREEN.md](EVERGREEN.md) for intent coverage and Pi upgrade risks.
+
 Tests use the real SDK packages installed as development dependencies. SDK/loader integration tests exercise extension loading and argument validation. Terminal rendering tests use test themes, including ANSI styling, width limits and theme invalidation. They do not verify every installed theme or a live interactive terminal. Prompt guidance tests check generated text, not model behavior. No host loader or permissive type shims are needed. Run tests outside a delegated worker environment, or unset inherited `PI_SUBAGENT_*` storage and budget variables first.
 
 Source organization:

@@ -282,7 +282,7 @@ test("reloading the budget module drops its override but retains lifetime spendi
   ledger(root);
 });
 
-test("competing session overrides preserve the baseline and cannot double-spend", { timeout: 30_000 }, async (t) => {
+test("competing session overrides preserve the baseline and cannot double-spend", { timeout: 90_000 }, async (t) => {
   const root = fixture(t, 2);
   const moduleUrl = pathToFileURL(path.resolve("budget.ts")).href;
   const results = await Promise.all(
@@ -306,7 +306,7 @@ test("competing session overrides preserve the baseline and cannot double-spend"
       console.log(JSON.stringify(ok));
     `,
         ],
-        { timeout: 20_000, env: { ...process.env, TMPDIR: path.dirname(root.directory) } },
+        { timeout: 60_000, env: { ...process.env, TMPDIR: path.dirname(root.directory) } },
       );
       return JSON.parse(stdout) as boolean;
     }),

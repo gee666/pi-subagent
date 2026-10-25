@@ -57,6 +57,7 @@
   "scripts": {
     "pretest": "npm install --save-dev --ignore-scripts @earendil-works/pi-agent-core@latest @earendil-works/pi-ai@latest @earendil-works/pi-coding-agent@latest @earendil-works/pi-tui@latest && npm run typecheck",
     "test": "node --import tsx/esm --test test/*.test.ts",
+    "test:evergreen": "npm run pretest && node scripts/evergreen.mjs",
     "typecheck": "tsc --noEmit",
     "format": "prettier --write \"*.ts\" \"{extension,runner,storage,types,ui,test}/**/*.ts\" \"scripts/*.mjs\" package.json tsconfig.json .prettierrc.json",
     "format:check": "prettier --check \"*.ts\" \"{extension,runner,storage,types,ui,test}/**/*.ts\" \"scripts/*.mjs\" package.json tsconfig.json .prettierrc.json",

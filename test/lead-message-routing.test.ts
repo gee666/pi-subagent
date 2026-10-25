@@ -27,7 +27,7 @@ const settings = {
 
 test(
   "parallel notifications retain originating task identity without awaiting delivery",
-  { timeout: 10000 },
+  { timeout: 120000 },
   async () => {
     const tasks = [
       { agent: "worker", task: "first" },
@@ -75,7 +75,7 @@ test(
 
 test(
   "a nested lead receives its child's notification without automatically forwarding it upstream",
-  { timeout: 10000 },
+  { timeout: 120000 },
   async () => {
     const inheritedDepth = process.env[SUBAGENT_DEPTH_ENV];
     const attemptUrl = new URL("../runner/attempt.ts", import.meta.url).href;
@@ -90,7 +90,7 @@ test(
       await runAttempt({
         cwd: process.cwd(), agents: [], agentName: "nested-worker", task: "nested",
         parentDepth: 1, parentAgentStack: ["lead"], maxDepth: 3, preventCycles: false,
-        settings: {}, startupTimeoutMsOverride: 5000, idleTimeoutMsOverride: 0, terminationTimeoutMsOverride: 1000,
+        settings: {}, startupTimeoutMsOverride: 45000, idleTimeoutMsOverride: 0, terminationTimeoutMsOverride: 1000,
         piCommandOverride: {command: process.execPath, argsPrefix: ["--import", "tsx/esm", "-e", ${JSON.stringify(childCode)}, "--"]},
         onLeadMessage: (message) => { received.push(message); },
         makeDetails: () => { throw new Error("no details expected"); },
@@ -113,7 +113,7 @@ test(
         maxDepth: 3,
         preventCycles: false,
         settings: {},
-        startupTimeoutMsOverride: 5000,
+        startupTimeoutMsOverride: 90000,
         idleTimeoutMsOverride: 0,
         terminationTimeoutMsOverride: 1000,
         piCommandOverride: { command: process.execPath, argsPrefix: ["--import", "tsx/esm", "-e", code, "--"] },

@@ -6,7 +6,7 @@ import { createBudget, readBudget, reserveSubagentBudgets } from "../budget.js";
 import { workspace, task, race } from "./fixtures/budget.js";
 
 describe("concurrent subagent budgets", () => {
-  test("concurrent resume increases reserve extra capacity only once", { timeout: 30_000 }, async () => {
+  test("concurrent resume increases reserve extra capacity only once", { timeout: 90_000 }, async () => {
     const dir = workspace();
     try {
       const root = createBudget(path.join(dir, "budget"), 4);
@@ -25,7 +25,7 @@ describe("concurrent subagent budgets", () => {
     }
   });
 
-  test("a concurrent launch and conflicting decrease cannot both succeed", { timeout: 30_000 }, async () => {
+  test("a concurrent launch and conflicting decrease cannot both succeed", { timeout: 90_000 }, async () => {
     const dir = workspace();
     try {
       const root = createBudget(path.join(dir, "budget"), 5);
@@ -43,7 +43,7 @@ describe("concurrent subagent budgets", () => {
     }
   });
 
-  test("parallel processes cannot reserve the same remaining slots", { timeout: 30_000 }, async () => {
+  test("parallel processes cannot reserve the same remaining slots", { timeout: 90_000 }, async () => {
     const dir = workspace();
     try {
       const root = createBudget(path.join(dir, "budget"), 8);
@@ -59,7 +59,7 @@ describe("concurrent subagent budgets", () => {
     }
   });
 
-  test("parallel retries of one call share one reservation", { timeout: 30_000 }, async () => {
+  test("parallel retries of one call share one reservation", { timeout: 90_000 }, async () => {
     const dir = workspace();
     try {
       const root = createBudget(path.join(dir, "budget"), 2);

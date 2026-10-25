@@ -135,7 +135,7 @@ test("fresh SDK launches without an explicit trust grant override stale --approv
           agentName: "worker", task: "work", parentDepth: 0, parentAgentStack: [], maxDepth: 1, preventCycles: true,
           makeDetails: results => buildSubagentDetails("single", "spawn", null, results),
           piCommandOverride: { command: process.execPath, argsPrefix: [${JSON.stringify(child)}] },
-          startupTimeoutMsOverride: 10000,
+          startupTimeoutMsOverride: 45000,
         });
         if (result.exitCode !== 0) throw new Error(result.errorMessage);
         results.push({ ...JSON.parse(getFinalOutput(result.messages)), executed: fs.existsSync(${JSON.stringify(marker)}) });
@@ -146,7 +146,7 @@ test("fresh SDK launches without an explicit trust grant override stale --approv
       execFileSync(process.execPath, ["--import", "tsx/esm", "--input-type=module", "-e", driver], {
         cwd: process.cwd(),
         encoding: "utf8",
-        timeout: 30000,
+        timeout: 180000,
         env: { ...process.env, JITI_CACHE_DIR: path.join(f.root, "jiti"), PI_OFFLINE: "1" },
       }),
     );

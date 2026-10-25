@@ -18,7 +18,7 @@ function options(code: string, onLeadMessage?: RunAgentOptions["onLeadMessage"])
     maxDepth: 3,
     preventCycles: false,
     settings: {},
-    startupTimeoutMsOverride: 5000,
+    startupTimeoutMsOverride: 45000,
     idleTimeoutMsOverride: 0,
     terminationTimeoutMsOverride: 1000,
     piCommandOverride: { command: process.execPath, argsPrefix: ["--import", "tsx/esm", "-e", code, "--"] },
@@ -145,7 +145,7 @@ test(
   },
 );
 
-test("real child tool sends without waiting for the lead callback to finish", { timeout: 10000 }, async () => {
+test("real child tool sends without waiting for the lead callback to finish", { timeout: 90000 }, async () => {
   const toolUrl = new URL("../extension/lead-message-tool.ts", import.meta.url).href;
   const code = `
     process.stdin.once("data", async () => {

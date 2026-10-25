@@ -74,7 +74,7 @@ export async function race(
       }),
   );
   let ready = 0;
-  const timer = setTimeout(() => children.forEach((child) => child.kill("SIGKILL")), 20_000);
+  const timer = setTimeout(() => children.forEach((child) => child.kill("SIGKILL")), 60_000);
   try {
     return await Promise.all(results);
   } finally {

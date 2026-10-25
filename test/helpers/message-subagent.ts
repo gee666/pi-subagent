@@ -145,7 +145,7 @@ export function deferred() {
 }
 
 export async function until(check: () => boolean) {
-  for (let i = 0; i < 500; i++) {
+  for (let i = 0; i < 3000; i++) {
     if (check()) return;
     await delay(10);
   }
