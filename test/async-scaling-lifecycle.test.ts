@@ -136,14 +136,16 @@ test("old same-key background settlement cannot erase replacement accounting", a
   assert.equal(owner.activeSubagentUsageSummaries.size, 0);
 });
 
-test("a thousand independent jobs share one trailing footer refresh", (t) => {
+test("a thousand independent jobs share one trailing usage widget refresh", (t) => {
   t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1000 });
   const owner = state();
   let refreshes = 0;
   const ctx = {
+    mode: "tui",
+    hasUI: true,
     sessionManager: { getEntries: () => [], getLeafId: () => "leaf" },
     ui: {
-      setStatus() {
+      setWidget() {
         refreshes++;
       },
     },

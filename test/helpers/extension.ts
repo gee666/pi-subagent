@@ -238,6 +238,7 @@ export function createExtensionHarness(options: { confirmAnswer?: boolean } = {}
         select: async () => undefined,
         input: async () => undefined,
         setStatus() {},
+        setWidget() {},
         theme: hostDouble<ExtensionContext["ui"]["theme"]>({ fg: (_color, text) => text }),
       }),
       ...overrides,

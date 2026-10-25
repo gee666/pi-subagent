@@ -162,7 +162,7 @@ A live single line above the editor shows `Running N: Name elapsed · Name elaps
 
 A worker that has settled its own turn but still has descendants reports `Idle, waiting for children.` to the lead via steering, followed by its own last answer. While live it counts toward the cap. If parked, its process exits and the root broker later resumes its saved context. `Finished` means the whole subtree has settled, not just the worker's own turn.
 
-The `WITH SUBS` footer includes recursive worker usage. Resuming a named worker adds usage without increasing the unique-worker count. See [usage accounting](docs/usage.md) for programmatic results.
+The single-line dim `WITH SUBS` widget below the editor includes recursive worker usage. It appears only after at least one subagent has been used; no usage summary is added to the status footer. Resuming a named worker adds usage without increasing the unique-worker count. See [usage accounting](docs/usage.md) for programmatic results.
 
 ## Development
 

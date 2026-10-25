@@ -236,6 +236,7 @@ export const persistedUsageCache = new WeakMap<object, PersistedUsageTotals>();
 export function collectCombinedUsageStatusLine(
   ctx: unknown,
   liveSummaries: SubagentUsageSummary[] = [],
+  requireSubagents = false,
 ): string | undefined {
   const manager = isRecord(ctx) && isRecord(ctx.sessionManager) ? ctx.sessionManager : undefined;
   const canReadEntries = typeof manager?.getEntries === "function" || typeof manager?.getBranch === "function";
@@ -345,5 +346,5 @@ export function collectCombinedUsageStatusLine(
         ...(subagents.subagentIds ?? []).map((id) => persisted.registeredNames?.aliases.get(id) ?? id),
       ]).size
     : subagents.subagentCount;
-  return formatCombinedUsageStatusLine(parentUsage, uniqueCount);
+  return requireSubagents && uniqueCount === 0 ? undefined : formatCombinedUsageStatusLine(parentUsage, uniqueCount);
 }

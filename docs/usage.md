@@ -49,12 +49,12 @@ A tool-result-only cost accumulator misses async completions. Launch and messagi
 
 Sum one lead stream's recursive worker totals. Do not also sum its children's streams, since recursive totals already include descendants. Lead-only model usage can be added separately. Repeated completions or overlapping summaries must not add the same worker run twice.
 
-## Interactive footer
+## Interactive usage widget
 
 The `WITH SUBS` line includes the parent's billed session entries and recursive worker usage. Parent accounting follows Pi's session-statistics rules using `ctx.sessionManager.getEntries()`, including off-branch retries, compacted history, branch summaries, and tool-reported usage. Durable worker summaries add delegated cost once. Async delivery retains this accounting across idle periods and recovery.
 
 The worker count tracks unique identities, not invocations. Messaging and named resumes add usage without increasing the count. Older compact history can recover identities from the name registry. This usage count is separate from budget reservations: launching reserves `1 + max_subagents_allowed` slots, including for queued launches, while messaging an existing worker allocates no new budget slot. A resumed idle worker still needs concurrency capacity. A cap increase can reserve additional descendant capacity from its original launcher.
 
-Pi renders this extension's combined usage through its normal `ctx.ui.setStatus()` footer line. This is separate from the live `Running N` line above the editor, which shows names, elapsed times, overflow, and idle count using live handles and snapshots without session metadata or disk reads on ticks.
+Pi renders combined usage as a single dim widget line below the editor, clipped to the terminal width. It appears only after at least one worker has been used, including workers recovered from a saved session, and stays visible after workers finish. Empty sessions and sessions with only parent usage show no usage widget. The extension does not add this summary to the status footer. This is separate from the live `Running N` line above the editor, which shows names, elapsed times, overflow, and idle count using live handles and snapshots without session metadata or disk reads on ticks.
 
 The main `index.ts` entry retains its default registration export and named exports `selectParentModelForSubagent`, `getSubagentsToolDescription`, `collectCombinedUsageStatusLine`, and `collectLiveUsageSummary`. Existing root entry-point imports remain supported.

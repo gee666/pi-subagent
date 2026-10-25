@@ -1,3 +1,4 @@
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import { configuredEnv, loadSubagentSettings } from "../settings.js";
 import * as path from "node:path";
 import {
@@ -126,23 +127,25 @@ export async function restoreModelAfterResumeFailure(
   }
 }
 
-export function formatFooterStatusText(ctx: SessionContext, text: string): string {
-  return typeof ctx?.ui?.theme?.fg === "function" ? ctx.ui.theme.fg("dim", text) : text;
-}
-
 export function updateCombinedUsageStatus(state: ExtensionState, ctx?: SessionContext): void {
   const targetCtx = ctx ?? state.latestSessionCtx;
-  if (!targetCtx?.ui) return;
+  if (targetCtx?.mode !== "tui" || !targetCtx.hasUI || typeof targetCtx.ui?.setWidget !== "function") return;
   try {
-    if (state.disabled) {
-      targetCtx.ui.setStatus?.("subagent-usage", undefined);
-      return;
-    }
-    const line = collectCombinedUsageStatusLine(targetCtx, Array.from(state.activeSubagentUsageSummaries.values()));
-    if (typeof targetCtx.ui.setStatus !== "function") return;
-    targetCtx.ui.setStatus("subagent-usage", line ? formatFooterStatusText(targetCtx, line) : undefined);
+    const line = state.disabled
+      ? undefined
+      : collectCombinedUsageStatusLine(targetCtx, Array.from(state.activeSubagentUsageSummaries.values()), true);
+    targetCtx.ui.setWidget(
+      "subagent-usage",
+      line
+        ? (_tui, theme) => ({
+            render: (width) => [theme.fg("dim", truncateToWidth(line, Math.max(0, width), ""))],
+            invalidate() {},
+          })
+        : undefined,
+      { placement: "belowEditor" },
+    );
   } catch (err) {
-    console.error("[pi-subagent] Failed to update combined subagent status line:", err);
+    console.error("[pi-subagent] Failed to update combined subagent usage widget:", err);
   }
 }
 
