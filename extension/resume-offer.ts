@@ -4,7 +4,7 @@ import { RESUME_MODEL_ID, RESUME_PROVIDER } from "../shared.js";
 import type { SessionContext } from "./contracts.js";
 import { getRestorableModel, RESUME_INTERACTIVE_DELAY_MS, SUBAGENT_FALLBACK_MODEL_ENV } from "./models.js";
 import { ensureSubagentToolActive, hasCliInitialPrompt, isRpcMode } from "./policy.js";
-import { restoreModelAfterResumeFailure, scheduleSessionTask } from "./runtime.js";
+import { restoreModelAfterResumeFailure, scheduleSessionTask, sendAutomaticResumePrompt } from "./runtime.js";
 import type { ExtensionState } from "./state.js";
 
 export async function maybeOfferSubagentResume(
@@ -12,6 +12,9 @@ export async function maybeOfferSubagentResume(
   ctx: SessionContext,
   opts: { deferInteractivePrompt: boolean },
 ): Promise<void> {
+  const generation = state.lifecycleGeneration;
+  const interruptEpoch = state.interruptEpoch ?? 0;
+  const canceled = () => generation !== state.lifecycleGeneration || interruptEpoch !== (state.interruptEpoch ?? 0);
   const restorableModel = getRestorableModel(ctx, state.settings);
   if (restorableModel) {
     state.lastRestorableModel = restorableModel;
@@ -31,6 +34,7 @@ export async function maybeOfferSubagentResume(
       `The resumed session has ${plans.length === 1 ? "an" : String(plans.length)} unfinished subagent call${plans.length === 1 ? "" : "s"} (${totalTaskCount} task${totalTaskCount === 1 ? "" : "s"}). Resume from saved subagent sessions?`,
     );
   }
+  if (canceled()) return;
   if (!shouldResume) {
     if (ctx.model?.provider === RESUME_PROVIDER) {
       if (restorableModel) {
@@ -67,7 +71,12 @@ export async function maybeOfferSubagentResume(
   state.resumeModelRegistry = ctx.modelRegistry;
   ensureSubagentToolActive(state.pi);
   const resumeModel = ctx.modelRegistry.find(RESUME_PROVIDER, RESUME_MODEL_ID);
-  if (!resumeModel || !(await state.pi.setModel(resumeModel))) {
+  const switched = resumeModel && (await state.pi.setModel(resumeModel));
+  if (canceled()) {
+    if (generation === state.lifecycleGeneration && restorableModel) await state.pi.setModel(restorableModel);
+    return;
+  }
+  if (!switched) {
     ctx.ui.notify("Failed to switch to synthetic subagent resume model.", "error");
     await restoreModelAfterResumeFailure(state, ctx);
     return;
@@ -91,13 +100,14 @@ export async function maybeOfferSubagentResume(
       state,
       () => {
         try {
-          state.pi.sendUserMessage(`Resuming ${totalTaskCount} subagents...`, { deliverAs: "steer" });
+          sendAutomaticResumePrompt(state, `Resuming ${totalTaskCount} subagents...`);
         } catch (err) {
           console.error("[pi-subagent] Failed to start resume turn after tree navigation:", err);
           void restoreModelAfterResumeFailure(state, ctx);
         }
       },
       RESUME_INTERACTIVE_DELAY_MS,
+      true,
     );
   }
 }

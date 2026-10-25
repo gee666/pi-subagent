@@ -19,6 +19,10 @@ export interface ExtensionState extends DelegationDepthConfig {
   backgroundJobs: Map<string, BackgroundJob>;
   /** Delivery token -> session generation, retained until the completion is consumed. */
   pendingCompletionDeliveries: Map<string, number>;
+  pendingCompletionInterrupts: Map<string, () => void>;
+  interruptEpoch: number;
+  onSessionReadyForInterrupt?: (ctx: SessionContext) => void;
+  pendingAutomaticResume?: { prompt: string; interruptEpoch: number };
   pi: ExtensionAPI;
   settings?: SubagentSettings;
   sessionSettings?: SubagentSettings;
@@ -88,6 +92,8 @@ export function createExtensionState(pi: ExtensionAPI): ExtensionState {
     approvedProjectAgentDirsForSession: new Set(),
     backgroundJobs: new Map(),
     pendingCompletionDeliveries: new Map(),
+    pendingCompletionInterrupts: new Map(),
+    interruptEpoch: 0,
     activeSubagents: new Map(),
     activeResumeNames: new Set(),
     forcedErrorToolCallIds: new Set(),

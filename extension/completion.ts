@@ -29,6 +29,7 @@ export function publishCompletion(
   generation: number,
   executionKey?: AsyncExecutionKey,
   brokerJobId?: string,
+  interruptEpoch = state.interruptEpoch ?? 0,
 ): void {
   if (!state.sessionActive || generation !== state.lifecycleGeneration) return;
   const failed = isResultError(result);
@@ -43,28 +44,30 @@ export function publishCompletion(
     brokerJobId ? { brokerJobId } : {},
   );
   const deliveryId = retainCompletionDelivery(state, generation);
-  scheduleSessionTask(
-    state,
-    () => {
-      if (state.pendingCompletionDeliveries.get(deliveryId) !== generation) return;
-      try {
-        const silent = explicitlyStopped(state, result);
-        state.pi.sendMessage(
-          {
-            customType: SUBAGENT_COMPLETION_TYPE,
-            content: silent ? `Subagent ${result.name} stopped as requested.` : content,
-            display: !silent,
-            details: Object.assign(details, { asyncDeliveryId: deliveryId }, silent ? { silentStopped: true } : {}),
-          },
-          silent ? { triggerTurn: false } : { deliverAs: "steer", triggerTurn: true },
-        );
-        // sendMessage returns before queued messages are consumed. Only the
-        // matching message_start handler may release a successful delivery.
-      } catch (error) {
-        releaseCompletionDelivery(state, deliveryId, generation);
-        console.error("[pi-subagent] Completion delivery failed:", error);
-      }
-    },
-    0,
-  );
+  let delivered = false;
+  const deliver = (interrupted = false) => {
+    if (state.pendingCompletionDeliveries.get(deliveryId) !== generation || (delivered && !interrupted)) return;
+    try {
+      const silent = interrupted || interruptEpoch !== (state.interruptEpoch ?? 0) || explicitlyStopped(state, result);
+      state.pi.sendMessage(
+        {
+          customType: SUBAGENT_COMPLETION_TYPE,
+          content: silent ? `Subagent ${result.name} stopped as requested.` : content,
+          display: !silent,
+          details: Object.assign(details, { asyncDeliveryId: deliveryId }, silent ? { silentStopped: true } : {}),
+        },
+        silent ? { triggerTurn: false } : { deliverAs: "steer", triggerTurn: true },
+      );
+      delivered = true;
+      // Interrupted deliveries are durable accounting only, with no continuation to await.
+      if (silent) releaseCompletionDelivery(state, deliveryId, generation);
+      // Normal sendMessage returns before queued messages are consumed.
+      // Keep its interrupt callback until message_start releases the delivery.
+    } catch (error) {
+      releaseCompletionDelivery(state, deliveryId, generation);
+      console.error("[pi-subagent] Completion delivery failed:", error);
+    }
+  };
+  (state.pendingCompletionInterrupts ??= new Map()).set(deliveryId, () => deliver(true));
+  scheduleSessionTask(state, () => deliver(), 0);
 }

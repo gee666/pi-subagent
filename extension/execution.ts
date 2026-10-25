@@ -185,6 +185,7 @@ export async function executeParallel(
       extras,
     });
   const generation = state.lifecycleGeneration;
+  const interruptEpoch = state.interruptEpoch ?? 0;
   const scheduler = schedulerFor(state);
   const taskIds = new Map<number, number>();
   try {
@@ -248,10 +249,17 @@ export async function executeParallel(
             result,
             generation,
             extras?.jobId ? { jobId: extras.jobId, taskIndex: index } : undefined,
+            undefined,
+            interruptEpoch,
           );
         },
         onLeadMessage: (index, task, message) =>
-          notifyLead(state, `Message from subagent ${extras?.names?.[index] ?? task.agent}:\n${message}`, generation),
+          notifyLead(
+            state,
+            `Message from subagent ${extras?.names?.[index] ?? task.agent}:\n${message}`,
+            generation,
+            interruptEpoch,
+          ),
         settings: state.settings,
         namesFile: state.currentNamesFile || undefined,
         intelligencePresets: state.intelligencePresets,

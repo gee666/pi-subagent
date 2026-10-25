@@ -96,6 +96,7 @@ const defaults = {
   message_end: { type: "message_end", message: fauxAssistantMessage("") },
   message_start: { type: "message_start", message: fauxAssistantMessage("") },
   context: { type: "context", messages: [] },
+  resources_discover: { type: "resources_discover", cwd: process.cwd(), reason: "startup" },
   before_agent_start: {
     type: "before_agent_start",
     prompt: "",
@@ -122,6 +123,7 @@ const defaults = {
       | "message_end"
       | "message_start"
       | "context"
+      | "resources_discover"
       | "before_agent_start"
   ]: EventOf<K>;
 };
@@ -239,6 +241,7 @@ export function createExtensionHarness(options: { confirmAnswer?: boolean } = {}
         input: async () => undefined,
         setStatus() {},
         setWidget() {},
+        onTerminalInput: () => () => {},
         theme: hostDouble<ExtensionContext["ui"]["theme"]>({ fg: (_color, text) => text }),
       }),
       ...overrides,

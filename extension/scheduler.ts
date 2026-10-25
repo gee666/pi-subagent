@@ -56,6 +56,11 @@ export function schedulerFor(state: ExtensionState): WorkerScheduler {
   return scheduler;
 }
 
+/** Input handling must not initialize a scheduler in sessions without workers. */
+export function cachedSchedulerFor(state: ExtensionState): WorkerScheduler | undefined {
+  return schedulers.get(state);
+}
+
 /** UI reads must not initialize schedulers or touch the filesystem. */
 export function cachedBrokerEndpoint(state: ExtensionState) {
   return schedulers.get(state)?.brokerEndpoint;

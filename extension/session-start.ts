@@ -43,6 +43,7 @@ export function registerSessionLifecycle(state: ExtensionState): void {
     state.sessionActive = false;
     state.lifecycleGeneration += 1;
     state.pendingCompletionDeliveries.clear();
+    state.pendingCompletionInterrupts.clear();
     await shutdownScheduler(state);
     await stopBackgroundJobs(state);
     state.sessionActive = true;
@@ -69,6 +70,7 @@ export function registerSessionLifecycle(state: ExtensionState): void {
     state.canDelegate = !state.disabled && state.canDelegate;
     state.maxTasksPerCall =
       parseNonNegativeInt(configuredEnv(SUBAGENT_MAX_TASKS_PER_CALL_ENV, state.settings)) ?? DEFAULT_MAX_TASKS_PER_CALL;
+    state.pendingAutomaticResume = undefined;
     state.currentBudget = undefined;
     state.budgetSetupError = undefined;
     try {
@@ -124,6 +126,7 @@ export function registerSessionLifecycle(state: ExtensionState): void {
     state.pendingResumePlans = [];
     state.pendingInteractiveResumePrompt = null;
     state.modelToRestoreAfterResume = undefined;
+    state.onSessionReadyForInterrupt?.(ctx);
     updateCombinedUsageStatus(state, ctx);
     try {
       // Always repair sessions left on the synthetic resume model, even in
@@ -225,6 +228,7 @@ export function registerSessionLifecycle(state: ExtensionState): void {
     state.sessionActive = false;
     state.lifecycleGeneration += 1;
     state.pendingCompletionDeliveries.clear();
+    state.pendingCompletionInterrupts.clear();
     if (parking) detachBrokerJobs(state);
     else {
       await shutdownScheduler(state);

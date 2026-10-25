@@ -60,6 +60,7 @@ export function releaseCompletionDelivery(state: ExtensionState, token: string, 
   if (generation !== state.lifecycleGeneration || state.pendingCompletionDeliveries?.get(token) !== generation) return;
   const count = pendingCount(state);
   state.pendingCompletionDeliveries.delete(token);
+  state.pendingCompletionInterrupts?.delete(token);
   recordCount(state, count - 1);
   emitBackgroundCount(state);
 }
@@ -98,8 +99,18 @@ export function registerAsyncDeliveryEvents(state: ExtensionState): void {
   });
 }
 
-export function notifyLead(state: ExtensionState, content: string, generation = state.lifecycleGeneration): void {
-  if (!state.sessionActive || state.lifecycleGeneration !== generation) return;
+export function notifyLead(
+  state: ExtensionState,
+  content: string,
+  generation = state.lifecycleGeneration,
+  interruptEpoch = state.interruptEpoch ?? 0,
+): void {
+  if (
+    !state.sessionActive ||
+    state.lifecycleGeneration !== generation ||
+    (state.interruptEpoch ?? 0) !== interruptEpoch
+  )
+    return;
   // Custom messages use Pi\'s distinct customMessageBg instead of userMessageBg.
   state.pi.sendMessage(
     { customType: SUBAGENT_MESSAGE_TYPE, content, display: true, details: undefined },
@@ -118,6 +129,7 @@ export function startBackground(
   cleanup?: () => Promise<void>,
 ): void {
   const generation = state.lifecycleGeneration;
+  const interruptEpoch = state.interruptEpoch ?? 0;
   const controller = new AbortController();
   const job: BackgroundJob = { names, controller, promise: Promise.resolve() };
   state.backgroundJobs.set(key, job);
@@ -137,6 +149,7 @@ export function startBackground(
         state,
         `Subagent job ${names.join(", ") || key} failed: ${error instanceof Error ? error.message : String(error)}`,
         generation,
+        interruptEpoch,
       );
     })
     .finally(async () => {

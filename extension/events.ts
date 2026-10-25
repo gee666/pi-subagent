@@ -7,7 +7,12 @@ import { isSubagentToolName, subagentDetailsHaveErrors } from "../types.js";
 import { decodeNestedBroadcast, forwardNestedBroadcast } from "./broadcast.js";
 import { RESUME_INTERACTIVE_DELAY_MS } from "./models.js";
 import { maybeOfferSubagentResume } from "./resume-offer.js";
-import { restoreModelAfterResumeFailure, scheduleSessionTask, updateCombinedUsageStatus } from "./runtime.js";
+import {
+  restoreModelAfterResumeFailure,
+  scheduleSessionTask,
+  sendAutomaticResumePrompt,
+  updateCombinedUsageStatus,
+} from "./runtime.js";
 import type { ExtensionState } from "./state.js";
 
 export function registerSessionEvents(state: ExtensionState): void {
@@ -72,13 +77,14 @@ export function registerSessionEvents(state: ExtensionState): void {
       state,
       () => {
         try {
-          state.pi.sendUserMessage(prompt, { deliverAs: "steer" });
+          sendAutomaticResumePrompt(state, prompt);
         } catch (err) {
           console.error("[pi-subagent] Failed to start deferred resume turn:", err);
           void restoreModelAfterResumeFailure(state, ctx);
         }
       },
       RESUME_INTERACTIVE_DELAY_MS,
+      true,
     );
   });
 

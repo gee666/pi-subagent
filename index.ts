@@ -2,6 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { subagentDisabled } from "./runner/extension-policy.js";
 import { registerSettingsCommands } from "./extension/settings-commands.js";
 import { registerSessionEvents } from "./extension/events.js";
+import { registerSubagentInterrupt } from "./extension/interrupt.js";
 import { registerActivityWidget } from "./extension/activity-widget.js";
 import { registerSubagentExpandCommand } from "./extension/expand-command.js";
 import { registerMessageSubagentCommand } from "./extension/message-command.js";
@@ -31,6 +32,7 @@ export default function (pi: ExtensionAPI): void {
   registerResumeProvider(state);
   registerSessionLifecycle(state);
   registerSessionEvents(state);
+  registerSubagentInterrupt(state);
   registerPromptHook(state);
   registerTools(state);
   registerSubagentExpandCommand(state);

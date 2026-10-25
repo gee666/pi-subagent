@@ -39,14 +39,26 @@ export function getParentModelForSubagent(state: ExtensionState, ctx: SessionCon
   );
 }
 
-export function scheduleSessionTask(state: ExtensionState, callback: () => void, delayMs: number): void {
+export function scheduleSessionTask(
+  state: ExtensionState,
+  callback: () => void,
+  delayMs: number,
+  cancelOnInterrupt = false,
+): void {
   const expectedGeneration = state.lifecycleGeneration;
+  const interruptEpoch = state.interruptEpoch ?? 0;
   const timer = setTimeout(() => {
     state.scheduledTasks.delete(timer);
     if (!state.sessionActive || expectedGeneration !== state.lifecycleGeneration) return;
+    if (cancelOnInterrupt && interruptEpoch !== (state.interruptEpoch ?? 0)) return;
     callback();
   }, delayMs);
   state.scheduledTasks.add(timer);
+}
+
+export function sendAutomaticResumePrompt(state: ExtensionState, prompt: string): void {
+  state.pendingAutomaticResume = { prompt, interruptEpoch: state.interruptEpoch ?? 0 };
+  state.pi.sendUserMessage(prompt, { deliverAs: "steer" });
 }
 
 export async function restoreVisibleModelForResume(

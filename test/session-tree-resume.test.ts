@@ -6,6 +6,7 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { RESUME_MODEL_ID, RESUME_PROVIDER } from "../shared.js";
+import type { TerminalInputHandler } from "@earendil-works/pi-coding-agent";
 import { createExtensionHarness as createHarness, resumeBranch } from "./helpers/extension.js";
 
 const unfinishedBranch = () => resumeBranch();
@@ -14,6 +15,90 @@ const finishedBranch = () => resumeBranch(true);
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe("session_tree subagent resume", () => {
+  test("Escape is active while startup recovery awaits a synthetic-model switch", async (t) => {
+    const harness = createHarness();
+    let input: TerminalInputHandler | undefined;
+    const ctx = harness.makeCtx(unfinishedBranch(), { abort() {} });
+    ctx.ui.onTerminalInput = (handler) => {
+      input = handler;
+      return () => {
+        input = undefined;
+      };
+    };
+    let resumeSwitch!: () => void;
+    let reachedSwitch!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      resumeSwitch = resolve;
+    });
+    const reached = new Promise<void>((resolve) => {
+      reachedSwitch = resolve;
+    });
+    const setModel = harness.pi.setModel;
+    harness.pi.setModel = async (model) => {
+      if (model.provider === RESUME_PROVIDER) {
+        reachedSwitch();
+        await gate;
+      }
+      return setModel(model);
+    };
+    const startup = harness.emit("session_start", { reason: "resume" }, ctx);
+    await reached;
+    assert.ok(input, "Escape listener must be installed before startup recovery awaits");
+    input("\u001b");
+    resumeSwitch();
+    await startup;
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    await harness.emit("resources_discover", {}, ctx);
+    t.mock.timers.tick(200);
+    assert.deepEqual(harness.calls.sentUserMessages, []);
+    assert.notEqual(harness.calls.setModel.at(-1)?.provider, RESUME_PROVIDER);
+    await harness.emit("session_shutdown", { reason: "quit" }, ctx);
+  });
+
+  for (const duringConfirmation of [false, true]) {
+    test(`Escape cancels automatic resume ${duringConfirmation ? "during confirmation" : "before the delayed prompt"}`, async (t) => {
+      const harness = createHarness();
+      let input: TerminalInputHandler | undefined;
+      const start = harness.makeCtx([], { abort() {} });
+      start.ui.onTerminalInput = (handler) => {
+        input = handler;
+        return () => {
+          input = undefined;
+        };
+      };
+      await harness.emit("session_start", { reason: "new" }, start);
+      assert.ok(input);
+      const ctx = harness.makeCtx(unfinishedBranch(), { abort() {} });
+      let confirm!: (value: boolean) => void;
+      if (duringConfirmation)
+        ctx.ui.confirm = () =>
+          new Promise<boolean>((resolve) => {
+            confirm = resolve;
+          });
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+      const navigation = harness.emit(
+        "session_tree",
+        { type: "session_tree", newLeafId: "result-call-1", oldLeafId: "x" },
+        ctx,
+      );
+      if (duringConfirmation) {
+        assert.ok(confirm);
+        input("\u001b");
+        confirm(true);
+        await navigation;
+      } else {
+        await navigation;
+        assert.ok(harness.calls.setModel.some((model) => model.provider === RESUME_PROVIDER));
+        input("\u001b");
+      }
+      t.mock.timers.tick(200);
+      assert.deepEqual(harness.calls.sentUserMessages, []);
+      if (duringConfirmation) assert.equal(harness.calls.setModel.length, 0);
+      else assert.notEqual(harness.calls.setModel.at(-1)?.provider, RESUME_PROVIDER);
+      await harness.emit("session_shutdown", { reason: "quit" }, ctx);
+    });
+  }
+
   test("offers resume and starts the synthetic resume turn after navigating to an unfinished subagent point", async () => {
     const harness = createHarness();
     await harness.emit("session_start", { reason: "new" }, harness.makeCtx([]));

@@ -16,6 +16,8 @@ Completion is a custom message with `customType: "subagent_completion"`, display
 
 A worker that settles while descendants remain active sends `Idle, waiting for children.` and its own last answer as ordinary lead steering. That is not a final completion or a final usage total. If parked, the parent saves context and exits while the root broker preserves child execution. `Finished` still waits for subtree settlement.
 
+In the interactive TUI, press Escape to interrupt the main agent and stop all running, queued, and parked subagent work, including detached descendants. This also works while the main agent is idle. Explicitly stopped workers do not automatically resume; their usage and spent budget still count. Escape keeps its normal behavior when there is no subagent work.
+
 Do not run Bash `sleep` or polling loops while waiting for workers. Do other work, or end the turn and wait for completion steering. Keep the session open. When the lead is idle with running, queued, or parked work pending, the TUI shows an animated `Waiting for subagents - don't close the session` line above `Running N`. It disappears when the lead becomes busy or all worker work finishes; Pi's native `Working` indicator is unchanged.
 
 ## Result data

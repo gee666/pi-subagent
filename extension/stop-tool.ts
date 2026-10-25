@@ -36,7 +36,7 @@ const statusText = {
 };
 
 /** Tombstone the entire branch before signaling any process, including remote descendants. */
-function stopBranches(
+export function stopBranches(
   state: ExtensionState,
   names: string[],
 ): { statuses: StopSubagentStatus[]; stoppedNames: string[] } {
@@ -60,7 +60,11 @@ function stopBranches(
       for (const worker of state.activeSubagents.values()) {
         if (worker.name !== name) continue;
         running = true;
-        worker.handle.kill?.();
+        try {
+          worker.handle.kill?.();
+        } catch {
+          // Still abort scheduler work if one process handle fails to terminate.
+        }
       }
       const previous = scheduler.stop(name);
       if (running || previous === "started" || previous === "stopping") statuses.set(name, { name, status: "stopped" });
