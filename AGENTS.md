@@ -1,29 +1,16 @@
-# Repository instructions
+# Working preferences
 
-## Repository synchronization
-
-- Before starting any work, pull the latest changes from `origin` with `git pull --ff-only`. Preserve local edits; stop and resolve safely if the pull is blocked.
-- After each completed, validated piece of work, commit your changes and push to `origin` immediately. Work happens on multiple machines; do not leave finished work unsynchronized.
-
-## Pi compatibility and releases
-
-- Test only against the latest npm Pi release. Do not maintain an older-version test matrix or claim compatibility with an untested minimum.
-- Before each release, run `npm test`. Its `pretest` hook installs every directly used Pi SDK package at `@latest` with `--save-dev --ignore-scripts`, then runs `npm run typecheck`. Keep typechecking independent of tests so the hooks cannot recurse.
-- After the checks pass, keep one standalone README line in exactly this form: `Tested against Pi <actual version>`. Replace the placeholder with the installed, successfully tested `@earendil-works/pi-coding-agent` version. Update it on every release; never claim a failed run as tested.
-- Keep the Pi `peerDependencies` ranges in `package.json` aligned with the README's supported Pi baseline. The current tested baseline must be at least `>=1.4.0`, not an untested `>=1.0.0`. Update the Pi development dependencies and lockfile together.
-- Run all available repository checks before committing or releasing. If any fail, report the failure and do not publish.
+- Treat models as senior architects. Keep prompts task-specific, with my explicit preferences rather than generic advice or repeated global instructions.
+- Pull the latest changes from `origin` before starting work. Commit and push each finished piece as soon as it is ready; I work across multiple machines.
+- Test only against the latest Pi release. On every release, update the README line `Tested against Pi <version>` to the version actually tested and keep any supported-Pi metadata in `package.json` current.
 
 ## Code quality bar
 
-Apply this to all new or rewritten code. Review correctness and these requirements:
-
-- Delete unused, unreachable and half-wired code, or wire it in properly. Do not keep code "just in case".
-- Keep clear TypeScript/Node boundaries between extension registration, agent execution, persistence, protocol validation and UI. Put behavior in its owning layer, not in configuration or entry points.
-- Use the simplest solution that fixes the root cause. Do not hide bugs with sleeps, blind retries, catch-all handlers or compiler suppression.
-- Extract genuinely shared behavior instead of copying it to change a few lines. Explain intentional duplication briefly.
-- Follow existing repository patterns. Discuss a new dependency, architecture or coding style before introducing it.
-- Keep configurable URLs, model names, thresholds and prompts in the repository's typed settings or environment handling. Name fixed protocol constants. Never commit secrets or expose credentials in logs, fixtures or docs.
-- Use strict, meaningful types. Validate untrusted JSON, files, environment values and process messages at runtime. No `any`, unsafe casts, `@ts-ignore`, `@ts-expect-error` or non-null assertions to avoid a real check.
-- Keep files focused and under 350 lines. Functions and classes should do one job. Exceed the limit only when the code is genuinely cohesive and splitting it would hurt; document the reason in the change review.
-- Keep comments and docs short, accurate and human-readable. Explain why when it is not obvious. Remove stale or redundant text and comment changelogs. Use the `unslop` and `write-prompts` skills when available for docs and prompts.
-- Add focused regression tests for changed behavior. Run tests, typechecking, formatting and any lint/build/package checks available in `package.json`. Keep those checks warning-free; do not add a lint tool solely to satisfy this instruction.
+- Remove dead code, unused imports, and unused dependencies. Wire intended functionality into the application instead of leaving disconnected code.
+- Keep module responsibilities and dependency boundaries clear. Follow existing project conventions and use TypeScript libraries and frameworks as intended.
+- Avoid duplicated logic and unnecessary abstractions. Prefer simple, consistent solutions over one-off patterns.
+- Fix root causes, not symptoms. Avoid brittle workarounds. Make deployment-specific values and operational settings configurable, and never hardcode secrets.
+- Use strict TypeScript and types that model valid application states. Validate external data at runtime. Do not bypass type safety with `any`, unsafe assertions, or suppressed type errors.
+- Keep functions and classes focused. Split files by responsibility before they exceed 350 lines. Exceed this limit only when splitting would clearly hurt readability or cohesion, and explain why.
+- Remove stale or irrelevant comments and docs. Keep useful ones accurate, short, clear, and human-friendly. Explain non-obvious decisions rather than restating code. Apply the unslop and write-prompts skills when available.
+- Add or update tests for changed behavior. Run the project's available type checks, lint checks, and relevant tests before considering work complete.
