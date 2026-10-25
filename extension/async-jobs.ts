@@ -34,6 +34,7 @@ function recordCount(state: ExtensionState, count: number): void {
 
 /** Pending delivery is work too: a queued message has not started its continuation yet. */
 function emitBackgroundCount(state: ExtensionState): void {
+  state.onBackgroundChanged?.();
   if (state.currentDepth > 0) {
     const running = state.backgroundJobs.size + pendingCount(state);
     if (state.latestSessionCtx?.mode === "rpc") {
@@ -67,6 +68,33 @@ export function releaseCompletionDelivery(state: ExtensionState, token: string, 
 
 /** Register once from registerSessionEvents. Starting an unrelated run must not drain this counter. */
 export function registerAsyncDeliveryEvents(state: ExtensionState): void {
+  state.pi.on("agent_before_settle", async (event, ctx) => {
+    if (ctx.mode !== "print" && ctx.mode !== "json") return;
+    if (event.outcome === "aborted" || event.context.pendingMessages.length > 0) return;
+    const generation = state.lifecycleGeneration;
+    const signal = ctx.signal;
+    while (
+      state.sessionActive &&
+      generation === state.lifecycleGeneration &&
+      !signal?.aborted &&
+      (state.backgroundJobs.size > 0 || pendingCount(state) > 0)
+    ) {
+      // Keep Pi's run open until delivery queues a continuation, not until the whole batch finishes.
+      let wake: (() => void) | undefined;
+      try {
+        const queued = await new Promise<boolean>((resolve) => {
+          state.onBackgroundChanged = (messageQueued = false) => resolve(messageQueued);
+          wake = () => resolve(false);
+          signal?.addEventListener("abort", wake, { once: true });
+        });
+        if (queued) return;
+      } finally {
+        state.onBackgroundChanged = undefined;
+        if (wake) signal?.removeEventListener("abort", wake);
+      }
+    }
+    // Pi drains messages queued by sendMessage before settling, without an extra synthetic prompt.
+  });
   state.pi.on("context", (event) => {
     const messages = event.messages.filter(
       (message) =>
@@ -119,6 +147,7 @@ export function notifyLead(
       triggerTurn: true,
     },
   );
+  state.onBackgroundChanged?.(true);
 }
 
 export function startBackground(

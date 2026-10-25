@@ -17,6 +17,7 @@ import type { BackgroundJob } from "./async-jobs.js";
 
 export interface ExtensionState extends DelegationDepthConfig {
   backgroundJobs: Map<string, BackgroundJob>;
+  onBackgroundChanged?: (messageQueued?: boolean) => void;
   /** Delivery token -> session generation, retained until the completion is consumed. */
   pendingCompletionDeliveries: Map<string, number>;
   pendingCompletionInterrupts: Map<string, () => void>;

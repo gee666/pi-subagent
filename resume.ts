@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import { DEFAULT_AGENT } from "./agents.js";
 import { excludeStoppedWorkers } from "./storage/stopped-workers.js";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { parseBoolean, RESUME_PROVIDER } from "./shared.js";
 import { isBudgetAmount } from "./budget.js";
 import { isRecord, sanitizePathComponent } from "./storage/values.js";
@@ -55,7 +55,7 @@ export function getDefaultSubagentSessionRoot(ctx: ExtensionContext): string {
     return path.join(mainSessionDir, "subagents");
   }
 
-  throw new Error("Cannot determine subagent session root: sessionManager.getSessionDir() is unavailable.");
+  return path.join(getAgentDir(), "sessions", "subagents");
 }
 
 export function buildSubagentSessionDir(

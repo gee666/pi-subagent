@@ -47,6 +47,7 @@ export function publishCompletion(
   let delivered = false;
   const deliver = (interrupted = false) => {
     if (state.pendingCompletionDeliveries.get(deliveryId) !== generation || (delivered && !interrupted)) return;
+    let messageQueued = false;
     try {
       const silent = interrupted || interruptEpoch !== (state.interruptEpoch ?? 0) || explicitlyStopped(state, result);
       state.pi.sendMessage(
@@ -59,6 +60,7 @@ export function publishCompletion(
         silent ? { triggerTurn: false } : { deliverAs: "steer", triggerTurn: true },
       );
       delivered = true;
+      messageQueued = !silent;
       // Interrupted deliveries are durable accounting only, with no continuation to await.
       if (silent) releaseCompletionDelivery(state, deliveryId, generation);
       // Normal sendMessage returns before queued messages are consumed.
@@ -66,6 +68,8 @@ export function publishCompletion(
     } catch (error) {
       releaseCompletionDelivery(state, deliveryId, generation);
       console.error("[pi-subagent] Completion delivery failed:", error);
+    } finally {
+      state.onBackgroundChanged?.(messageQueued);
     }
   };
   (state.pendingCompletionInterrupts ??= new Map()).set(deliveryId, () => deliver(true));
