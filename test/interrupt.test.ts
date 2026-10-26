@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import test from "node:test";
-import type { ExtensionAPI, ExtensionContext, TerminalInputHandler } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { matchesKey } from "@earendil-works/pi-tui";
 import { registerSubagentInterrupt } from "../extension/interrupt.js";
 import { cachedSchedulerFor, schedulerFor } from "../extension/scheduler.js";
 import { killProcessTreeImmediately } from "../runner/launch.js";
@@ -15,15 +16,21 @@ import { emptyUsage } from "../types.js";
 import { isSubagentDetails } from "../types.js";
 import { fixture, gatedRunner, until, assertSuccess } from "./helpers/message-subagent.js";
 
-async function setup(idle = true) {
+async function setup(idle = false) {
   const f = await fixture();
-  const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => void>();
-  f.state.pi.on = ((name: string, handler: (event: unknown, ctx: ExtensionContext) => void) => {
+  const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
+  f.state.pi.on = ((name: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) => {
     handlers.set(name, handler);
+    return () => handlers.delete(name);
   }) as ExtensionAPI["on"];
-  let input: TerminalInputHandler | undefined;
+  let shortcut: Parameters<ExtensionAPI["registerShortcut"]>[1] | undefined;
+  f.state.pi.registerShortcut = (key, options) => {
+    assert.equal(key, "alt+w");
+    assert.equal(matchesKey("\u001bw", key), true);
+    assert.equal(matchesKey("\u001b[119;3u", key), true);
+    shortcut = options;
+  };
   let aborts = 0;
-  let unsubscriptions = 0;
   const notices: string[] = [];
   Object.assign(f.ctx, {
     mode: "tui",
@@ -33,14 +40,11 @@ async function setup(idle = true) {
     isIdle: () => idle,
     abort: () => {
       aborts++;
+      idle = true;
     },
     ui: {
-      onTerminalInput(handler: TerminalInputHandler) {
-        input = handler;
-        return () => {
-          input = undefined;
-          unsubscriptions++;
-        };
+      onTerminalInput() {
+        assert.fail("subagent interrupts must not subscribe to raw terminal input");
       },
       notify(message: string) {
         notices.push(message);
@@ -49,68 +53,93 @@ async function setup(idle = true) {
     },
   });
   registerSubagentInterrupt(f.state);
-  const emit = (event: string, ctx = f.ctx) =>
-    event === "session_start" ? f.state.onSessionReadyForInterrupt?.(ctx) : handlers.get(event)!({}, ctx);
+  const event = (name: string, value: unknown) => handlers.get(name)!(value, f.ctx);
+  const emit = (name: string, ctx = f.ctx) =>
+    name === "session_start" ? f.state.onSessionReadyForInterrupt?.(ctx) : handlers.get(name)!({}, ctx);
   emit("session_start");
   return {
     ...f,
     emit,
+    event,
     notices,
-    key: (data: string) => input?.(data),
-    event: (name: string, event: unknown) => handlers.get(name)!(event, f.ctx),
-    get input() {
-      return input;
+    interrupt() {
+      f.ctx.abort();
+      event("agent_settled", { type: "agent_settled", aborted: true });
+    },
+    settle(aborted = false) {
+      event("agent_settled", { type: "agent_settled", aborted });
+    },
+    mainOnly() {
+      assert.ok(shortcut);
+      return shortcut.handler(f.ctx);
+    },
+    setIdle(value: boolean) {
+      idle = value;
     },
     get aborts() {
       return aborts;
     },
-    get unsubscriptions() {
-      return unsubscriptions;
-    },
   };
 }
 
-for (const idle of [true, false]) {
-  test(
-    `Escape stops real running workers and queued work while main is ${idle ? "idle" : "busy"}`,
-    { timeout: 15000 },
-    async () => {
-      const f = await setup(idle);
-      const runner = gatedRunner(f, true);
-      f.state.settings = { ...f.state.settings, PI_SUBAGENT_MAX_CONCURRENCY: "1" };
-      try {
-        const result = await f.launch({
-          tasks: [
-            { task: "first", max_subagents_allowed: 0 },
-            { task: "second", max_subagents_allowed: 0 },
-          ],
-        });
-        assertSuccess(result);
-        assert.ok(isSubagentDetails(result.details));
-        const names = result.details.results.map((worker) => worker.name!);
-        await until(() => runner.runs().length === 1);
-        const before = readBudget(f.state.currentBudget!);
-        f.key("x");
-        f.key("\u001b[A");
-        assert.equal(f.aborts, 0);
-        f.key("\u001b");
-        assert.equal(f.aborts, 1);
-        for (const name of names) assert.ok(readWorkerStops(f.state.currentNamesFile).has(name));
-        await until(() => f.state.backgroundJobs.size === 0);
-        assert.equal(runner.runs().length, 1, "queued worker must never start");
-        assert.equal(f.state.activeSubagents.size, 0);
-        assert.deepEqual(readBudget(f.state.currentBudget!), before);
-        assert.deepEqual(f.notices, []);
-        assert.deepEqual(schedulerFor(f.state).snapshot(), []);
-      } finally {
-        f.emit("session_shutdown");
-        await f.close();
-      }
-    },
-  );
-}
+test("Pi abort stops real running workers and queued work", { timeout: 15000 }, async () => {
+  const f = await setup();
+  const runner = gatedRunner(f, true);
+  f.state.settings = { ...f.state.settings, PI_SUBAGENT_MAX_CONCURRENCY: "1" };
+  try {
+    const result = await f.launch({
+      tasks: [
+        { task: "first", max_subagents_allowed: 0 },
+        { task: "second", max_subagents_allowed: 0 },
+      ],
+    });
+    assertSuccess(result);
+    assert.ok(isSubagentDetails(result.details));
+    const names = result.details.results.map((worker) => worker.name!);
+    await until(() => runner.runs().length === 1);
+    const before = readBudget(f.state.currentBudget!);
+    f.interrupt();
+    assert.equal(f.aborts, 1);
+    for (const name of names) assert.ok(readWorkerStops(f.state.currentNamesFile).has(name));
+    await until(() => f.state.backgroundJobs.size === 0);
+    assert.equal(runner.runs().length, 1, "queued worker must never start");
+    assert.equal(f.state.activeSubagents.size, 0);
+    assert.deepEqual(readBudget(f.state.currentBudget!), before);
+    assert.deepEqual(f.notices, []);
+    assert.deepEqual(schedulerFor(f.state).snapshot(), []);
+  } finally {
+    f.emit("session_shutdown");
+    await f.close();
+  }
+});
 
-test("Escape kills broker-only detached descendants and cancels queued descendants", { timeout: 10000 }, async () => {
+test("Alt+W preserves subagents only for its own aborted run; a later Pi interrupt stops them", async () => {
+  const f = await setup();
+  const runner = gatedRunner(f);
+  try {
+    const result = await f.launch({ tasks: [{ task: "work", max_subagents_allowed: 0 }] });
+    assertSuccess(result);
+    await until(() => runner.runs().length === 1);
+    const epoch = f.state.interruptEpoch;
+    await f.mainOnly();
+    assert.equal(f.aborts, 1);
+    f.settle(true);
+    assert.equal(f.state.backgroundJobs.size, 1);
+    assert.equal(f.state.activeSubagents.size, 1);
+    assert.equal(f.state.interruptEpoch, epoch);
+    assert.equal(readWorkerStops(f.state.currentNamesFile).size, 0);
+    f.setIdle(false);
+    f.interrupt();
+    assert.equal(f.aborts, 2);
+    await until(() => f.state.backgroundJobs.size === 0);
+    assert.equal(f.state.activeSubagents.size, 0);
+  } finally {
+    f.emit("session_shutdown");
+    await f.close();
+  }
+});
+
+test("Pi abort kills broker-only detached descendants and cancels queued descendants", { timeout: 10000 }, async () => {
   const f = await setup();
   const processes = [0, 1].map(() =>
     spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
@@ -130,7 +159,7 @@ test("Escape kills broker-only detached descendants and cancels queued descendan
     const queued = store.enqueue("queued-child", parent);
     assert.equal(f.state.activeSubagents.size, 0);
     assert.equal(f.state.backgroundJobs.size, 0);
-    f.key("\u001b");
+    f.interrupt();
     await Promise.all(closed);
     assert.equal(f.aborts, 1);
     assert.equal(store.get(queued)?.status, "canceled");
@@ -148,7 +177,7 @@ test("Escape kills broker-only detached descendants and cancels queued descendan
 });
 
 for (const alreadyQueued of [false, true]) {
-  test(`Escape suppresses pending successful and failed completions ${alreadyQueued ? "already queued in Pi" : "before delivery"}`, async (t) => {
+  test(`Pi abort suppresses pending successful and failed completions ${alreadyQueued ? "already queued in Pi" : "before delivery"}`, async (t) => {
     const f = await setup();
     t.mock.timers.enable({ apis: ["setTimeout"] });
     const deliveries: Array<{ trigger?: boolean; display?: boolean; details: unknown }> = [];
@@ -178,7 +207,7 @@ for (const alreadyQueued of [false, true]) {
       }
       assert.equal(f.state.backgroundJobs.size, 0);
       assert.equal(f.state.pendingCompletionDeliveries.size, 2);
-      f.key("\u001b");
+      f.interrupt();
       assert.equal(f.aborts, 1);
       t.mock.timers.tick(0);
       assert.equal(deliveries.length, 2, "accounting is replayed once, without a continuation");
@@ -210,7 +239,7 @@ test("late settlement from interrupted work cannot wake the main agent", async (
     options.push(delivery);
   };
   try {
-    f.key("\u001b");
+    f.interrupt();
     publishCompletion(f.state, makeResult(), f.state.lifecycleGeneration, undefined, undefined, epoch);
     t.mock.timers.tick(0);
     assert.deepEqual(options, [{ triggerTurn: false }]);
@@ -247,21 +276,21 @@ test("automatic prompts retain their submission epoch through delayed preflight"
   try {
     const prompt = "Resuming 2 subagents...";
     sendAutomaticResumePrompt(f.state, prompt);
-    f.key("\u001b");
+    f.interrupt();
     assert.deepEqual(f.event("input", { source: "extension", text: prompt }), { action: "handled" });
     sendAutomaticResumePrompt(f.state, prompt);
-    f.key("\u001b");
-    // An earlier input hook already ran before Escape, so only loop-entry cancellation remains.
+    f.interrupt();
+    // An earlier input hook already ran before interruption; loop-entry cancellation remains.
     f.event("before_agent_start", { messageType: "user", prompt });
     const before = f.aborts;
     f.event("agent_start", {});
     assert.equal(f.aborts, before + 1);
     sendAutomaticResumePrompt(f.state, prompt);
     f.event("before_agent_start", { messageType: "user", prompt });
-    f.key("\u001b");
+    f.interrupt();
     const interrupted = f.aborts;
     f.event("agent_start", {});
-    assert.equal(f.aborts, interrupted + 1, "Escape during later preflight also cancels loop entry");
+    assert.equal(f.aborts, interrupted + 1, "interruption during later preflight also cancels loop entry");
   } finally {
     f.emit("session_shutdown");
     await f.close();
@@ -291,26 +320,31 @@ test("custom-message starts do not consume a pending automatic user prompt", asy
   }
 });
 
-test("Escape leaves unused sessions alone and subscriptions follow the session lifecycle", async () => {
-  const f = await setup();
+test("idle shortcuts and normal settlement cannot arm or trigger a later abort exception", async () => {
+  const f = await setup(true);
+  let kills = 0;
+  f.state.activeSubagents.set(1, {
+    agent: "",
+    task: "work",
+    handle: {
+      steer() {},
+      kill() {
+        kills++;
+      },
+    },
+  });
   try {
-    f.key("\u001b");
-    assert.equal(f.aborts, 0, "native Escape remains responsible for main-only interruption");
-    assert.equal(cachedSchedulerFor(f.state), undefined);
-    const stale = f.input!;
-    f.state.lifecycleGeneration++;
-    f.emit("session_start");
-    assert.equal(f.unsubscriptions, 1);
-    stale("\u001b");
+    await f.mainOnly();
     assert.equal(f.aborts, 0);
-    f.emit("session_shutdown");
-    assert.equal(f.input, undefined);
-    assert.equal(f.unsubscriptions, 2);
-    for (const mode of ["rpc", "json", "print"] as const) {
-      f.emit("session_start", { ...f.ctx, mode });
-      assert.equal(f.input, undefined);
-    }
+    f.settle();
+    assert.equal(kills, 0);
+    f.setIdle(false);
+    f.interrupt();
+    assert.equal(kills, 1);
+    assert.equal(f.aborts, 1);
+    assert.equal(cachedSchedulerFor(f.state), undefined);
   } finally {
+    f.emit("session_shutdown");
     await f.close();
   }
 });

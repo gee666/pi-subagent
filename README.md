@@ -117,6 +117,12 @@ Delegate only when parallel work or context isolation saves enough effort to cov
 
 Do not use Bash `sleep` or polling loops to wait for workers. Continue useful work, or end the turn and let completion steering wake the lead. Keep the session open. While the lead is idle and worker work remains, an animated `Waiting for subagents - don't close the session` line appears above the unchanged `Running N` line. Active lead turns keep Pi's normal `Working` indicator.
 
+### Interrupting work
+
+When Pi aborts the main agent, pi-subagent also stops running, queued, and parked subagent work, including detached descendants. This follows Pi's abort signal, not raw Escape keys. Escape handled by a focused overlay or dialog therefore stops no agents. Idle Escape retains Pi's normal behavior.
+
+Press **Alt+W** to abort only the main agent and keep subagents running. This exception ends when that run settles; a later normal abort stops subagents again. Your terminal must send Alt/Option+W as a Meta key sequence, such as `ESC w`, or use the Kitty keyboard protocol. Kitty is not required for this binding. Pi 1.4.0 does not match modified Escape shortcuts, so Shift+Escape and Alt+Escape cannot be used for this action.
+
 ## Agent definitions
 
 There are no bundled agents. Without user-created definitions, every task uses the same default worker, with no agent-specific system prompt or instructions. It receives the parent's task text unchanged. Pi's normal system prompt and delegation limits still apply.

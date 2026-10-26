@@ -87,6 +87,7 @@ const defaults = {
   input: { type: "input", text: "", source: "rpc" },
   session_start: { type: "session_start", reason: "new" },
   session_shutdown: { type: "session_shutdown", reason: "quit" },
+  agent_settled: { type: "agent_settled", aborted: false },
   session_tree: { type: "session_tree", newLeafId: null, oldLeafId: null },
   message_end: { type: "message_end", message: fauxAssistantMessage("") },
   message_start: { type: "message_start", message: fauxAssistantMessage("") },
@@ -116,6 +117,7 @@ const defaults = {
       | "input"
       | "session_start"
       | "session_shutdown"
+      | "agent_settled"
       | "session_tree"
       | "message_end"
       | "message_start"
@@ -174,6 +176,7 @@ export function createExtensionHarness(options: { confirmAnswer?: boolean } = {}
 
   const pi = hostDouble<ExtensionAPI>({
     registerFlag() {},
+    registerShortcut() {},
     registerCommand(name, command) {
       commands.set(name, command);
     },

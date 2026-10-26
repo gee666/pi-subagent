@@ -72,6 +72,7 @@ test("/message_subagent is registered by the extension entry point", () => {
   subagentExtension(
     hostDouble<ExtensionAPI>({
       registerFlag() {},
+      registerShortcut() {},
       getFlag: () => undefined,
       on: () => () => {},
       registerProvider() {},

@@ -19,6 +19,8 @@ Session-manager entries/branches persist identities and budgets; `SessionManager
 Children use Pi CLI options and JSONL RPC prompt/steer, settlement, message, tool, and UI-status events.
 Exported package/settings discovery APIs enforce child extension exclusions and project trust.
 `pi-ai` provider helpers support recovery; `pi-tui` supplies widgets, key handling, and transcript overlays.
+`agent_settled.aborted` stops subagent work after a main-agent abort; `registerShortcut("alt+w")`
+provides a main-only abort exception scoped to that run. No raw terminal-input listener is installed.
 
 ## Internal Pi APIs
 No private Pi imports, private object-field access, or monkey patches in runtime code.
@@ -48,6 +50,9 @@ then reopens the lead and asks the same worker to recall a deleted file from its
 Sessions remain enabled; spawned lead Pi stdin is ignored. Auth/models are copied to a disposable agent dir.
 Existing broker/tree tests protect caps and parking; stop/ownership/budget tests protect delegation boundaries.
 Print-lifecycle, steering, recovery, usage, and render tests cover delivery, reconstruction, accounting, and UI.
+Interrupt tests cover real worker cancellation and the run-scoped main-only shortcut. `interrupt-sdk.test.ts`
+drives actual SDK abort/settlement events and a `sendCustomMessage` completion wake without a pending resume.
+Alt+W matching is checked for legacy Meta and Kitty sequences; focused overlay handling remains Pi-owned.
 Tested with global Pi 1.4.0 and latest 1.4.0 SDK packages; live interactive terminal behavior is not e2e-covered.
 
 ## Relevant changelog topics
