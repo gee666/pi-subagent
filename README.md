@@ -6,7 +6,7 @@ Launches return immediately. Completion and worker messages arrive as steering t
 
 Requires Pi 1.4.0 or newer, using the `@earendil-works` SDK packages. Only the latest npm Pi release is tested.
 
-Tested against Pi 1.4.0
+Tested against Pi 1.4.0 on Linux.
 
 ## Install
 
@@ -176,8 +176,14 @@ The single-line dim `WITH SUBS` widget below the editor includes recursive worke
 
 ```bash
 npm ci
+npm run build
 npm run check
+npm run test:package
 ```
+
+Pi loads `startup.js`, an ESM bundle built from the current TypeScript source with esbuild. Pi SDK, TypeBox, and Node imports stay external so Pi supplies its own host modules. The generated bundle is committed for direct Git installs, and `npm pack` and `npm publish` rebuild it through `prepack`. Run `npm run build` after source changes; do not edit the bundle. Its generated size is exempt from the source-file line limit.
+
+The package tests unpack a fresh npm tarball, rebuild it without the existing bundle, compare source and packaged declarations through the latest Pi CLI, and exercise the packaged child runner without model requests. Build tests also check relocated module-relative assets and child entry URLs. Temporary work stays under `tmp/`.
 
 `npm test` first installs the four declared Pi SDK packages at `@latest` with `--save-dev --ignore-scripts`, then typechecks before running tests. `npm run check` uses that same path and also checks formatting and file size. Network access is required, and a newer Pi release can update `package.json` and `package-lock.json`. Keep those changes together.
 
@@ -195,7 +201,7 @@ Source organization:
 | `types/` | Runtime contracts, transcript parsing, outcomes, usage aggregation |
 | `ui/` | Transcript views, trees, navigation and overlays |
 
-Root entry points preserve existing imports. The main `index.ts` entry keeps its default extension registration export and the named exports `selectParentModelForSubagent`, `getSubagentsToolDescription`, `collectCombinedUsageStatusLine`, and `collectLiveUsageSummary`. `config.ts` and `agents.ts` discover configuration and definitions. Runtime and test files stay below 350 lines; the name list is static data.
+Root source entry points preserve existing imports. Both `index.ts` and the generated package entry `startup.js` keep the default extension registration export and the named exports `selectParentModelForSubagent`, `getSubagentsToolDescription`, `collectCombinedUsageStatusLine`, and `collectLiveUsageSummary`. `config.ts` and `agents.ts` discover configuration and definitions. Runtime and test files stay below 350 lines; the name list is static data.
 
 See [async performance and memory](docs/async-performance.md) for cache behavior, test evidence, and remaining limits.
 

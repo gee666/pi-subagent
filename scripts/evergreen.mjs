@@ -15,7 +15,7 @@ try {
   symlinkSync(join(source, "node_modules"), join(workspace, "node_modules"), "dir");
   for (const directory of ["test", "test/e2e"]) {
     const files = readdirSync(join(workspace, directory))
-      .filter((file) => file.endsWith(".test.ts"))
+      .filter((file) => /\.test\.(?:ts|mjs)$/.test(file))
       .sort()
       .map((file) => join(directory, file));
     const result = spawnSync(process.execPath, ["--import", "tsx/esm", "--test", "--test-concurrency=1", ...files], {
