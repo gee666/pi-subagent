@@ -76,7 +76,7 @@
     "@earendil-works/pi-coding-agent": "^1.4.0",
     "@earendil-works/pi-tui": "^1.4.0",
     "@sinclair/typebox": ">=0.34.0",
-    "@types/node": "^25.2.3",
+    "@types/node": "^25.9.9",
     "esbuild": "^0.28.2",
     "prettier": "^3.9.6",
     "tsx": "^4.23.13",

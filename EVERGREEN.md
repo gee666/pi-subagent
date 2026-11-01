@@ -55,6 +55,13 @@ drives actual SDK abort/settlement events and a `sendCustomMessage` completion w
 Alt+W matching is checked for legacy Meta and Kitty sequences; focused overlay handling remains Pi-owned.
 Tested with global Pi 1.4.0 and latest 1.4.0 SDK packages; live interactive terminal behavior is not e2e-covered.
 
+## Dependency maintenance
+Keep TypeScript on 5.9.3: 7.0.2 rejects the package export test's explicit-file compiler invocation
+when a tsconfig is present (TS5112); defer that migration rather than changing the test harness.
+Keep Node typings on 25.9.9: Node 26's assertion overloads reject optional string diagnostics in tests.
+The latest Pi SDK still brings npm audit findings in minimatch and undici with no available fix;
+avoid forcing incompatible transitive majors and recheck when the SDK updates.
+
 ## Relevant changelog topics
 Watch extension event ordering/settlement, queued steering, print/JSON keepalive, RPC framing and UI events;
 session/custom-message schemas, branch reconstruction and resume flags; extension loading, package discovery
