@@ -34,6 +34,7 @@ not a Pi RPC guarantee. Runtime also parses documented session JSONL and inherit
 Settlement versus queued steering can cause premature exit, lost completions, or duplicate continuation.
 Broker persistence, process identity, FIFO admission, parking, cancellation, and PID cleanup must agree.
 Saved branch selection, custom-message formats, owner tokens, and budget ledgers govern safe recovery.
+Named resumes recover the explicit provider from session entries; provider IDs may contain slashes.
 Resource discovery/trust and CLI forwarding can change between Pi releases; filtering must fail closed.
 Real model tests require credentials, network access, and tool-following; terminal themes need manual checks.
 
@@ -53,7 +54,10 @@ Print-lifecycle, steering, recovery, usage, and render tests cover delivery, rec
 Interrupt tests cover real worker cancellation and the run-scoped main-only shortcut. `interrupt-sdk.test.ts`
 drives actual SDK abort/settlement events and a `sendCustomMessage` completion wake without a pending resume.
 Alt+W matching is checked for legacy Meta and Kitty sequences; focused overlay handling remains Pi-owned.
-Tested with global Pi 1.4.0 and latest 1.4.0 SDK packages; live interactive terminal behavior is not e2e-covered.
+Tested with global Pi 1.5.0 and latest 1.5.0 SDK packages; live interactive terminal behavior is not e2e-covered.
+Pi 1.5 validates our JSON Schema-compatible TypeBox tools through pi-schema; no TypeBox-only refinements
+or custom formats are used. Named-resume tests cover slash-containing providers in stored model changes
+and assistant messages. Session-write rollback and compaction OAuth fixes are owned by Pi.
 
 ## Dependency maintenance
 Keep TypeScript on 5.9.3: 7.0.2 rejects the package export test's explicit-file compiler invocation

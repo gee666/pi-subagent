@@ -6,7 +6,7 @@ Launches return immediately. Completion and worker messages arrive as steering t
 
 Requires Pi 1.4.0 or newer, using the `@earendil-works` SDK packages. Only the latest npm Pi release is tested.
 
-Tested against Pi 1.4.0 on Linux.
+Tested against Pi 1.5.0 on Linux.
 
 ## Install
 

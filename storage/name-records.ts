@@ -6,6 +6,8 @@ export interface SubagentForkRecord {
 
 /** Original effective settings, independent of current presets and parent settings. */
 export interface SubagentModelSettings {
+  /** Explicit session provider; provider IDs may themselves contain slashes. */
+  provider?: string;
   model?: string;
   thinking?: string;
   intelligence?: string;

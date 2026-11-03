@@ -128,6 +128,7 @@ test("named resumes retain same-provider CLI auth but strip conflicting or unkno
         cwd: process.cwd(),
         timeout: 10000,
         encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
       }),
     );
     for (const args of [launch, matching]) {
@@ -148,6 +149,32 @@ test("named resumes retain same-provider CLI auth but strip conflicting or unkno
       assert.equal(args.includes("--api-key"), false);
     }
     for (const arg of ["--provider", "--model", "--thinking"]) assert.equal(legacy.includes(arg), false);
+  }
+});
+
+test("named resumes preserve slash-containing providers from model changes and assistant messages", async () => {
+  const root = fs.mkdtempSync(path.resolve("tmp/slash-provider-"));
+  try {
+    for (const entry of [
+      { type: "model_change", provider: "org/custom", modelId: "org/model" },
+      { type: "message", message: { role: "assistant", provider: "org/custom", model: "org/model" } },
+    ]) {
+      fs.writeFileSync(
+        path.join(root, "session.jsonl"),
+        JSON.stringify({ type: "session", id: "saved" }) + "\n" + JSON.stringify(entry),
+      );
+      const resumeSettings = readOriginalSessionSettings(root);
+      assert.equal(resumeSettings.provider, "org/custom");
+      assert.equal(resumeSettings.model, "org/custom/org/model");
+      const result = await runAgentSubprocess({ ...options, sessionDir: root, resumeSettings });
+      assert.equal(result.exitCode, 0, result.errorMessage);
+      const { args } = JSON.parse(getFinalOutput(result.messages));
+      assert.equal(flag(args, "--provider"), "org/custom");
+      assert.equal(flag(args, "--model"), "org/model");
+      assert.equal(args.includes("--no-session"), false);
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -200,6 +227,7 @@ test("legacy registry recovers first effective settings, never later resume sett
     ]);
     const record = readNamesRegistry(file).agents[name];
     assert.deepEqual(originalModelSettings(record), {
+      provider: "original",
       model: "original/exact",
       thinking: "high",
       intelligence: "old-label",
@@ -208,6 +236,7 @@ test("legacy registry recovers first effective settings, never later resume sett
     assert.deepEqual(
       originalModelSettings({ ...record, model: "original/fuzzy", thinking: "max" }),
       {
+        provider: "original",
         model: "original/exact",
         thinking: "high",
         intelligence: "old-label",
@@ -227,6 +256,7 @@ test("legacy registry recovers first effective settings, never later resume sett
         .join("\n"),
     );
     assert.deepEqual(readOriginalSessionSettings(root), {
+      provider: "original",
       model: "original/fuzzy",
       thinking: "medium",
       intelligence: "old-label",

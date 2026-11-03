@@ -24,7 +24,8 @@ export function readOriginalSessionSettings(sessionDir: string): SubagentModelSe
       }
       if (!isRecord(entry)) continue;
       if (!started && entry.type === "model_change" && typeof entry.modelId === "string") {
-        settings.model = typeof entry.provider === "string" ? `${entry.provider}/${entry.modelId}` : entry.modelId;
+        settings.provider = typeof entry.provider === "string" ? entry.provider : undefined;
+        settings.model = settings.provider ? `${settings.provider}/${entry.modelId}` : entry.modelId;
       }
       if (!started && entry.type === "thinking_level_change" && typeof entry.thinkingLevel === "string") {
         settings.thinking = entry.thinkingLevel;
@@ -41,8 +42,8 @@ export function readOriginalSessionSettings(sessionDir: string): SubagentModelSe
       }
       if (message?.role === "assistant" && message.provider !== "pi-subagent-resume") {
         if (typeof message.model === "string" && message.model !== "synthetic-tool-call") {
-          settings.model =
-            typeof message.provider === "string" ? `${message.provider}/${message.model}` : message.model;
+          settings.provider = typeof message.provider === "string" ? message.provider : undefined;
+          settings.model = settings.provider ? `${settings.provider}/${message.model}` : message.model;
         }
         if (typeof message.thinkingLevel === "string") settings.thinking = message.thinkingLevel;
         break;

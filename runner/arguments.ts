@@ -269,7 +269,9 @@ export function buildPiArgs(
   savedSessionFile?: string | null,
   settings?: SubagentSettings,
 ): { args: string[]; prompt: string } {
-  const provider = resumeSettings?.model?.includes("/") ? resumeSettings.model.split("/", 1)[0] : selection?.provider;
+  const provider =
+    resumeSettings?.provider ??
+    (resumeSettings?.model?.includes("/") ? resumeSettings.model.split("/", 1)[0] : selection?.provider);
   // Named resumes can reuse CLI-only auth, but only for the explicitly matching provider.
   const keepResumeApiKey = !!resumeSettings && !!provider && provider === _inheritedCliArgs.explicitProvider;
   const blocked = keepResumeApiKey ? ["--provider"] : ["--provider", "--api-key"];
