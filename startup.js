@@ -4715,7 +4715,7 @@ function resolveLaunchModelSettings(agent, fallbackModel, selection, settings) {
   };
 }
 function buildPiArgs(agent, systemPromptPath, task, sessionDir, resumeSession, fallbackModelOverride, rawPrompt = false, selection, extensionArgsOverride, resumeSettings, savedSessionFile, settings) {
-  const provider = resumeSettings?.model?.includes("/") ? resumeSettings.model.split("/", 1)[0] : selection?.provider;
+  const provider = resumeSettings?.provider ?? (resumeSettings?.model?.includes("/") ? resumeSettings.model.split("/", 1)[0] : selection?.provider);
   const keepResumeApiKey = !!resumeSettings && !!provider && provider === _inheritedCliArgs.explicitProvider;
   const blocked = keepResumeApiKey ? ["--provider"] : ["--provider", "--api-key"];
   const proxyArgs = selection || resumeSettings ? _inheritedCliArgs.alwaysProxy.filter(
@@ -6681,7 +6681,8 @@ function readOriginalSessionSettings(sessionDir) {
       }
       if (!isRecord2(entry)) continue;
       if (!started && entry.type === "model_change" && typeof entry.modelId === "string") {
-        settings.model = typeof entry.provider === "string" ? `${entry.provider}/${entry.modelId}` : entry.modelId;
+        settings.provider = typeof entry.provider === "string" ? entry.provider : void 0;
+        settings.model = settings.provider ? `${settings.provider}/${entry.modelId}` : entry.modelId;
       }
       if (!started && entry.type === "thinking_level_change" && typeof entry.thinkingLevel === "string") {
         settings.thinking = entry.thinkingLevel;
@@ -6698,7 +6699,8 @@ function readOriginalSessionSettings(sessionDir) {
       }
       if (message?.role === "assistant" && message.provider !== "pi-subagent-resume") {
         if (typeof message.model === "string" && message.model !== "synthetic-tool-call") {
-          settings.model = typeof message.provider === "string" ? `${message.provider}/${message.model}` : message.model;
+          settings.provider = typeof message.provider === "string" ? message.provider : void 0;
+          settings.model = settings.provider ? `${settings.provider}/${message.model}` : message.model;
         }
         if (typeof message.thinkingLevel === "string") settings.thinking = message.thinkingLevel;
         break;
