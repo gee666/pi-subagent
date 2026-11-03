@@ -19,7 +19,6 @@ function options(code: string, onLeadMessage?: RunAgentOptions["onLeadMessage"])
     preventCycles: false,
     settings: {},
     startupTimeoutMsOverride: 45000,
-    idleTimeoutMsOverride: 0,
     terminationTimeoutMsOverride: 1000,
     piCommandOverride: { command: process.execPath, argsPrefix: ["--import", "tsx/esm", "-e", code, "--"] },
     onLeadMessage,
@@ -39,7 +38,6 @@ function protocol(onLeadMessage?: RunAgentOptions["onLeadMessage"]) {
     wasAborted: false,
     activeToolCallIds: new Set(),
   };
-  let activity = 0;
   let updates = 0;
   const handle = createProtocolHandler({
     state,
@@ -49,14 +47,11 @@ function protocol(onLeadMessage?: RunAgentOptions["onLeadMessage"]) {
     emitUpdate: () => {
       updates++;
     },
-    noteSemanticActivity: () => {
-      activity++;
-    },
     stopChild() {},
     doResolve() {},
     forceStopAndSettle() {},
   });
-  return { handle, result, state, activity: () => activity, updates: () => updates };
+  return { handle, result, state, updates: () => updates };
 }
 
 function notification(message: unknown): string {
@@ -73,7 +68,6 @@ test("protocol intercepts stdout notifications without transcript, progress, or 
   p.handle(notification(" "));
   p.handle(notification(123));
   assert.deepEqual(messages, ["first", "second"]);
-  assert.equal(p.activity(), 2);
   assert.equal(p.updates(), 0);
   assert.equal(p.state.receivedFirstEvent, false);
   assert.deepEqual(p.result.messages, []);
@@ -81,7 +75,6 @@ test("protocol intercepts stdout notifications without transcript, progress, or 
   assert.equal(p.result.usage.turns, 0);
   p.state.agentSettled = true;
   p.handle(notification("buffered before close"));
-  assert.equal(p.activity(), 2, "do not rearm the watchdog after settlement");
   p.state.resolved = true;
   p.handle(notification("stale"));
   assert.deepEqual(messages, ["first", "second", "buffered before close"]);

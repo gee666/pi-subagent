@@ -77,7 +77,6 @@ function protocol() {
     result: makeRunningResult(),
     promptRequestId: "initial",
     emitUpdate() {},
-    noteSemanticActivity() {},
     stopChild() {},
     doResolve() {},
     forceStopAndSettle() {
@@ -311,7 +310,6 @@ test(
         preventCycles: false,
         settings: {},
         startupTimeoutMsOverride: 45000,
-        idleTimeoutMsOverride: 1000,
         terminationTimeoutMsOverride: 500,
         piCommandOverride: { command: process.execPath, argsPrefix: ["--import", "tsx/esm", "-e", code, "--"] },
         makeDetails: (results) => buildSubagentDetails("single", "spawn", null, results),

@@ -64,8 +64,6 @@ export class AttemptParking {
     this.requested = true;
     state.stopping = true;
     state.forcedExitCode = 0;
-    if (state.idleTimer) clearTimeout(state.idleTimer);
-    state.idleTimer = undefined;
     // Broker-owned descendants are separate root children, not members of this process group.
     // Do not run extension shutdown hooks, which could cancel durable child jobs.
     try {

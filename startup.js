@@ -59,7 +59,6 @@ var SETTING_DEFINITIONS = [
   ["models", "intelligence", "PI_SUBAGENT_INTELLIGENCE", "boolean"],
   ["models", "fallback", "PI_SUBAGENT_FALLBACK_MODEL", "string"],
   ["runner", "startupTimeoutMs", "PI_SUBAGENT_STARTUP_TIMEOUT", "integer"],
-  ["runner", "idleTimeoutMs", "PI_SUBAGENT_IDLE_TIMEOUT", "integer"],
   ["runner", "startupRetries", "PI_SUBAGENT_STARTUP_RETRIES", "integer"],
   ["runner", "command", "PI_SUBAGENT_PI_COMMAND", "string"],
   ["runner", "argsPrefix", "PI_SUBAGENT_PI_ARGS_PREFIX", "list"]
@@ -4516,11 +4515,8 @@ function configuredNonNegativeInt(name, fallback, warn = false, settings) {
   return parsed ?? fallback;
 }
 var SIGKILL_TIMEOUT_MS = 5e3;
-var RETRY_WAIT_GRACE_MS = 6e4;
 var DEFAULT_STARTUP_TIMEOUT_MS = 12e4;
 var SUBAGENT_STARTUP_TIMEOUT_ENV = "PI_SUBAGENT_STARTUP_TIMEOUT";
-var DEFAULT_IDLE_TIMEOUT_MS = 20 * 6e4;
-var SUBAGENT_IDLE_TIMEOUT_ENV = "PI_SUBAGENT_IDLE_TIMEOUT";
 var DEFAULT_STARTUP_RETRIES = 2;
 var SUBAGENT_STARTUP_RETRIES_ENV = "PI_SUBAGENT_STARTUP_RETRIES";
 var STARTUP_RETRY_BASE_BACKOFF_MS = 1e3;
@@ -7123,8 +7119,6 @@ var AttemptParking = class {
     this.requested = true;
     state.stopping = true;
     state.forcedExitCode = 0;
-    if (state.idleTimer) clearTimeout(state.idleTimer);
-    state.idleTimer = void 0;
     try {
       if (process.platform === "win32") this.proc.kill("SIGKILL");
       else if (this.proc.pid) process.kill(-this.proc.pid, "SIGKILL");
@@ -7154,7 +7148,7 @@ var AttemptParking = class {
 // runner/protocol.ts
 import { createHash as createHash5 } from "node:crypto";
 function createSteeringHandle(options) {
-  const { state, result, promptRequestId, sendRpc, noteSemanticActivity, settleDeferred } = options;
+  const { state, result, promptRequestId, sendRpc, settleDeferred } = options;
   const pending2 = state.pendingSteeringRequests ??= /* @__PURE__ */ new Map();
   let request = 0;
   return {
@@ -7171,7 +7165,6 @@ function createSteeringHandle(options) {
           if (state.resolved || state.stopping) return;
           if (accepted) {
             state.pendingAgentSettled = false;
-            noteSemanticActivity();
           } else if (pending2.size === 0 && state.pendingAgentSettled) {
             state.pendingAgentSettled = false;
             settleDeferred();
@@ -7192,7 +7185,7 @@ function createSteeringHandle(options) {
   };
 }
 function createProtocolHandler(options) {
-  const { state, result, promptRequestId, emitUpdate, noteSemanticActivity, stopChild, doResolve, forceStopAndSettle } = options;
+  const { state, result, promptRequestId, emitUpdate, stopChild, doResolve, forceStopAndSettle } = options;
   const nestedSignatures = /* @__PURE__ */ new Map();
   return (line) => {
     if (state.resolved) return;
@@ -7218,7 +7211,6 @@ function createProtocolHandler(options) {
     if (isLeadMessageEvent(event)) {
       if (state.resolved) return;
       result.lastActionAt = Date.now();
-      if (!state.agentSettled) noteSemanticActivity();
       const reportError = () => appendBoundedStderr(result, "[pi-subagent] Lead message callback failed.\n");
       try {
         void Promise.resolve(options.onLeadMessage?.(event.message)).catch(reportError);
@@ -7259,7 +7251,6 @@ function createProtocolHandler(options) {
     }
     if (event?.type === "agent_end") {
       result.lastActionAt = Date.now();
-      noteSemanticActivity(event.willRetry === true ? RETRY_WAIT_GRACE_MS : 0);
       return;
     }
     if (event?.type === "agent_settled") {
@@ -7280,22 +7271,14 @@ ${output}`)).catch(reportError);
       if ((state.pendingSteeringRequests?.size ?? 0) > 0) {
         state.pendingAgentSettled = true;
         if ((state.backgroundJobs ?? 0) > 0) state.waitingForChildren = true;
-        if (state.idleTimer) clearTimeout(state.idleTimer);
-        state.idleTimer = void 0;
         return;
       }
       if ((state.backgroundJobs ?? 0) > 0) {
         state.waitingForChildren = true;
-        if (state.idleTimer) clearTimeout(state.idleTimer);
-        state.idleTimer = void 0;
         return;
       }
       state.agentSettled = true;
       result.lastActionAt = Date.now();
-      if (state.idleTimer) {
-        clearTimeout(state.idleTimer);
-        state.idleTimer = void 0;
-      }
       if (result.stopReason === "length" && !result.errorMessage) {
         result.errorMessage = "Subagent output was incomplete because the model reached its output limit.";
       }
@@ -7315,27 +7298,18 @@ ${output}`)).catch(reportError);
           state.startupTimer = void 0;
         }
       }
-      let semanticActivity = true;
       if (event?.type === "subagent_progress") {
         const signature2 = createHash5("sha256").update(JSON.stringify(event.details)).digest("hex");
         const id = typeof event.toolCallId === "string" ? event.toolCallId : "";
-        semanticActivity = signature2 !== nestedSignatures.get(id);
+        if (signature2 === nestedSignatures.get(id)) result.lastActionAt = previousActionAt;
         nestedSignatures.set(id, signature2);
-        if (!semanticActivity) result.lastActionAt = previousActionAt;
       }
-      if (semanticActivity) noteSemanticActivity();
       emitUpdate();
     } else if (state.receivedFirstEvent) {
       if (event?.type === "message_update" || event?.type === "tool_execution_update") {
         result.lastActionAt = Date.now();
-        noteSemanticActivity();
-      } else if (event?.type === "auto_retry_start") {
+      } else if (event?.type === "auto_retry_start" || event?.type === "auto_retry_end" || event?.type === "compaction_start" || event?.type === "compaction_end" || event?.type === "summarization_retry_scheduled" || event?.type === "summarization_retry_attempt_start" || event?.type === "summarization_retry_finished") {
         result.lastActionAt = Date.now();
-        const delayMs = Number.isFinite(event.delayMs) ? Math.max(0, Number(event.delayMs)) : 0;
-        noteSemanticActivity(delayMs + RETRY_WAIT_GRACE_MS);
-      } else if (event?.type === "auto_retry_end" || event?.type === "compaction_start" || event?.type === "compaction_end" || event?.type === "summarization_retry_scheduled" || event?.type === "summarization_retry_attempt_start" || event?.type === "summarization_retry_finished") {
-        result.lastActionAt = Date.now();
-        noteSemanticActivity();
       }
     }
   };
@@ -7343,7 +7317,7 @@ ${output}`)).catch(reportError);
 
 // runner/attempt.ts
 async function runAttempt(opts, result, piArgs, prompt, attempt, emitUpdate) {
-  const { piCommandOverride, startupTimeoutMsOverride, idleTimeoutMsOverride, terminationTimeoutMsOverride, signal } = opts;
+  const { piCommandOverride, startupTimeoutMsOverride, terminationTimeoutMsOverride, signal } = opts;
   const state = {
     resolved: false,
     receivedFirstEvent: false,
@@ -7405,10 +7379,6 @@ async function runAttempt(opts, result, piArgs, prompt, attempt, emitUpdate) {
         clearTimeout(state.startupTimer);
         state.startupTimer = void 0;
       }
-      if (state.idleTimer) {
-        clearTimeout(state.idleTimer);
-        state.idleTimer = void 0;
-      }
       if (state.killTimer) {
         clearTimeout(state.killTimer);
         state.killTimer = void 0;
@@ -7436,27 +7406,6 @@ async function runAttempt(opts, result, piArgs, prompt, attempt, emitUpdate) {
         doResolve(settleCode);
       }, terminationTimeoutMsOverride ?? SIGKILL_TIMEOUT_MS);
     };
-    const idleTimeoutMs = idleTimeoutMsOverride !== void 0 ? Math.max(0, idleTimeoutMsOverride) : configuredNonNegativeInt(SUBAGENT_IDLE_TIMEOUT_ENV, DEFAULT_IDLE_TIMEOUT_MS, false, opts.settings);
-    const noteSemanticActivity = (minimumQuietPeriodMs = 0) => {
-      if (state.idleTimer) {
-        clearTimeout(state.idleTimer);
-        state.idleTimer = void 0;
-      }
-      if (!state.receivedFirstEvent || idleTimeoutMs === 0 || state.resolved || state.waitingForChildren) return;
-      if (state.activeToolCallIds.size > 0) return;
-      const quietPeriodMs = Math.max(idleTimeoutMs, minimumQuietPeriodMs);
-      state.idleTimer = setTimeout(() => {
-        if (state.resolved) return;
-        const message = `Subagent inactivity timeout: no agent activity for ${quietPeriodMs}ms.`;
-        state.forcedExitCode = 1;
-        result.stopReason = "error";
-        result.errorMessage = message;
-        appendBoundedStderr(result, `
-[pi-subagent] Killed: ${message}`);
-        emitUpdate();
-        forceStopAndSettle();
-      }, quietPeriodMs);
-    };
     const parking = new AttemptParking(opts, state, proc, result);
     const flushLine = createProtocolHandler({
       state,
@@ -7465,7 +7414,6 @@ async function runAttempt(opts, result, piArgs, prompt, attempt, emitUpdate) {
       onLeadMessage: opts.onLeadMessage,
       onWaitingForChildren: (waiting) => parking.waiting(waiting, () => forceStopAndSettle(1, true)),
       emitUpdate,
-      noteSemanticActivity,
       stopChild,
       doResolve,
       forceStopAndSettle
@@ -7584,7 +7532,6 @@ async function runAttempt(opts, result, piArgs, prompt, attempt, emitUpdate) {
           result,
           promptRequestId,
           sendRpc,
-          noteSemanticActivity,
           timeoutMs: opts.steeringTimeoutMsOverride,
           settleDeferred: () => flushLine(JSON.stringify({ type: "agent_settled" }))
         }),

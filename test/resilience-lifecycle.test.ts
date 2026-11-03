@@ -26,7 +26,6 @@ describe("runAgent retry and process cleanup", () => {
     const result = await runAgent({
       piCommandOverride: { command: process.execPath, argsPrefix: ["-e", script, "--"] },
       startupTimeoutMsOverride: 1_000,
-      idleTimeoutMsOverride: 200,
       cwd: "/tmp",
       agents: [fakeAgent],
       agentName: "fake-agent",
@@ -147,7 +146,6 @@ describe("runAgent retry and process cleanup", () => {
     const result = await runAgent({
       piCommandOverride: { command: process.execPath, argsPrefix: ["-e", script, "--"] },
       startupTimeoutMsOverride: 1_000,
-      idleTimeoutMsOverride: 1_000,
       terminationTimeoutMsOverride: 50,
       cwd: "/tmp",
       agents: [fakeAgent],

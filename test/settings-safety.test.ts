@@ -34,7 +34,7 @@ test("runner command and argsPrefix are personal-only even when config-only SDK 
       f.write(
         projectPi,
         {
-          runner: { command: "PROJECT_EXECUTABLE", argsPrefix: ["-e", hostile, "--"], idleTimeoutMs: 1234 },
+          runner: { command: "PROJECT_EXECUTABLE", argsPrefix: ["-e", hostile, "--"], startupTimeoutMs: 1234 },
         },
         filename,
       );
@@ -43,7 +43,7 @@ test("runner command and argsPrefix are personal-only even when config-only SDK 
       for (const settings of [loadSubagentSettings(f.project, true), loadPiSubagentsConfig(f.project, true).settings]) {
         assert.equal(settings.PI_SUBAGENT_PI_COMMAND, process.execPath);
         assert.equal(settings.PI_SUBAGENT_PI_ARGS_PREFIX, JSON.stringify(["-e", safe, "--"]));
-        assert.equal(settings.PI_SUBAGENT_IDLE_TIMEOUT, "1234", "non-executable project settings still merge");
+        assert.equal(settings.PI_SUBAGENT_STARTUP_TIMEOUT, "1234", "non-executable project settings still merge");
         assert.deepEqual(getPiSpawnCommand(undefined, settings), {
           command: process.execPath,
           argsPrefix: ["-e", safe, "--"],

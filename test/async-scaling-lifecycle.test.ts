@@ -185,7 +185,7 @@ test("late progress cannot repopulate a replaced session's accounting", () => {
   assert.equal(updates, 0);
 });
 
-test("interleaved unchanged nested heartbeats are not semantic activity and late events are ignored", () => {
+test("interleaved unchanged nested heartbeats are not new actions and late events are ignored", () => {
   const result = makeRunningResult();
   const attempt = {
     resolved: false,
@@ -195,15 +195,11 @@ test("interleaved unchanged nested heartbeats are not semantic activity and late
     wasAborted: false,
     activeToolCallIds: new Set(),
   } as AttemptState;
-  let activity = 0;
   const handler = createProtocolHandler({
     state: attempt,
     result,
     promptRequestId: "prompt",
     emitUpdate() {},
-    noteSemanticActivity() {
-      activity++;
-    },
     stopChild() {},
     doResolve() {},
     forceStopAndSettle() {},
@@ -211,8 +207,10 @@ test("interleaved unchanged nested heartbeats are not semantic activity and late
   const events = ["a", "b"].map((toolCallId) =>
     JSON.stringify({ type: "subagent_progress", toolCallId, details: details([]) }),
   );
+  events.forEach(handler);
+  result.lastActionAt = 1;
   for (let i = 0; i < 1000; i++) events.forEach(handler);
-  assert.equal(activity, 2);
+  assert.equal(result.lastActionAt, 1);
   assert.equal(attempt.lastNestedProgressSignature, undefined, "do not retain a serialized tree on attempt state");
   attempt.resolved = true;
   handler(
@@ -238,7 +236,6 @@ test("throwing onHandle stops and settles a child instead of leaking it", { time
       signal: controller.signal,
       piCommandOverride: { command: process.execPath, argsPrefix: ["-e", "setInterval(() => {}, 1000)"] },
       startupTimeoutMsOverride: 0,
-      idleTimeoutMsOverride: 0,
       terminationTimeoutMsOverride: 50,
       onHandle() {
         throw new Error("callback exploded");

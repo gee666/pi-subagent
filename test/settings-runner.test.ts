@@ -49,7 +49,6 @@ test("runner settings reach real subprocess command, args, fallback and authorit
         command: process.execPath,
         argsPrefix: ["-e", script, "--"],
         startupTimeoutMs: 0,
-        idleTimeoutMs: 0,
         startupRetries: 0,
       },
       models: { fallback: "local/configured" },
@@ -78,7 +77,7 @@ test("runner settings reach real subprocess command, args, fallback and authorit
   }
 });
 
-test("startup timeout/retries and idle timeout use JSON without import-time snapshots", async () => {
+test("startup timeout/retries use JSON without import-time snapshots", async () => {
   const f = settingsFixture();
   try {
     const log = path.join(f.root, "attempts");
@@ -89,29 +88,14 @@ test("startup timeout/retries and idle timeout use JSON without import-time snap
         argsPrefix: ["-e", hang, "--"],
         startupTimeoutMs: 2000,
         startupRetries: 0,
-        idleTimeoutMs: 0,
       },
     });
     const startup = await runAgentSubprocess(options(f.project));
     assert.match(startup.errorMessage ?? "", /startup timeout.*2000ms/);
     assert.equal(fs.readFileSync(log, "utf8").trim().split("\n").length, 1);
-    const idle =
-      'process.stdin.once("data", () => console.log(JSON.stringify({type:"turn_start"}))); setInterval(() => {}, 1000);';
-    f.write(f.agent, {
-      runner: {
-        command: process.execPath,
-        argsPrefix: ["-e", idle, "--"],
-        startupTimeoutMs: 5000,
-        idleTimeoutMs: 20,
-        startupRetries: 0,
-      },
-    });
-    const stalled = await runAgentSubprocess(options(f.project));
-    assert.match(stalled.errorMessage ?? "", /inactivity timeout.*20ms/);
     const success = await runAgentSubprocess({
       ...options(f.project),
       piCommandOverride: { command: process.execPath, argsPrefix: ["-e", script, "--"] },
-      idleTimeoutMsOverride: 0,
     });
     assert.equal(success.exitCode, 0, success.errorMessage);
   } finally {

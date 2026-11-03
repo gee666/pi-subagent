@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { getFinalOutput, isResultError, type SingleResult } from "../types.js";
 import { isRecord } from "../types/records.js";
-import { RETRY_WAIT_GRACE_MS } from "./constants.js";
 import { parseRpcEvent, processRpcEvent } from "./events.js";
 import { appendBoundedStderr } from "./result.js";
 import type { AttemptState } from "./attempt-state.js";
@@ -15,7 +14,6 @@ interface ProtocolOptions {
   onLeadMessage?: RunAgentOptions["onLeadMessage"];
   onWaitingForChildren?: (waiting: boolean) => void;
   emitUpdate(): void;
-  noteSemanticActivity(minimumQuietPeriodMs?: number): void;
   stopChild(force: boolean): void;
   doResolve(code: number): void;
   forceStopAndSettle(code?: number): void;
@@ -23,13 +21,13 @@ interface ProtocolOptions {
 
 /** A stdin write is not delivery. Wait for prompt preflight to accept each request. */
 export function createSteeringHandle(
-  options: Pick<ProtocolOptions, "state" | "result" | "promptRequestId" | "noteSemanticActivity"> & {
+  options: Pick<ProtocolOptions, "state" | "result" | "promptRequestId"> & {
     sendRpc(command: Record<string, unknown>): boolean;
     timeoutMs?: number;
     settleDeferred(): void;
   },
 ): RunningSubagentHandle {
-  const { state, result, promptRequestId, sendRpc, noteSemanticActivity, settleDeferred } = options;
+  const { state, result, promptRequestId, sendRpc, settleDeferred } = options;
   const pending = (state.pendingSteeringRequests ??= new Map());
   let request = 0;
   return {
@@ -48,7 +46,6 @@ export function createSteeringHandle(
             // Preflight can answer after an older run's settlement but before
             // the new turn starts. Wait for that continuation's own settlement.
             state.pendingAgentSettled = false;
-            noteSemanticActivity();
           } else if (pending.size === 0 && state.pendingAgentSettled) {
             state.pendingAgentSettled = false;
             settleDeferred();
@@ -71,7 +68,7 @@ export function createSteeringHandle(
 
 /** Interpret run boundaries and semantic activity independently of JSONL framing. */
 export function createProtocolHandler(options: ProtocolOptions): (line: string) => void {
-  const { state, result, promptRequestId, emitUpdate, noteSemanticActivity, stopChild, doResolve, forceStopAndSettle } =
+  const { state, result, promptRequestId, emitUpdate, stopChild, doResolve, forceStopAndSettle } =
     options;
   // One bounded digest per active nested call, not a retained serialized tree.
   const nestedSignatures = new Map<string, string>();
@@ -105,7 +102,6 @@ export function createProtocolHandler(options: ProtocolOptions): (line: string) 
     if (isLeadMessageEvent(event)) {
       if (state.resolved) return;
       result.lastActionAt = Date.now();
-      if (!state.agentSettled) noteSemanticActivity();
       const reportError = () => appendBoundedStderr(result, "[pi-subagent] Lead message callback failed.\n");
       try {
         // Notifications must not block stream draining, settlement, or subsequent messages.
@@ -155,7 +151,6 @@ export function createProtocolHandler(options: ProtocolOptions): (line: string) 
     // the direct cause of the WebSocket failures in the inspected session.
     if (event?.type === "agent_end") {
       result.lastActionAt = Date.now();
-      noteSemanticActivity(event.willRetry === true ? RETRY_WAIT_GRACE_MS : 0);
       return;
     }
 
@@ -178,28 +173,16 @@ export function createProtocolHandler(options: ProtocolOptions): (line: string) 
         // determines whether this old settlement is final or a new turn follows.
         state.pendingAgentSettled = true;
         if ((state.backgroundJobs ?? 0) > 0) state.waitingForChildren = true;
-        if (state.idleTimer) clearTimeout(state.idleTimer);
-        state.idleTimer = undefined;
         return;
       }
       // Async descendants may wake this idle RPC session with a completion.
       // Do not reap the process tree until that continuation has settled too.
       if ((state.backgroundJobs ?? 0) > 0) {
         state.waitingForChildren = true;
-        if (state.idleTimer) clearTimeout(state.idleTimer);
-        state.idleTimer = undefined;
         return;
       }
       state.agentSettled = true;
       result.lastActionAt = Date.now();
-      // No semantic watchdog may fire while we are only waiting for the
-      // deliberately terminated RPC process tree to close. On slower
-      // launchers (notably Windows taskkill), that cleanup can outlast a
-      // short idle timeout and overwrite a successful settled result.
-      if (state.idleTimer) {
-        clearTimeout(state.idleTimer);
-        state.idleTimer = undefined;
-      }
       if (result.stopReason === "length" && !result.errorMessage) {
         result.errorMessage = "Subagent output was incomplete because the model reached its output limit.";
       }
@@ -232,29 +215,21 @@ export function createProtocolHandler(options: ProtocolOptions): (line: string) 
         }
       }
       // Parallel progress is emitted every second even when nothing changed.
-      // Only a changed nested snapshot counts as activity, otherwise a dead
-      // grandchild could keep every ancestor alive forever.
-      let semanticActivity = true;
+      // Only a changed nested snapshot counts as a new action.
       if (event?.type === "subagent_progress") {
         const signature = createHash("sha256").update(JSON.stringify(event.details)).digest("hex");
         const id = typeof event.toolCallId === "string" ? event.toolCallId : "";
-        semanticActivity = signature !== nestedSignatures.get(id);
+        if (signature === nestedSignatures.get(id)) result.lastActionAt = previousActionAt;
         nestedSignatures.set(id, signature);
-        if (!semanticActivity) result.lastActionAt = previousActionAt;
       }
-      if (semanticActivity) noteSemanticActivity();
       emitUpdate();
     } else if (state.receivedFirstEvent) {
       if (event?.type === "message_update" || event?.type === "tool_execution_update") {
         // Streaming deltas are intentionally not retained in result.messages,
         // but they prove the model/tool is still making real progress.
         result.lastActionAt = Date.now();
-        noteSemanticActivity();
-      } else if (event?.type === "auto_retry_start") {
-        result.lastActionAt = Date.now();
-        const delayMs = Number.isFinite(event.delayMs) ? Math.max(0, Number(event.delayMs)) : 0;
-        noteSemanticActivity(delayMs + RETRY_WAIT_GRACE_MS);
       } else if (
+        event?.type === "auto_retry_start" ||
         event?.type === "auto_retry_end" ||
         event?.type === "compaction_start" ||
         event?.type === "compaction_end" ||
@@ -263,7 +238,6 @@ export function createProtocolHandler(options: ProtocolOptions): (line: string) 
         event?.type === "summarization_retry_finished"
       ) {
         result.lastActionAt = Date.now();
-        noteSemanticActivity();
       }
     }
   };

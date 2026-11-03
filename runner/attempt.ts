@@ -10,8 +10,6 @@ import {
   SIGKILL_TIMEOUT_MS,
   DEFAULT_STARTUP_TIMEOUT_MS,
   SUBAGENT_STARTUP_TIMEOUT_ENV,
-  DEFAULT_IDLE_TIMEOUT_MS,
-  SUBAGENT_IDLE_TIMEOUT_ENV,
   MAX_CAPTURED_STDERR_CHARS,
 } from "./constants.js";
 import { getPiSpawnCommand, stopProcessTree, killProcessTreeImmediately } from "./launch.js";
@@ -30,8 +28,7 @@ export async function runAttempt(
   attempt: number,
   emitUpdate: () => void,
 ): Promise<{ exitCode: number; startupTimedOut: boolean; wasAborted: boolean; parked?: boolean }> {
-  const { piCommandOverride, startupTimeoutMsOverride, idleTimeoutMsOverride, terminationTimeoutMsOverride, signal } =
-    opts;
+  const { piCommandOverride, startupTimeoutMsOverride, terminationTimeoutMsOverride, signal } = opts;
   const state: AttemptState = {
     resolved: false,
     receivedFirstEvent: false,
@@ -99,10 +96,6 @@ export async function runAttempt(
         clearTimeout(state.startupTimer);
         state.startupTimer = undefined;
       }
-      if (state.idleTimer) {
-        clearTimeout(state.idleTimer);
-        state.idleTimer = undefined;
-      }
       if (state.killTimer) {
         clearTimeout(state.killTimer);
         state.killTimer = undefined;
@@ -135,36 +128,6 @@ export async function runAttempt(
       }, terminationTimeoutMsOverride ?? SIGKILL_TIMEOUT_MS);
     };
 
-    const idleTimeoutMs =
-      idleTimeoutMsOverride !== undefined
-        ? Math.max(0, idleTimeoutMsOverride)
-        : configuredNonNegativeInt(SUBAGENT_IDLE_TIMEOUT_ENV, DEFAULT_IDLE_TIMEOUT_MS, false, opts.settings);
-
-    const noteSemanticActivity = (minimumQuietPeriodMs = 0) => {
-      if (state.idleTimer) {
-        clearTimeout(state.idleTimer);
-        state.idleTimer = undefined;
-      }
-      if (!state.receivedFirstEvent || idleTimeoutMs === 0 || state.resolved || state.waitingForChildren) return;
-      // The idle timeout measures the agent itself, not tools it has invoked.
-      // A tool may legitimately be silent for longer than the configured
-      // timeout, so leave the watchdog disarmed until every concurrent tool
-      // execution has ended. tool_execution_end will call this again and
-      // start a fresh full inactivity window.
-      if (state.activeToolCallIds.size > 0) return;
-      const quietPeriodMs = Math.max(idleTimeoutMs, minimumQuietPeriodMs);
-      state.idleTimer = setTimeout(() => {
-        if (state.resolved) return;
-        const message = `Subagent inactivity timeout: no agent activity for ${quietPeriodMs}ms.`;
-        state.forcedExitCode = 1;
-        result.stopReason = "error";
-        result.errorMessage = message;
-        appendBoundedStderr(result, `\n[pi-subagent] Killed: ${message}`);
-        emitUpdate();
-        forceStopAndSettle();
-      }, quietPeriodMs);
-    };
-
     const parking = new AttemptParking(opts, state, proc, result);
     const flushLine = createProtocolHandler({
       state,
@@ -173,7 +136,6 @@ export async function runAttempt(
       onLeadMessage: opts.onLeadMessage,
       onWaitingForChildren: (waiting) => parking.waiting(waiting, () => forceStopAndSettle(1, true)),
       emitUpdate,
-      noteSemanticActivity,
       stopChild,
       doResolve,
       forceStopAndSettle,
@@ -308,7 +270,6 @@ export async function runAttempt(
           result,
           promptRequestId,
           sendRpc,
-          noteSemanticActivity,
           timeoutMs: opts.steeringTimeoutMsOverride,
           settleDeferred: () => flushLine(JSON.stringify({ type: "agent_settled" })),
         }),

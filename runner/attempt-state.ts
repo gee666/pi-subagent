@@ -16,6 +16,5 @@ export interface AttemptState {
   pendingAgentSettled?: boolean;
   stopping?: boolean;
   startupTimer?: ReturnType<typeof setTimeout>;
-  idleTimer?: ReturnType<typeof setTimeout>;
   killTimer?: ReturnType<typeof setTimeout>;
 }

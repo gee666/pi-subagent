@@ -90,7 +90,7 @@ test(
       await runAttempt({
         cwd: process.cwd(), agents: [], agentName: "nested-worker", task: "nested",
         parentDepth: 1, parentAgentStack: ["lead"], maxDepth: 3, preventCycles: false,
-        settings: {}, startupTimeoutMsOverride: 45000, idleTimeoutMsOverride: 0, terminationTimeoutMsOverride: 1000,
+        settings: {}, startupTimeoutMsOverride: 45000, terminationTimeoutMsOverride: 1000,
         piCommandOverride: {command: process.execPath, argsPrefix: ["--import", "tsx/esm", "-e", ${JSON.stringify(childCode)}, "--"]},
         onLeadMessage: (message) => { received.push(message); },
         makeDetails: () => { throw new Error("no details expected"); },
@@ -114,7 +114,6 @@ test(
         preventCycles: false,
         settings: {},
         startupTimeoutMsOverride: 90000,
-        idleTimeoutMsOverride: 0,
         terminationTimeoutMsOverride: 1000,
         piCommandOverride: { command: process.execPath, argsPrefix: ["--import", "tsx/esm", "-e", code, "--"] },
         onLeadMessage: (message) => {

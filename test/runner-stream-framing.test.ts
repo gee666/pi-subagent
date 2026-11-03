@@ -16,7 +16,6 @@ function options(code: string): RunAgentOptions {
     preventCycles: false,
     settings: {},
     startupTimeoutMsOverride: 5000,
-    idleTimeoutMsOverride: 0,
     terminationTimeoutMsOverride: 1000,
     piCommandOverride: { command: process.execPath, argsPrefix: ["-e", code, "--"] },
     makeDetails: () => {

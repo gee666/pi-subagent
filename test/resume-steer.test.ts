@@ -46,7 +46,6 @@ test("a resumed parent queues its startup prompt as steer when restoration is al
       makeDetails: (results) => buildSubagentDetails("single", "spawn", null, results),
       piCommandOverride: { command: process.execPath, argsPrefix: ["-e", script, "--"] },
       startupTimeoutMsOverride: 1000,
-      idleTimeoutMsOverride: 1000,
       terminationTimeoutMsOverride: 100,
     });
     assert.equal(result.exitCode, 0, result.errorMessage);

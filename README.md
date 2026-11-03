@@ -196,7 +196,7 @@ Source organization:
 | Directory | Responsibility |
 | --- | --- |
 | `extension/` | Tool registration, session lifecycle, policy, recovery provider, steering |
-| `runner/` | Child launch, RPC events, watchdogs, process cleanup |
+| `runner/` | Child launch, RPC events, startup timeout, process cleanup |
 | `storage/` | Budget ledger, name registry, session files and validation |
 | `types/` | Runtime contracts, transcript parsing, outcomes, usage aggregation |
 | `ui/` | Transcript views, trees, navigation and overlays |

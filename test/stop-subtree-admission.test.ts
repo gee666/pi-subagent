@@ -48,7 +48,6 @@ test(
           treeAdmission: admission,
           piCommandOverride: { command: process.execPath, argsPrefix: ["-e", script, "--"] },
           startupTimeoutMsOverride: 0,
-          idleTimeoutMsOverride: 0,
           terminationTimeoutMsOverride: 5000,
           makeDetails: (results) => buildSubagentDetails("single", "spawn", null, results),
         },

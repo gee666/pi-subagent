@@ -23,7 +23,6 @@ function protocol(t: TestContext, timeoutMs = 1000, writeSucceeds = true) {
     result,
     promptRequestId: "initial",
     emitUpdate() {},
-    noteSemanticActivity() {},
     stopChild() {},
     doResolve() {},
     forceStopAndSettle() {
@@ -36,7 +35,6 @@ function protocol(t: TestContext, timeoutMs = 1000, writeSucceeds = true) {
     result,
     promptRequestId: "initial",
     timeoutMs,
-    noteSemanticActivity() {},
     settleDeferred: () => event({ type: "agent_settled" }),
     sendRpc(command) {
       sent.push(command);
@@ -175,7 +173,6 @@ function child(
       settings: {},
       signal: controller.signal,
       startupTimeoutMsOverride: 5000,
-      idleTimeoutMsOverride: 5000,
       terminationTimeoutMsOverride: 100,
       steeringTimeoutMsOverride: 1000,
       piCommandOverride: { command: process.execPath, argsPrefix: ["-e", code, "--"] },

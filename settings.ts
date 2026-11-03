@@ -17,7 +17,6 @@ export const SETTING_DEFINITIONS = [
   ["models", "intelligence", "PI_SUBAGENT_INTELLIGENCE", "boolean"],
   ["models", "fallback", "PI_SUBAGENT_FALLBACK_MODEL", "string"],
   ["runner", "startupTimeoutMs", "PI_SUBAGENT_STARTUP_TIMEOUT", "integer"],
-  ["runner", "idleTimeoutMs", "PI_SUBAGENT_IDLE_TIMEOUT", "integer"],
   ["runner", "startupRetries", "PI_SUBAGENT_STARTUP_RETRIES", "integer"],
   ["runner", "command", "PI_SUBAGENT_PI_COMMAND", "string"],
   ["runner", "argsPrefix", "PI_SUBAGENT_PI_ARGS_PREFIX", "list"],

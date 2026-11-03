@@ -40,7 +40,6 @@ test(
         preventCycles: false,
         piCommandOverride: { command: process.execPath, argsPrefix: ["-e", script, "--"] },
         startupTimeoutMsOverride: 0,
-        idleTimeoutMsOverride: 0,
         terminationTimeoutMsOverride: 10000,
         signal: controller.signal,
         onHandle: (value) => {

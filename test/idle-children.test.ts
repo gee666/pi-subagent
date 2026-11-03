@@ -21,7 +21,6 @@ function fixture(onLeadMessage?: (message: string) => void | Promise<void>) {
     result,
     promptRequestId: "initial",
     emitUpdate() {},
-    noteSemanticActivity() {},
     stopChild() {},
     doResolve() {},
     forceStopAndSettle() {
@@ -38,7 +37,6 @@ function fixture(onLeadMessage?: (message: string) => void | Promise<void>) {
     state,
     result,
     promptRequestId: "initial",
-    noteSemanticActivity() {},
     sendRpc: () => true,
     settleDeferred: () => event({ type: "agent_settled" }),
   });

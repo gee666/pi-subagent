@@ -16,15 +16,8 @@ export function configuredNonNegativeInt(
 }
 
 export const SIGKILL_TIMEOUT_MS = 5000;
-export const RETRY_WAIT_GRACE_MS = 60_000;
 export const DEFAULT_STARTUP_TIMEOUT_MS = 120_000; // only for startup (before first assistant turn)
 export const SUBAGENT_STARTUP_TIMEOUT_ENV = "PI_SUBAGENT_STARTUP_TIMEOUT";
-// Once startup succeeds, a child can otherwise remain alive forever if Pi loses
-// the next model/RPC turn after a tool result. Bound agent inactivity (not
-// repeated progress heartbeats), but never while one of its tools is executing:
-// tool runtimes are intentionally unbounded.
-export const DEFAULT_IDLE_TIMEOUT_MS = 20 * 60_000;
-export const SUBAGENT_IDLE_TIMEOUT_ENV = "PI_SUBAGENT_IDLE_TIMEOUT";
 // A startup timeout is almost always a transient cold-start stall (slow cli /
 // extension load, momentarily busy box) rather than a deterministic failure, so
 // re-spawn a clean child a few times before surfacing the error. This does NOT

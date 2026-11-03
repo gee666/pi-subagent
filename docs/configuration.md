@@ -59,7 +59,6 @@ For each setting, an explicitly set environment variable wins over JSON, then th
   "models": { "intelligence": true },
   "runner": {
     "startupTimeoutMs": 120000,
-    "idleTimeoutMs": 1200000,
     "startupRetries": 2
   }
 }
@@ -80,7 +79,6 @@ For each setting, an explicitly set environment variable wins over JSON, then th
 | `models.intelligence` | `PI_SUBAGENT_INTELLIGENCE` | `true` |
 | `models.fallback` | `PI_SUBAGENT_FALLBACK_MODEL` | No configured fallback |
 | `runner.startupTimeoutMs` | `PI_SUBAGENT_STARTUP_TIMEOUT` | `120000` |
-| `runner.idleTimeoutMs` | `PI_SUBAGENT_IDLE_TIMEOUT` | `1200000` |
 | `runner.startupRetries` | `PI_SUBAGENT_STARTUP_RETRIES` | `2` |
 | `runner.command` | `PI_SUBAGENT_PI_COMMAND` | Current runtime |
 | `runner.argsPrefix` | `PI_SUBAGENT_PI_ARGS_PREFIX` | Current entrypoint |
@@ -228,11 +226,10 @@ Cycle-blocked tasks fail individually; legal siblings still run. A nested tool e
 | --- | --- | --- |
 | `PI_SUBAGENT_STARTUP_TIMEOUT` | `120000` | Milliseconds to first model turn; `0` disables |
 | `PI_SUBAGENT_STARTUP_RETRIES` | `2` | Fresh retries after startup timeout |
-| `PI_SUBAGENT_IDLE_TIMEOUT` | `1200000` | Milliseconds without agent activity; `0` disables |
 | `PI_SUBAGENT_PI_COMMAND` | Current runtime | Explicit launch command for embedded hosts |
 | `PI_SUBAGENT_PI_ARGS_PREFIX` | Current entrypoint | JSON argument array for the explicit command |
 
-The idle watchdog pauses during tool execution. When the last concurrent tool finishes, a fresh idle window starts. Agent events and changed nested-worker state reset it; unchanged heartbeats do not. Timeout and cancellation terminate the process tree and bound cleanup even if the OS never reports closure.
+Once a worker has started its first turn, it is never killed for being quiet. Tools, rate-limit waits and the agent itself may run indefinitely; provider stalls are bounded inside Pi by its HTTP/WebSocket idle timeouts and retries. Use `stop_subagent` to end a worker you no longer need. Startup timeout and cancellation terminate the process tree and bound cleanup even if the OS never reports closure. The former `runner.idleTimeoutMs` / `PI_SUBAGENT_IDLE_TIMEOUT` setting was removed and is ignored.
 
 Worker-turn completion waits for `agent_settled`, not `agent_end`, because Pi may retry, compact, or continue after a low-level run ends. This wait happens in the background, not inside the lead's launch or messaging tool call.
 

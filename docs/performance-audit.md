@@ -49,7 +49,6 @@ Profile a long-running, nested workload before expanding this patch. In particul
 - `runner/single.ts` still builds each child's live details for every accepted semantic event. Batch coalescing limits downstream work, not this per-child cost.
 - Progress still recursively projects the structural tree, and `runner/protocol.ts` serializes that projection again to detect changes. Large delegation trees and long task prompts can remain expensive even after body payloads are removed.
 - `render.ts` builds tree nodes on repeated collapsed renders, and `ui/tree-build.ts` scans histories to build nested children and previews. Consider width/content caching with correct invalidation if a profile attributes substantial CPU here.
-- `runner/attempt.ts` clears and allocates an inactivity timer on each streaming delta. A mutable deadline and one timer would avoid that churn, but must preserve retry grace and active-tool exemptions.
 - Session header/settings reads load whole transcripts. Registry and budget operations use synchronous filesystem work. These can block the event loop, though disk waits alone do not explain sustained CPU saturation.
 
 For a follow-up measurement, record parent-process CPU and event-loop delay with representative transcript sizes and nesting. Compare progress enabled and disabled, and interactive and non-interactive runs. Capture a Node CPU profile of the parent to distinguish JSON processing, tree rendering and filesystem work from Pi's own costs.

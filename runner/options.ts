@@ -87,8 +87,6 @@ export interface RunAgentOptions {
   piCommandOverride?: { command: string; argsPrefix?: string[] };
   /** Test/debug override for startup timeout. */
   startupTimeoutMsOverride?: number;
-  /** Test/debug override for post-startup semantic inactivity timeout. */
-  idleTimeoutMsOverride?: number;
   /** Test/debug override for the steering acknowledgment timeout. Defaults to 30 seconds. */
   steeringTimeoutMsOverride?: number;
   /** Test/debug override for graceful-stop to SIGKILL escalation. */
