@@ -43,6 +43,8 @@ function rpcWorkerCode(): string {
     state.disabled = true; // Avoid unrelated footer/session lookups in this minimal host.
     registerAsyncDeliveryEvents(state);
     const session = {
+      // prompt() has returned before the timer requests shutdown; RPC now checks idle state.
+      isIdle: true,
       async bindExtensions(options) {
         state.latestSessionCtx = {mode: options.mode, ui: options.uiContext};
         shutdown = options.shutdownHandler;
