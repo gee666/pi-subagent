@@ -32,7 +32,7 @@ function readToolPrompts(config: Record<string, unknown>, filePath: string): Rec
   return result;
 }
 
-/** Load personal settings, then the nearest project configuration when trusted. */
+/** Load personal settings, then trusted ancestor configs with the nearest taking priority. */
 export function loadPiSubagentsConfig(
   cwd?: string,
   includeProject = false,

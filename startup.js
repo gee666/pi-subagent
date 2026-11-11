@@ -25,21 +25,24 @@ function configAtLocation(dir) {
   const singular = path.join(dir, PI_SUBAGENT_CONFIG_FILE);
   return fs.existsSync(singular) ? singular : path.join(dir, PI_SUBAGENTS_CONFIG_FILE);
 }
-function findProjectConfig(cwd) {
+function* projectConfigs(cwd) {
   let dir = path.resolve(cwd);
   while (true) {
     const candidate = configAtLocation(path.join(dir, ".pi"));
-    if (fs.existsSync(candidate)) return candidate;
+    if (fs.existsSync(candidate)) yield candidate;
     const parent = path.dirname(dir);
-    if (parent === dir) return null;
+    if (parent === dir) return;
     dir = parent;
   }
+}
+function findProjectConfig(cwd) {
+  return projectConfigs(cwd).next().value ?? null;
 }
 function configPaths(cwd, includeProject = false) {
   const paths = [configAtLocation(path.join(os.homedir(), ".pi")), configAtLocation(getAgentDir())];
   if (cwd && includeProject) {
-    const projectConfig = findProjectConfig(cwd);
-    if (projectConfig) paths.push(projectConfig);
+    const personalPaths = new Set(paths);
+    paths.push(...[...projectConfigs(cwd)].reverse().filter((file) => !personalPaths.has(file)));
   }
   return [...new Set(paths)];
 }

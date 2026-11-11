@@ -29,24 +29,29 @@ function configAtLocation(dir: string): string {
   return fs.existsSync(singular) ? singular : path.join(dir, PI_SUBAGENTS_CONFIG_FILE);
 }
 
-/** Find the nearest project-local config while walking up from cwd. */
-export function findProjectConfig(cwd: string): string | null {
+/** Existing project configs, nearest first, up to the filesystem root. */
+function* projectConfigs(cwd: string): Generator<string> {
   let dir = path.resolve(cwd);
   while (true) {
     const candidate = configAtLocation(path.join(dir, ".pi"));
-    if (fs.existsSync(candidate)) return candidate;
+    if (fs.existsSync(candidate)) yield candidate;
     const parent = path.dirname(dir);
-    if (parent === dir) return null;
+    if (parent === dir) return;
     dir = parent;
   }
+}
+
+/** Find the nearest project-local config while walking up from cwd. */
+export function findProjectConfig(cwd: string): string | null {
+  return projectConfigs(cwd).next().value ?? null;
 }
 
 /** Both filenames are permanent. Singular wins when both exist at one location. */
 export function configPaths(cwd?: string, includeProject = false): string[] {
   const paths = [configAtLocation(path.join(os.homedir(), ".pi")), configAtLocation(getAgentDir())];
   if (cwd && includeProject) {
-    const projectConfig = findProjectConfig(cwd);
-    if (projectConfig) paths.push(projectConfig);
+    const personalPaths = new Set(paths);
+    paths.push(...[...projectConfigs(cwd)].reverse().filter((file) => !personalPaths.has(file)));
   }
   return [...new Set(paths)];
 }

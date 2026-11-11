@@ -43,9 +43,11 @@ At maximum depth 1, combining `first-layer: only` with `last-layer: disabled` bl
 
 1. `~/.pi/`
 2. `$PI_CODING_AGENT_DIR/`, normally `~/.pi/agent/`
-3. The nearest trusted project `.pi/` containing either filename, walking upward from the working directory
+3. Trusted project `.pi/` directories, from the filesystem root down to the working directory
 
-Later locations override earlier ones per setting. If both filenames exist at one location, only `pi-subagent.json` is read there. Use either name; no migration is needed.
+For each setting, the current project takes priority, then its parent, then that parent's parent, continuing to the filesystem root. Missing settings fall back to the global locations above. A nearby config file does not stop this search for settings it omits. Project files are read only when Pi trusts the current project.
+
+If both filenames exist at one location, only `pi-subagent.json` is read there. Use either name; no migration is needed.
 
 For each setting, an explicitly set environment variable wins over JSON, then the built-in default applies. Empty or invalid environment values still take precedence and use that variable's existing parsing rules. Explicit `false`, `0`, and empty arrays in JSON are not treated as missing. CLI delegation flags retain their existing priority; children cannot loosen inherited delegation limits. Existing session budgets are not reset by configuration changes.
 
@@ -197,7 +199,17 @@ Tool result rows show the selected preset, for example `Nicolas (Junior/code-wri
 
 `PI_SUBAGENT_INTELLIGENCE=true` enables presets when they exist, which is the default. Set it to `false` or `0` to treat the configuration as having no presets for new launches: the launch tool hides the argument and no automatic preset applies. Named workers still retain their original settings when messaged or resumed. Unknown choices or attempts to pass a named hidden argument fail before launching workers. When the argument is hidden, omission or `null` still uses the automatic sole preset or existing defaults.
 
-Configuration follows the trust checks and file order above. A later `subagents-models` block replaces the entire earlier block. An empty list disables selection. Invalid blocks warn and disable selection rather than using a partial list. Nested workers load configuration using the same rules. Reload Pi after changing settings.
+Configuration follows the trust checks and file order above. The nearest `subagents-models` block replaces the entire inherited block. An empty list disables selection. Invalid blocks warn and disable selection rather than using a partial list.
+
+To disable inherited intelligence presets in a project, put this in its `.pi/pi-subagent.json`:
+
+```json
+{
+  "models": { "intelligence": false }
+}
+```
+
+This disables presets from parents and global files without disabling other inherited settings. Alternatively, `"subagents-models": []` clears the inherited list. Explicit disabling is not treated as missing, so it does not trigger fallback. Environment variables and session commands still take priority. Nested workers load configuration using the same rules. Reload Pi after changing settings.
 
 The old `smart-decision` block is ignored. Remove it and its router credentials when migrating. Configuration files are no longer modified at runtime.
 

@@ -68,8 +68,7 @@ export function createSteeringHandle(
 
 /** Interpret run boundaries and semantic activity independently of JSONL framing. */
 export function createProtocolHandler(options: ProtocolOptions): (line: string) => void {
-  const { state, result, promptRequestId, emitUpdate, stopChild, doResolve, forceStopAndSettle } =
-    options;
+  const { state, result, promptRequestId, emitUpdate, stopChild, doResolve, forceStopAndSettle } = options;
   // One bounded digest per active nested call, not a retained serialized tree.
   const nestedSignatures = new Map<string, string>();
   return (line: string) => {
