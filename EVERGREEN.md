@@ -54,12 +54,18 @@ Print-lifecycle, steering, recovery, usage, and render tests cover delivery, rec
 Interrupt tests cover real worker cancellation and the run-scoped main-only shortcut. `interrupt-sdk.test.ts`
 drives actual SDK abort/settlement events and a `sendCustomMessage` completion wake without a pending resume.
 Alt+W matching is checked for legacy Meta and Kitty sequences; focused overlay handling remains Pi-owned.
-Tested with global Pi 1.5.1 and latest 1.5.1 SDK packages; live interactive terminal behavior is not e2e-covered.
+Tested with global Pi 1.5.2 and latest 1.5.2 SDK packages; live interactive terminal behavior is not e2e-covered.
 The real-RPC fixture supplies `session.isIdle`, required by Pi 1.5.1's orderly extension shutdown check.
 Its private `modes/rpc/rpc-mode.js` import is another test-only SDK layout/lifecycle dependency.
 Pi 1.5 validates our JSON Schema-compatible TypeBox tools through pi-schema; no TypeBox-only refinements
 or custom formats are used. Named-resume tests cover slash-containing providers in stored model changes
 and assistant messages. Session-write rollback and compaction OAuth fixes are owned by Pi.
+Pi 1.5.2's missing-cwd Continue/Fork/Cancel and /import copy cleanup are Pi-owned UI paths.
+Worker resumes still pin an explicit saved file and require its original cwd to exist before spawning;
+they do not silently continue in the caller's cwd or invoke Pi's import/fork UI. Persisted custom identity
+entries survive Pi forks with new session IDs; legacy reconstruction follows the parentSession chain.
+The real SDK resume-selection test covers cross-cwd private forks, repeat resumes without duplicate files,
+and an untouched original transcript. No runtime change is needed for 1.5.2.
 
 ## Dependency maintenance
 Keep TypeScript on 5.9.3: 7.0.2 rejects the package export test's explicit-file compiler invocation

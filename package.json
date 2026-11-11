@@ -71,10 +71,10 @@
     "check": "npm test && npm run format:check && npm run check:size"
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "^1.5.1",
-    "@earendil-works/pi-ai": "^1.5.1",
-    "@earendil-works/pi-coding-agent": "^1.5.1",
-    "@earendil-works/pi-tui": "^1.5.1",
+    "@earendil-works/pi-agent-core": "^1.5.2",
+    "@earendil-works/pi-ai": "^1.5.2",
+    "@earendil-works/pi-coding-agent": "^1.5.2",
+    "@earendil-works/pi-tui": "^1.5.2",
     "@sinclair/typebox": ">=0.34.0",
     "@types/node": "^25.9.9",
     "esbuild": "^0.28.2",
