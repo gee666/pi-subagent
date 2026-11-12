@@ -214,6 +214,11 @@ export function registerSettingsCommands(state: ExtensionState): void {
           }
           const liveLimit = control.name === "max-concurency" || control.name === "max-total";
           if (!editable(state, ctx)) return;
+          // In-flight calls retain the old schema but read the current preset settings.
+          if (control.name === "intelligence" && !ctx.isIdle()) {
+            ctx.ui.notify("Wait for the current assistant turn to finish before changing intelligence.", "warning");
+            return;
+          }
           const value = parseValue(control, raw);
           if (control.name === "max-total" && state.currentBudget)
             setSessionBudgetLimit(state.currentBudget, Number(value));

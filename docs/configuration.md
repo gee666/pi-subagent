@@ -119,7 +119,7 @@ Waiting parents park instead of rejecting blocked descendants or exceeding the c
 
 Preset definitions, the fallback model, extension exclusions, runner executables, retry counts and timeouts remain file settings.
 
-Commands apply to the main session and remain available while the main agent is busy, including enable/disable, inspection, and saving settings. Changes affect subsequent launches and resumes; they do not stop or reconfigure existing workers. Tool availability and schemas update for subsequent model requests, but an already-running request cannot see the updated tool list. Disabling also rejects new launch or resume calls from that request. Concurrency changes update the live queue immediately.
+Commands apply to the main session. Enable/disable, limits, delegation and recovery controls, inspection, and saving settings remain available while the main agent is busy. Changing `intelligence` requires an idle main agent because in-flight calls retain the previous preset schema. Changes affect subsequent launches and resumes; they do not stop or reconfigure existing workers. Tool availability and schemas update for subsequent model requests, but an already-running request cannot see the updated tool list. Disabling also rejects launch or resume calls from that request if execution has not started. Calls already preparing, including those waiting for project-agent approval, may finish admission. Concurrency changes update the live queue immediately.
 
 Session commands override startup environment values and CLI delegation flags without changing `process.env`. A startup environment disable prevents the entire extension from loading, so commands are unavailable in that case. Child sessions cannot use commands to change inherited grants.
 

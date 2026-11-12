@@ -11552,6 +11552,10 @@ function registerSettingsCommands(state) {
           }
           const liveLimit = control.name === "max-concurency" || control.name === "max-total";
           if (!editable(state, ctx)) return;
+          if (control.name === "intelligence" && !ctx.isIdle()) {
+            ctx.ui.notify("Wait for the current assistant turn to finish before changing intelligence.", "warning");
+            return;
+          }
           const value = parseValue(control, raw);
           if (control.name === "max-total" && state.currentBudget)
             setSessionBudgetLimit(state.currentBudget, Number(value));

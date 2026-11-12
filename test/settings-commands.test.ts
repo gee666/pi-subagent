@@ -2,50 +2,13 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { test } from "node:test";
-import type { ExtensionCommandContext, SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { Value } from "@sinclair/typebox/value";
 import type { TSchema } from "@sinclair/typebox";
 import { readBudget, reserveSubagentBudgets, SUBAGENT_BUDGET_CUSTOM_TYPE } from "../budget.js";
 import { configuredEnv } from "../settings.js";
 import { createExtensionHarness, hostDouble } from "./helpers/extension.js";
-import { settingsFixture } from "./helpers/settings.js";
-
-function setup(overrides: Record<string, unknown> = {}) {
-  const f = settingsFixture();
-  f.write(f.agent, { resume: { disableAuto: true }, ...overrides });
-  process.env.PI_SUBAGENT_SESSION_ROOT = path.join(f.root, "sessions");
-  const host = createExtensionHarness();
-  const entries: SessionEntry[] = [];
-  const notifications: string[] = [];
-  const selections: string[] = [];
-  const base = host.makeCtx(entries, { cwd: f.project });
-  const ctx = hostDouble<ExtensionCommandContext>({
-    ...base,
-    ui: {
-      ...base.ui,
-      notify: (text: string) => {
-        notifications.push(text);
-      },
-      select: async (title: string) => {
-        selections.push(title);
-        return "project";
-      },
-    },
-  });
-  return {
-    f,
-    host,
-    entries,
-    ctx,
-    notifications,
-    selections,
-    async command(name: string, args = "") {
-      const command = host.commands.get(`subagent:${name}`);
-      assert.ok(command, name);
-      await command.handler(args, ctx);
-    },
-  };
-}
+import { setup } from "./helpers/settings-commands.js";
 
 test("settings commands are session-only, override startup env and reset on the next session", async () => {
   const s = setup();
@@ -99,7 +62,7 @@ test("enable and disable update tools while busy, including when the extension s
   }
 });
 
-test("intelligence command refreshes schemas while busy from presets disabled by startup config", async () => {
+test("intelligence refreshes schemas only while idle and remains inspectable while busy", async () => {
   const s = setup({
     models: { intelligence: false },
     "subagents-models": [
@@ -109,10 +72,17 @@ test("intelligence command refreshes schemas while busy from presets disabled by
   });
   try {
     await s.host.emit("session_start", {}, s.ctx);
-    s.ctx.isIdle = () => false;
     const task = { task: "work", max_subagents_allowed: 0, intelligence: "cheap" };
     await s.command("intelligence", "on");
-    assert.equal(Value.Check(s.host.tool("subagents").parameters as unknown as TSchema, { tasks: [task] }), true);
+    const inFlightTool = s.host.tool("subagents");
+    assert.equal(Value.Check(inFlightTool.parameters as unknown as TSchema, { tasks: [task] }), true);
+    s.ctx.isIdle = () => false;
+    await s.command("intelligence", "off");
+    assert.match(s.notifications.at(-1)!, /Wait for the current assistant turn/);
+    assert.equal(s.host.tool("subagents"), inFlightTool);
+    await s.command("intelligence");
+    assert.match(s.notifications.at(-1)!, /^intelligence: on\n/);
+    s.ctx.isIdle = () => true;
     await s.command("intelligence", "off");
     assert.equal(Value.Check(s.host.tool("subagents").parameters as unknown as TSchema, { tasks: [task] }), false);
     await s.host.emit("session_shutdown", {}, s.ctx);
