@@ -70,25 +70,27 @@ test("settings commands are session-only, override startup env and reset on the 
   }
 });
 
-test("enable initializes launch and messaging tools when the extension starts disabled", async () => {
+test("enable and disable update tools while busy, including when the extension starts disabled", async () => {
   const s = setup({ extension: { disabled: true } });
   try {
     await s.host.emit("session_start", {}, s.ctx);
     assert.ok(!s.host.getActiveTools().includes("subagents"));
     assert.ok(!s.host.getActiveTools().includes("message_subagent"));
+    s.ctx.isIdle = () => false;
     await s.command("enable");
     assert.ok(s.host.getActiveTools().includes("subagents"));
     assert.ok(s.host.getActiveTools().includes("message_subagent"));
+    const inFlightTool = s.host.tool("subagents");
     await s.command("disable");
     assert.ok(!s.host.getActiveTools().includes("subagents"));
     assert.ok(!s.host.getActiveTools().includes("message_subagent"));
-    const result = await s.host.call(
-      "subagents",
-      "blocked",
+    assert.ok(s.host.getActiveTools().includes("stop_subagent"));
+    const staleResult = await inFlightTool.execute(
+      "stale-call",
       { tasks: [{ task: "work", max_subagents_allowed: 0 }] },
       s.ctx,
     );
-    assert.match(JSON.stringify(result.content), /delegation is disabled/);
+    assert.match(JSON.stringify(staleResult.content), /delegation is disabled/);
     await s.command("enable");
     assert.ok(s.host.getActiveTools().includes("message_subagent"));
     await s.host.emit("session_shutdown", {}, s.ctx);
@@ -97,7 +99,7 @@ test("enable initializes launch and messaging tools when the extension starts di
   }
 });
 
-test("intelligence command refreshes schemas from presets disabled by startup config", async () => {
+test("intelligence command refreshes schemas while busy from presets disabled by startup config", async () => {
   const s = setup({
     models: { intelligence: false },
     "subagents-models": [
@@ -107,6 +109,7 @@ test("intelligence command refreshes schemas from presets disabled by startup co
   });
   try {
     await s.host.emit("session_start", {}, s.ctx);
+    s.ctx.isIdle = () => false;
     const task = { task: "work", max_subagents_allowed: 0, intelligence: "cheap" };
     await s.command("intelligence", "on");
     assert.equal(Value.Check(s.host.tool("subagents").parameters as unknown as TSchema, { tasks: [task] }), true);
@@ -142,10 +145,11 @@ test("budget command updates effective allowance without resetting reservations 
   }
 });
 
-test("save-settings prompts for scope and saves only command overrides", async () => {
+test("save-settings prompts for scope and saves only command overrides while busy", async () => {
   const s = setup({ runner: { startupRetries: 7 } });
   try {
     await s.host.emit("session_start", {}, s.ctx);
+    s.ctx.isIdle = () => false;
     await s.command("max-concurency", "3");
     await s.command("max-tasks-per-call", "12");
     await s.command("prevent-cycles", "off");
@@ -239,6 +243,40 @@ test("the user can change live concurrency and budget limits while the main agen
   }
 });
 
+test("remaining session controls and inspection work while the main agent is busy", async () => {
+  const s = setup();
+  try {
+    await s.host.emit("session_start", {}, s.ctx);
+    s.ctx.isIdle = () => false;
+    for (const [name, value] of [
+      ["max-tasks-per-call", "7"],
+      ["max-depth", "2"],
+      ["prevent-cycles", "off"],
+      ["auto-resume", "on"],
+      ["resume-prompt", "off"],
+      ["confirm-project", "session"],
+    ]) {
+      await s.command(name, value);
+      assert.equal(s.notifications.at(-1), `${name}: ${value}. Session only; not saved.`);
+      await s.command(name);
+      assert.ok(s.notifications.at(-1)?.startsWith(`${name}: ${value}\n`));
+    }
+    await s.command("settings");
+    assert.match(s.notifications.at(-1)!, /max-tasks-per-call <number> = 7/);
+    await s.command("save-settings", "project");
+    const saved = JSON.parse(fs.readFileSync(path.join(s.f.project, ".pi/pi-subagent.json"), "utf8"));
+    assert.deepEqual(saved, {
+      limits: { tasksPerCall: 7 },
+      delegation: { depth: 2, preventCycles: false },
+      resume: { disableAuto: false, prompt: false },
+      agents: { confirmProject: "session" },
+    });
+    await s.host.emit("session_shutdown", {}, s.ctx);
+  } finally {
+    s.f.close();
+  }
+});
+
 test("validation, inspection and child restrictions leave settings untouched", async () => {
   const s = setup();
   try {
@@ -283,19 +321,25 @@ test("validation, inspection and child restrictions leave settings untouched", a
     const childCtx = child.makeCtx([], { cwd: s.f.project });
     await child.emit("session_start", {}, childCtx);
     const notices: string[] = [];
-    await child.commands.get("subagent:max-depth")!.handler(
-      "99",
-      hostDouble<ExtensionCommandContext>({
-        ...childCtx,
-        ui: {
-          ...childCtx.ui,
-          notify: (text: string) => {
-            notices.push(text);
-          },
+    const busyChildCtx = hostDouble<ExtensionCommandContext>({
+      ...childCtx,
+      isIdle: () => false,
+      ui: {
+        ...childCtx.ui,
+        notify: (text: string) => {
+          notices.push(text);
         },
-      }),
-    );
-    assert.match(notices.at(-1)!, /inherited grant/);
+      },
+    });
+    for (const [name, value] of [
+      ["max-depth", "99"],
+      ["enable", ""],
+      ["disable", ""],
+      ["save-settings", "global"],
+    ]) {
+      await child.commands.get(`subagent:${name}`)!.handler(value, busyChildCtx);
+      assert.match(notices.at(-1)!, /inherited grant/);
+    }
     await child.emit("session_shutdown", {}, childCtx);
     assert.equal(configuredEnv("PI_SUBAGENT_MAX_DEPTH", {}), undefined);
   } finally {

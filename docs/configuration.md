@@ -119,7 +119,9 @@ Waiting parents park instead of rejecting blocked descendants or exceeding the c
 
 Preset definitions, the fallback model, extension exclusions, runner executables, retry counts and timeouts remain file settings.
 
-Commands apply to the main session. `/subagent:max-concurency` and `/subagent:max-total` take effect even while the main agent is busy; other settings commands require it to be idle. They override startup environment values and CLI delegation flags for this session, without changing `process.env`. A startup environment disable prevents the entire extension from loading, so commands are unavailable in that case. Child sessions cannot use commands to change inherited grants.
+Commands apply to the main session and remain available while the main agent is busy, including enable/disable, inspection, and saving settings. Changes affect subsequent launches and resumes; they do not stop or reconfigure existing workers. Tool availability and schemas update for subsequent model requests, but an already-running request cannot see the updated tool list. Disabling also rejects new launch or resume calls from that request. Concurrency changes update the live queue immediately.
+
+Session commands override startup environment values and CLI delegation flags without changing `process.env`. A startup environment disable prevents the entire extension from loading, so commands are unavailable in that case. Child sessions cannot use commands to change inherited grants.
 
 Changes are session-only and clear on session replacement, resume or reload. The concurrency cap is shared across processes, not saved to configuration unless explicitly requested. Lowering the live cap does not stop active workers. Queued work waits until the live-worker count falls below the new cap. Raising the cap admits queued work immediately. Changing the tasks-per-call limit affects new submissions only, not already accepted batches. Budget changes preserve all spent and reserved slots, cannot go below that spending, and cannot enlarge a child's grant. Temporary budget increases disappear when the session ends, but any slots used under them remain spent.
 

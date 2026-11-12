@@ -11500,13 +11500,9 @@ function applySettings(state, ctx) {
   if (state.canDelegate) ensureSubagentToolActive(state.pi);
   updateCombinedUsageStatus(state, ctx);
 }
-function editable(state, ctx, allowBusy = false) {
+function editable(state, ctx) {
   if (state.currentDepth > 0) {
     ctx.ui.notify("Change session settings in the main session, not in a child with an inherited grant.", "warning");
-    return false;
-  }
-  if (!allowBusy && !ctx.isIdle()) {
-    ctx.ui.notify("Wait for the current assistant turn to finish before changing settings.", "warning");
     return false;
   }
   return true;
@@ -11555,7 +11551,7 @@ function registerSettingsCommands(state) {
             return;
           }
           const liveLimit = control.name === "max-concurency" || control.name === "max-total";
-          if (!editable(state, ctx, liveLimit)) return;
+          if (!editable(state, ctx)) return;
           const value = parseValue(control, raw);
           if (control.name === "max-total" && state.currentBudget)
             setSessionBudgetLimit(state.currentBudget, Number(value));
