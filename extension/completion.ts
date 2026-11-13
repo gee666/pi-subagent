@@ -8,7 +8,7 @@ import {
   type AsyncExecutionKey,
 } from "../types.js";
 import { releaseCompletionDelivery, retainCompletionDelivery } from "./async-jobs.js";
-import { scheduleSessionTask } from "./runtime.js";
+import { deferDuringReload, scheduleSessionTask } from "./runtime.js";
 import type { ExtensionState } from "./state.js";
 import { readWorkerStops } from "../storage/worker-stops.js";
 
@@ -31,6 +31,8 @@ export function publishCompletion(
   brokerJobId?: string,
   interruptEpoch = state.interruptEpoch ?? 0,
 ): void {
+  const replay = () => publishCompletion(state, result, generation, executionKey, brokerJobId, interruptEpoch);
+  if (deferDuringReload(state, generation, replay)) return;
   if (!state.sessionActive || generation !== state.lifecycleGeneration) return;
   const failed = isResultError(result);
   const output = failed
@@ -73,5 +75,5 @@ export function publishCompletion(
     }
   };
   (state.pendingCompletionInterrupts ??= new Map()).set(deliveryId, () => deliver(true));
-  scheduleSessionTask(state, () => deliver(), 0);
+  scheduleSessionTask(state, () => deliver(), 0, false, true);
 }

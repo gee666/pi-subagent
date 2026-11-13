@@ -10,6 +10,7 @@ import { registerPromptHook } from "./extension/prompt-hook.js";
 import { registerResumeProvider } from "./extension/provider.js";
 import { registerSessionLifecycle } from "./extension/session-start.js";
 import { createExtensionState } from "./extension/state.js";
+import { claimReloadHandoff } from "./extension/reload-handoff.js";
 import { registerTools } from "./extension/tool-registration.js";
 
 export { selectParentModelForSubagent } from "./extension/models.js";
@@ -28,7 +29,8 @@ export default function (pi: ExtensionAPI): void {
     description: "Block delegating to agents already in the current delegation stack (default: true).",
     type: "boolean",
   });
-  const state = createExtensionState(pi);
+  // After a Pi reload, adopt the previous instance's live workers instead of starting empty.
+  const state = claimReloadHandoff(pi) ?? createExtensionState(pi);
   registerResumeProvider(state);
   registerSessionLifecycle(state);
   registerSessionEvents(state);

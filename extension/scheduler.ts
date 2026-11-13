@@ -12,10 +12,11 @@ import {
 import type { ExtensionState } from "./state.js";
 import { BROKER_DIR_ENV, BROKER_SECRET_ENV } from "../broker/contracts.js";
 import { createRootBroker, shutdownRootBroker } from "../broker/root.js";
+import { processRegistry } from "../storage/process-registry.js";
 
 export { WorkerScheduler } from "../runner/worker-scheduler.js";
 export type { WorkerStatus, WorkerTicket } from "../runner/worker-scheduler.js";
-const schedulers = new WeakMap<ExtensionState, WorkerScheduler>();
+const schedulers = processRegistry("schedulers", () => new WeakMap<ExtensionState, WorkerScheduler>());
 
 /** Descendants inherit the root ledger. Their personal concurrency settings cannot change its cap. */
 export function schedulerFor(state: ExtensionState): WorkerScheduler {

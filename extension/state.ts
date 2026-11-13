@@ -15,7 +15,19 @@ import { resolveDelegationDepthConfig, type DelegationDepthConfig } from "./poli
 
 import type { BackgroundJob } from "./async-jobs.js";
 
+/** Live work kept across a Pi reload until the reloaded extension instance adopts it. */
+export interface ReloadHandoff {
+  sessionId: string;
+  /** Lead messages and completions raised while no session is bound, replayed in order on adoption. */
+  queue: Array<() => void>;
+  /** The handing-off instance's normal shutdown. Idempotent. */
+  stop: () => Promise<void>;
+  /** Cancel the adoption deadline once a session owns the work. */
+  release: () => void;
+}
+
 export interface ExtensionState extends DelegationDepthConfig {
+  reloadHandoff?: ReloadHandoff;
   backgroundJobs: Map<string, BackgroundJob>;
   onBackgroundChanged?: (messageQueued?: boolean) => void;
   /** Delivery token -> session generation, retained until the completion is consumed. */

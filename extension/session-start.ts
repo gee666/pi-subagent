@@ -1,5 +1,6 @@
 import { stopBackgroundJobs } from "./async-jobs.js";
-import { shutdownScheduler, treeStoreFor } from "./scheduler.js";
+import { cachedSchedulerFor, shutdownScheduler, treeStoreFor } from "./scheduler.js";
+import { adoptReloadHandoff, publishReloadHandoff } from "./reload-handoff.js";
 import { detachBrokerJobs, restoreBrokerJobs } from "./broker-jobs.js";
 import { WORKER_TOKEN_ENV } from "../storage/tree-concurrency.js";
 import { loadPiSubagentsConfig } from "../config.js";
@@ -33,21 +34,37 @@ import { isSubagentToolName, STOP_SUBAGENT_TOOL_NAME } from "../types.js";
 import { getRestorableModel } from "./models.js";
 import { ensureSubagentToolActive, filterAgentsForPrompt } from "./policy.js";
 import { maybeOfferSubagentResume } from "./resume-offer.js";
-import { clearSyntheticResumeState, restoreModelAfterResumeFailure, updateCombinedUsageStatus } from "./runtime.js";
+import {
+  clearSessionTasks,
+  clearSyntheticResumeState,
+  restoreModelAfterResumeFailure,
+  scheduleSessionTask,
+  updateCombinedUsageStatus,
+} from "./runtime.js";
 import type { ExtensionState } from "./state.js";
 
 export function registerSessionLifecycle(state: ExtensionState): void {
   state.pi.on("session_start", async (event, ctx) => {
+    const replay = adoptReloadHandoff(state, event.reason, ctx.sessionManager.getSessionId?.() ?? "ephemeral");
+    if (replay) {
+      // Same session, same generation: workers handed off by the previous instance stay valid.
+      state.sessionActive = true;
+      state.latestSessionCtx = ctx;
+      scheduleSessionTask(state, () => replay.forEach((run) => run()), 0);
+    }
     if (state.currentBudget) clearSessionBudgetLimit(state.currentBudget);
     state.sessionSettings = {};
-    state.sessionActive = false;
-    state.lifecycleGeneration += 1;
-    state.pendingCompletionDeliveries.clear();
-    state.pendingCompletionInterrupts.clear();
-    await shutdownScheduler(state);
-    await stopBackgroundJobs(state);
-    state.sessionActive = true;
-    state.latestSessionCtx = ctx;
+    if (!replay) {
+      await state.reloadHandoff?.stop();
+      state.sessionActive = false;
+      state.lifecycleGeneration += 1;
+      state.pendingCompletionDeliveries.clear();
+      state.pendingCompletionInterrupts.clear();
+      await shutdownScheduler(state);
+      await stopBackgroundJobs(state);
+      state.sessionActive = true;
+      state.latestSessionCtx = ctx;
+    }
     // Record this invocation before its first user message, including on leaf workers.
     // Null clears the label on a resume that uses no preset. Do not rewrite earlier entries.
     const runIntelligence = process.env[SUBAGENT_RUN_INTELLIGENCE_ENV];
@@ -217,7 +234,7 @@ export function registerSessionLifecycle(state: ExtensionState): void {
     }
   });
 
-  state.pi.on("session_shutdown", async () => {
+  state.pi.on("session_shutdown", async (event) => {
     const token = process.env[WORKER_TOKEN_ENV];
     let parking = false;
     try {
@@ -225,30 +242,56 @@ export function registerSessionLifecycle(state: ExtensionState): void {
     } catch {
       /* An unreadable ledger must not detach work without a confirmed parking request. */
     }
-    state.sessionActive = false;
-    state.lifecycleGeneration += 1;
-    state.pendingCompletionDeliveries.clear();
-    state.pendingCompletionInterrupts.clear();
-    if (parking) detachBrokerJobs(state);
-    else {
-      await shutdownScheduler(state);
-      await stopBackgroundJobs(state);
+    if (!parking && event.reason === "reload" && hasLiveWork(state)) {
+      state.sessionActive = false;
+      clearSessionTasks(state, true);
+      unbindSession(state, false);
+      publishReloadHandoff(state, () => teardownSession(state, false));
+      return;
     }
-    for (const timer of state.scheduledTasks) clearTimeout(timer);
-    state.scheduledTasks.clear();
-    clearSyntheticResumeState(state);
-    state.pendingResumePlans = [];
-    state.pendingInteractiveResumePrompt = null;
-    state.modelToRestoreAfterResume = undefined;
-    state.latestSessionCtx = undefined;
-    state.resumeModelRegistry = undefined;
-    state.activeSubagentUsageSummaries.clear();
-    state.forcedErrorToolCallIds.clear();
-    state.activeSubagents.clear();
-    state.activeResumeNames.clear();
-    state.approvedProjectAgentDirsForSession.clear();
-    state.latestBroadcastTargets.all = [];
-    state.latestBroadcastTargets.youngest = [];
-    clearRenderCaches();
+    await teardownSession(state, parking);
   });
+}
+
+/** Work a reload hands off. Worker processes keep running their old code; their next resume uses the new code. */
+function hasLiveWork(state: ExtensionState): boolean {
+  return !!(
+    state.backgroundJobs.size ||
+    state.activeSubagents.size ||
+    state.pendingCompletionDeliveries.size ||
+    cachedSchedulerFor(state)?.snapshot().length
+  );
+}
+
+async function teardownSession(state: ExtensionState, parking: boolean): Promise<void> {
+  state.sessionActive = false;
+  state.lifecycleGeneration += 1;
+  state.pendingCompletionDeliveries.clear();
+  state.pendingCompletionInterrupts.clear();
+  if (parking) detachBrokerJobs(state);
+  else {
+    await shutdownScheduler(state);
+    await stopBackgroundJobs(state);
+  }
+  clearSessionTasks(state);
+  unbindSession(state, true);
+}
+
+/** Drop session bindings. A reload hand-off keeps the live worker records. */
+function unbindSession(state: ExtensionState, dropWorkers: boolean): void {
+  clearSyntheticResumeState(state);
+  state.pendingResumePlans = [];
+  state.pendingInteractiveResumePrompt = null;
+  state.modelToRestoreAfterResume = undefined;
+  state.latestSessionCtx = undefined;
+  state.resumeModelRegistry = undefined;
+  state.forcedErrorToolCallIds.clear();
+  state.approvedProjectAgentDirsForSession.clear();
+  clearRenderCaches();
+  if (!dropWorkers) return;
+  state.activeSubagentUsageSummaries.clear();
+  state.activeSubagents.clear();
+  state.activeResumeNames.clear();
+  state.latestBroadcastTargets.all = [];
+  state.latestBroadcastTargets.youngest = [];
 }

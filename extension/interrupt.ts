@@ -5,6 +5,12 @@ import { clearSyntheticResumeState, restoreModelAfterResumeFailure } from "./run
 import { stopBranches } from "./stop-tool.js";
 import type { ExtensionState } from "./state.js";
 
+/**
+ * Event-bus signal for other extensions: emit it right before aborting an active run, and that
+ * abort stops only the main agent, like Alt+W. One-shot; the payload is ignored.
+ */
+export const KEEP_ON_NEXT_ABORT_EVENT = "pi-subagent:keep-on-next-abort";
+
 /** Follow Pi's settled abort signal, never raw terminal input. */
 export function registerSubagentInterrupt(state: ExtensionState): void {
   let keepSubagents = false;
@@ -20,6 +26,11 @@ export function registerSubagentInterrupt(state: ExtensionState): void {
       keepSubagents = true;
       ctx.abort();
     },
+  });
+  state.pi.events.on(KEEP_ON_NEXT_ABORT_EVENT, () => {
+    // An idle session has no run to abort; a stale flag must not spare a later Escape.
+    if (state.latestSessionCtx?.isIdle() === true) return;
+    keepSubagents = true;
   });
   state.pi.on("agent_settled", (event, ctx) => {
     const keep = keepSubagents;

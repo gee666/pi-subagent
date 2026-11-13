@@ -123,6 +123,19 @@ When Pi aborts the main agent, pi-subagent also stops running, queued, and parke
 
 Press **Alt+W** to abort only the main agent and keep subagents running. This exception ends when that run settles; a later normal abort stops subagents again. Your terminal must send Alt/Option+W as a Meta key sequence, such as `ESC w`, or use the Kitty keyboard protocol. Kitty is not required for this binding. Pi 1.4.0 does not match modified Escape shortcuts, so Shift+Escape and Alt+Escape cannot be used for this action.
 
+Other extensions can request the same exception through Pi's shared event bus. Emit `pi-subagent:keep-on-next-abort` right before aborting an active run; the payload is ignored:
+
+```ts
+pi.events.emit("pi-subagent:keep-on-next-abort", {});
+ctx.abort();
+```
+
+The signal covers only the next aborted settlement and is ignored while the session is idle.
+
+### Reloading Pi
+
+`/reload` and `ctx.reload()` keep running, queued, and parked workers. The reloaded extension instance takes them over: completions and lead messages raised during the reload are delivered afterwards, and `stop_subagent`, `message_subagent`, Escape, the activity line, and the shared concurrency cap keep working. Running worker processes keep their old code; a worker's next resume starts with the reloaded code. If the reloaded instance cannot take over, for example after an incompatible upgrade, a different session, or no reloaded session within 60 seconds, the old work stops as on quit.
+
 ## Agent definitions
 
 There are no bundled agents. Without user-created definitions, every task uses the same default worker, with no agent-specific system prompt or instructions. It receives the parent's task text unchanged. Pi's normal system prompt and delegation limits still apply.

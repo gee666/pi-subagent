@@ -9,9 +9,10 @@ import { startBackground, notifyLead } from "./async-jobs.js";
 import { publishCompletion } from "./completion.js";
 import type { SessionContext } from "./contracts.js";
 import type { ExtensionState } from "./state.js";
+import { processRegistry } from "../storage/process-registry.js";
 
 export const BROKER_CONSUMED_ENTRY = "pi-subagent-broker-consumed";
-const watches = new WeakMap<ExtensionState, Set<AbortController>>();
+const watches = processRegistry("broker-watches", () => new WeakMap<ExtensionState, Set<AbortController>>());
 export function inheritedBrokerEndpoint(): BrokerEndpoint | undefined {
   const directory = process.env[BROKER_DIR_ENV],
     secret = process.env[BROKER_SECRET_ENV];

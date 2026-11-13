@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { SUBAGENT_COMPLETION_TYPE, SUBAGENT_MESSAGE_TYPE } from "../types.js";
 import type { ProgressUpdate } from "./contracts.js";
 import type { ExtensionState } from "./state.js";
-import { updateCombinedUsageStatus } from "./runtime.js";
+import { deferDuringReload, updateCombinedUsageStatus } from "./runtime.js";
 import { ackBrokerJob } from "../broker/files.js";
 import { inheritedBrokerEndpoint, BROKER_CONSUMED_ENTRY } from "./broker-jobs.js";
 
@@ -133,6 +133,7 @@ export function notifyLead(
   generation = state.lifecycleGeneration,
   interruptEpoch = state.interruptEpoch ?? 0,
 ): void {
+  if (deferDuringReload(state, generation, () => notifyLead(state, content, generation, interruptEpoch))) return;
   if (
     !state.sessionActive ||
     state.lifecycleGeneration !== generation ||

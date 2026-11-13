@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { createEventBus, type ExtensionAPI, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { validateToolArguments } from "@earendil-works/pi-ai";
 import { createBudget, reserveSubagentBudgets } from "../../budget.js";
 import { allocateSubagentNames } from "../../names.js";
@@ -25,6 +25,7 @@ export async function fixture() {
     },
     sendMessage: () => {},
     appendEntry: () => {},
+    events: createEventBus(),
   } as unknown as ExtensionAPI;
   const state = createExtensionState(pi);
   state.canDelegate = true;

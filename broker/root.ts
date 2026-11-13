@@ -11,6 +11,7 @@ import { buildSubagentDetails, emptyUsage, type SingleResult } from "../types.js
 import { listBrokerJobs, persistBrokerResult, writeExclusive } from "./files.js";
 import type { BrokerEndpoint, BrokerJobSpec } from "./contracts.js";
 import { processBrokerCommands } from "./commands.js";
+import { processRegistry } from "../storage/process-registry.js";
 
 interface RootBroker {
   endpoint: BrokerEndpoint;
@@ -24,7 +25,7 @@ interface RootBroker {
   poll?: ReturnType<typeof setTimeout>;
   closed: boolean;
 }
-const roots = new Map<string, RootBroker>();
+const roots = processRegistry("root-brokers", () => new Map<string, RootBroker>());
 
 export function registerBrokerHandle(endpoint: BrokerEndpoint, token: string, handle?: RunningSubagentHandle): void {
   const root = roots.get(endpoint.directory);

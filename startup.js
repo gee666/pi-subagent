@@ -4214,16 +4214,34 @@ function getParentModelForSubagent(state, ctx) {
     state.lastRestorableModel
   );
 }
-function scheduleSessionTask(state, callback, delayMs, cancelOnInterrupt = false) {
+function deferDuringReload(state, generation, run) {
+  const handoff = state.reloadHandoff;
+  if (state.sessionActive || !handoff || generation !== state.lifecycleGeneration) return false;
+  handoff.queue.push(run);
+  return true;
+}
+var durableTasks = /* @__PURE__ */ new WeakSet();
+function scheduleSessionTask(state, callback, delayMs, cancelOnInterrupt = false, durable = false) {
   const expectedGeneration = state.lifecycleGeneration;
   const interruptEpoch = state.interruptEpoch ?? 0;
-  const timer = setTimeout(() => {
-    state.scheduledTasks.delete(timer);
+  const run = () => {
     if (!state.sessionActive || expectedGeneration !== state.lifecycleGeneration) return;
     if (cancelOnInterrupt && interruptEpoch !== (state.interruptEpoch ?? 0)) return;
     callback();
+  };
+  const timer = setTimeout(() => {
+    state.scheduledTasks.delete(timer);
+    if (!durable || !deferDuringReload(state, expectedGeneration, run)) run();
   }, delayMs);
+  if (durable) durableTasks.add(timer);
   state.scheduledTasks.add(timer);
+}
+function clearSessionTasks(state, keepDurable = false) {
+  for (const timer of state.scheduledTasks) {
+    if (keepDurable && durableTasks.has(timer)) continue;
+    clearTimeout(timer);
+    state.scheduledTasks.delete(timer);
+  }
 }
 function sendAutomaticResumePrompt(state, prompt) {
   state.pendingAutomaticResume = { prompt, interruptEpoch: state.interruptEpoch ?? 0 };
@@ -6007,9 +6025,20 @@ var TreeWorkerAdmission = class _TreeWorkerAdmission {
   }
 };
 
+// storage/process-registry.ts
+var RUNTIME_PROTOCOL = 1;
+function processRegistry(name, create) {
+  const key = /* @__PURE__ */ Symbol.for(`pi-subagent.runtime.v${RUNTIME_PROTOCOL}.${name}`);
+  const existing = Reflect.get(globalThis, key);
+  if (typeof existing === "object" && existing !== null) return existing;
+  const created = create();
+  Reflect.set(globalThis, key, created);
+  return created;
+}
+
 // extension/broker-jobs.ts
 var BROKER_CONSUMED_ENTRY = "pi-subagent-broker-consumed";
-var watches = /* @__PURE__ */ new WeakMap();
+var watches = processRegistry("broker-watches", () => /* @__PURE__ */ new WeakMap());
 function inheritedBrokerEndpoint() {
   const directory = process.env[BROKER_DIR_ENV], secret = process.env[BROKER_SECRET_ENV];
   if (!directory && !secret) return void 0;
@@ -6187,6 +6216,7 @@ function registerAsyncDeliveryEvents(state) {
   });
 }
 function notifyLead(state, content, generation = state.lifecycleGeneration, interruptEpoch = state.interruptEpoch ?? 0) {
+  if (deferDuringReload(state, generation, () => notifyLead(state, content, generation, interruptEpoch))) return;
   if (!state.sessionActive || state.lifecycleGeneration !== generation || (state.interruptEpoch ?? 0) !== interruptEpoch)
     return;
   state.pi.sendMessage(
@@ -6255,6 +6285,8 @@ function explicitlyStopped(state, result) {
   }
 }
 function publishCompletion(state, result, generation, executionKey, brokerJobId, interruptEpoch = state.interruptEpoch ?? 0) {
+  const replay = () => publishCompletion(state, result, generation, executionKey, brokerJobId, interruptEpoch);
+  if (deferDuringReload(state, generation, replay)) return;
   if (!state.sessionActive || generation !== state.lifecycleGeneration) return;
   const failed2 = isResultError(result);
   const output = failed2 ? result.errorMessage || result.stderr || getFinalOutput(result.messages, result.finalOutput) : getFinalOutput(result.messages, result.finalOutput);
@@ -6293,7 +6325,7 @@ ${output || "(no output)"}`;
     }
   };
   (state.pendingCompletionInterrupts ??= /* @__PURE__ */ new Map()).set(deliveryId, () => deliver(true));
-  scheduleSessionTask(state, () => deliver(), 0);
+  scheduleSessionTask(state, () => deliver(), 0, false, true);
 }
 
 // runner/launch.ts
@@ -6887,7 +6919,7 @@ import * as fs24 from "node:fs";
 import * as fs23 from "node:fs";
 import * as path24 from "node:path";
 import { randomBytes, randomUUID as randomUUID7 } from "node:crypto";
-var roots = /* @__PURE__ */ new Map();
+var roots = processRegistry("root-brokers", () => /* @__PURE__ */ new Map());
 function registerBrokerHandle(endpoint, token, handle) {
   const root = roots.get(endpoint.directory);
   if (!root || root.closed) return;
@@ -8417,7 +8449,7 @@ async function executeParallelSubprocess(tasks, agents, defaultCwd, parentDepth,
 // extension/scheduler.ts
 import * as path27 from "node:path";
 import { randomUUID as randomUUID8 } from "node:crypto";
-var schedulers = /* @__PURE__ */ new WeakMap();
+var schedulers = processRegistry("schedulers", () => /* @__PURE__ */ new WeakMap());
 function schedulerFor(state) {
   const limit = parseNonNegativeInt(configuredEnv(SUBAGENT_MAX_CONCURRENCY_ENV, state.settings)) ?? DEFAULT_MAX_CONCURRENCY;
   const inheritedDirectory = process.env[TREE_CONCURRENCY_DIR_ENV];
@@ -8995,7 +9027,7 @@ function trackProgress(state, toolCallId, topLevelBaseId, ctx, onUpdate) {
     if (isSubagentDetails(partial.details)) {
       state.activeSubagentUsageSummaries.set(toolCallId, collectLiveUsageSummary(partial.details));
       updateLatestBroadcastTargets(state, partial.details, topLevelBaseId);
-      refreshUsage(state, ctx);
+      refreshUsage(state, state.latestSessionCtx ?? ctx);
       emitNestedProgressToParent(state, toolCallId, partial.details);
     }
     onUpdate?.(partial);
@@ -11789,6 +11821,7 @@ function registerSessionEvents(state) {
 }
 
 // extension/interrupt.ts
+var KEEP_ON_NEXT_ABORT_EVENT = "pi-subagent:keep-on-next-abort";
 function registerSubagentInterrupt(state) {
   let keepSubagents = false;
   let startingResumeEpoch;
@@ -11803,6 +11836,10 @@ function registerSubagentInterrupt(state) {
       keepSubagents = true;
       ctx.abort();
     }
+  });
+  state.pi.events.on(KEEP_ON_NEXT_ABORT_EVENT, () => {
+    if (state.latestSessionCtx?.isIdle() === true) return;
+    keepSubagents = true;
   });
   state.pi.on("agent_settled", (event, ctx) => {
     const keep = keepSubagents;
@@ -12297,20 +12334,158 @@ function registerResumeProvider(state) {
   state.pi.registerProvider(resumeProvider);
 }
 
+// extension/state.ts
+function createExtensionState(pi) {
+  const config = loadPiSubagentsConfig();
+  const depth = resolveDelegationDepthConfig(pi, config.settings);
+  const disabled = subagentDisabled(process.env, config.settings);
+  return {
+    settings: config.settings,
+    pi,
+    ...depth,
+    disabled,
+    canDelegate: !disabled && depth.canDelegate,
+    configuredToolPrompts: config.toolPrompts,
+    pendingInteractiveResumePrompt: null,
+    lifecycleGeneration: 0,
+    sessionActive: false,
+    scheduledTasks: /* @__PURE__ */ new Set(),
+    resumeState: { plans: [], phase: "tool", trigger: "resumePrompt" },
+    maxTasksPerCall: parseNonNegativeInt(configuredEnv(SUBAGENT_MAX_TASKS_PER_CALL_ENV, config.settings)) ?? DEFAULT_MAX_TASKS_PER_CALL,
+    discoveredAgents: [],
+    currentSessionId: "ephemeral",
+    currentSubagentSessionRoot: "",
+    currentNamesFile: "",
+    currentOwnerId: "ephemeral",
+    pendingResumePlans: [],
+    approvedProjectAgentDirsForSession: /* @__PURE__ */ new Set(),
+    backgroundJobs: /* @__PURE__ */ new Map(),
+    pendingCompletionDeliveries: /* @__PURE__ */ new Map(),
+    pendingCompletionInterrupts: /* @__PURE__ */ new Map(),
+    interruptEpoch: 0,
+    activeSubagents: /* @__PURE__ */ new Map(),
+    activeResumeNames: /* @__PURE__ */ new Set(),
+    forcedErrorToolCallIds: /* @__PURE__ */ new Set(),
+    activeSubagentUsageSummaries: /* @__PURE__ */ new Map(),
+    latestBroadcastTargets: { all: [], youngest: [] },
+    nextActiveSubagentId: 1
+  };
+}
+
+// extension/reload-handoff.ts
+var SLOT = /* @__PURE__ */ Symbol.for("pi-subagent.reload-handoff");
+var ADOPTION_TIMEOUT_MS = 6e4;
+function takeSlot() {
+  const value = Reflect.get(globalThis, SLOT);
+  Reflect.deleteProperty(globalThis, SLOT);
+  if (!isRecord4(value)) return void 0;
+  const stop = value.stop;
+  if (typeof stop !== "function") return void 0;
+  return {
+    protocol: value.protocol,
+    pid: value.pid,
+    state: value.state,
+    stop: async () => {
+      await Reflect.apply(stop, value, []);
+    }
+  };
+}
+function stopQuietly(stop) {
+  stop().catch((error) => console.error("[pi-subagent] Failed to stop work left by a reload:", error));
+}
+function publishReloadHandoff(state, teardown, timeoutMs = ADOPTION_TIMEOUT_MS) {
+  const previous = takeSlot();
+  if (previous) stopQuietly(previous.stop);
+  let stopping;
+  const handoff = {
+    sessionId: state.currentSessionId,
+    queue: [],
+    release: () => {
+      clearTimeout(timer);
+      process.off("exit", onExit);
+    },
+    stop: () => stopping ??= (async () => {
+      handoff.release();
+      if (state.reloadHandoff === handoff) state.reloadHandoff = void 0;
+      const slot = Reflect.get(globalThis, SLOT);
+      if (isRecord4(slot) && slot.state === state) Reflect.deleteProperty(globalThis, SLOT);
+      await teardown();
+    })()
+  };
+  const timer = setTimeout(() => stopQuietly(handoff.stop), timeoutMs);
+  timer.unref();
+  const onExit = () => stopQuietly(handoff.stop);
+  process.once("exit", onExit);
+  state.reloadHandoff = handoff;
+  Reflect.set(globalThis, SLOT, { protocol: RUNTIME_PROTOCOL, pid: process.pid, state, stop: handoff.stop });
+}
+function isHandedOffState(value) {
+  return isRecord4(value) && isRecord4(value.reloadHandoff) && value.backgroundJobs instanceof Map && value.activeSubagents instanceof Map && typeof value.lifecycleGeneration === "number";
+}
+function rebindState(previous, pi) {
+  const fresh = createExtensionState(pi);
+  const live = {
+    reloadHandoff: previous.reloadHandoff,
+    backgroundJobs: previous.backgroundJobs,
+    pendingCompletionDeliveries: previous.pendingCompletionDeliveries,
+    pendingCompletionInterrupts: previous.pendingCompletionInterrupts,
+    interruptEpoch: previous.interruptEpoch,
+    lifecycleGeneration: previous.lifecycleGeneration,
+    scheduledTasks: previous.scheduledTasks,
+    activeSubagents: previous.activeSubagents,
+    activeResumeNames: previous.activeResumeNames,
+    activeSubagentUsageSummaries: previous.activeSubagentUsageSummaries,
+    latestBroadcastTargets: previous.latestBroadcastTargets,
+    nextActiveSubagentId: previous.nextActiveSubagentId,
+    currentSessionId: previous.currentSessionId,
+    currentSubagentSessionRoot: previous.currentSubagentSessionRoot,
+    currentNamesFile: previous.currentNamesFile,
+    currentOwnerId: previous.currentOwnerId,
+    currentBudget: previous.currentBudget
+  };
+  for (const key of Object.keys(previous)) Reflect.deleteProperty(previous, key);
+  return Object.assign(previous, fresh, live);
+}
+function claimReloadHandoff(pi) {
+  const slot = takeSlot();
+  if (!slot) return void 0;
+  if (slot.protocol !== RUNTIME_PROTOCOL || slot.pid !== process.pid || !isHandedOffState(slot.state)) {
+    stopQuietly(slot.stop);
+    return void 0;
+  }
+  return rebindState(slot.state, pi);
+}
+function adoptReloadHandoff(state, reason, sessionId) {
+  const handoff = state.reloadHandoff;
+  if (!handoff || reason !== "reload" || sessionId !== handoff.sessionId) return void 0;
+  state.reloadHandoff = void 0;
+  handoff.release();
+  return handoff.queue;
+}
+
 // extension/session-start.ts
 import * as path30 from "node:path";
 function registerSessionLifecycle(state) {
   state.pi.on("session_start", async (event, ctx) => {
+    const replay = adoptReloadHandoff(state, event.reason, ctx.sessionManager.getSessionId?.() ?? "ephemeral");
+    if (replay) {
+      state.sessionActive = true;
+      state.latestSessionCtx = ctx;
+      scheduleSessionTask(state, () => replay.forEach((run) => run()), 0);
+    }
     if (state.currentBudget) clearSessionBudgetLimit(state.currentBudget);
     state.sessionSettings = {};
-    state.sessionActive = false;
-    state.lifecycleGeneration += 1;
-    state.pendingCompletionDeliveries.clear();
-    state.pendingCompletionInterrupts.clear();
-    await shutdownScheduler(state);
-    await stopBackgroundJobs(state);
-    state.sessionActive = true;
-    state.latestSessionCtx = ctx;
+    if (!replay) {
+      await state.reloadHandoff?.stop();
+      state.sessionActive = false;
+      state.lifecycleGeneration += 1;
+      state.pendingCompletionDeliveries.clear();
+      state.pendingCompletionInterrupts.clear();
+      await shutdownScheduler(state);
+      await stopBackgroundJobs(state);
+      state.sessionActive = true;
+      state.latestSessionCtx = ctx;
+    }
     const runIntelligence = process.env[SUBAGENT_RUN_INTELLIGENCE_ENV];
     if (runIntelligence !== void 0) {
       try {
@@ -12436,77 +12611,55 @@ function registerSessionLifecycle(state) {
       await restoreModelAfterResumeFailure(state, ctx);
     }
   });
-  state.pi.on("session_shutdown", async () => {
+  state.pi.on("session_shutdown", async (event) => {
     const token = process.env[WORKER_TOKEN_ENV];
     let parking = false;
     try {
       parking = state.currentDepth > 0 && !!token && treeStoreFor(state).get(token)?.status === "parking";
     } catch {
     }
-    state.sessionActive = false;
-    state.lifecycleGeneration += 1;
-    state.pendingCompletionDeliveries.clear();
-    state.pendingCompletionInterrupts.clear();
-    if (parking) detachBrokerJobs(state);
-    else {
-      await shutdownScheduler(state);
-      await stopBackgroundJobs(state);
+    if (!parking && event.reason === "reload" && hasLiveWork(state)) {
+      state.sessionActive = false;
+      clearSessionTasks(state, true);
+      unbindSession(state, false);
+      publishReloadHandoff(state, () => teardownSession(state, false));
+      return;
     }
-    for (const timer of state.scheduledTasks) clearTimeout(timer);
-    state.scheduledTasks.clear();
-    clearSyntheticResumeState(state);
-    state.pendingResumePlans = [];
-    state.pendingInteractiveResumePrompt = null;
-    state.modelToRestoreAfterResume = void 0;
-    state.latestSessionCtx = void 0;
-    state.resumeModelRegistry = void 0;
-    state.activeSubagentUsageSummaries.clear();
-    state.forcedErrorToolCallIds.clear();
-    state.activeSubagents.clear();
-    state.activeResumeNames.clear();
-    state.approvedProjectAgentDirsForSession.clear();
-    state.latestBroadcastTargets.all = [];
-    state.latestBroadcastTargets.youngest = [];
-    clearRenderCaches();
+    await teardownSession(state, parking);
   });
 }
-
-// extension/state.ts
-function createExtensionState(pi) {
-  const config = loadPiSubagentsConfig();
-  const depth = resolveDelegationDepthConfig(pi, config.settings);
-  const disabled = subagentDisabled(process.env, config.settings);
-  return {
-    settings: config.settings,
-    pi,
-    ...depth,
-    disabled,
-    canDelegate: !disabled && depth.canDelegate,
-    configuredToolPrompts: config.toolPrompts,
-    pendingInteractiveResumePrompt: null,
-    lifecycleGeneration: 0,
-    sessionActive: false,
-    scheduledTasks: /* @__PURE__ */ new Set(),
-    resumeState: { plans: [], phase: "tool", trigger: "resumePrompt" },
-    maxTasksPerCall: parseNonNegativeInt(configuredEnv(SUBAGENT_MAX_TASKS_PER_CALL_ENV, config.settings)) ?? DEFAULT_MAX_TASKS_PER_CALL,
-    discoveredAgents: [],
-    currentSessionId: "ephemeral",
-    currentSubagentSessionRoot: "",
-    currentNamesFile: "",
-    currentOwnerId: "ephemeral",
-    pendingResumePlans: [],
-    approvedProjectAgentDirsForSession: /* @__PURE__ */ new Set(),
-    backgroundJobs: /* @__PURE__ */ new Map(),
-    pendingCompletionDeliveries: /* @__PURE__ */ new Map(),
-    pendingCompletionInterrupts: /* @__PURE__ */ new Map(),
-    interruptEpoch: 0,
-    activeSubagents: /* @__PURE__ */ new Map(),
-    activeResumeNames: /* @__PURE__ */ new Set(),
-    forcedErrorToolCallIds: /* @__PURE__ */ new Set(),
-    activeSubagentUsageSummaries: /* @__PURE__ */ new Map(),
-    latestBroadcastTargets: { all: [], youngest: [] },
-    nextActiveSubagentId: 1
-  };
+function hasLiveWork(state) {
+  return !!(state.backgroundJobs.size || state.activeSubagents.size || state.pendingCompletionDeliveries.size || cachedSchedulerFor(state)?.snapshot().length);
+}
+async function teardownSession(state, parking) {
+  state.sessionActive = false;
+  state.lifecycleGeneration += 1;
+  state.pendingCompletionDeliveries.clear();
+  state.pendingCompletionInterrupts.clear();
+  if (parking) detachBrokerJobs(state);
+  else {
+    await shutdownScheduler(state);
+    await stopBackgroundJobs(state);
+  }
+  clearSessionTasks(state);
+  unbindSession(state, true);
+}
+function unbindSession(state, dropWorkers) {
+  clearSyntheticResumeState(state);
+  state.pendingResumePlans = [];
+  state.pendingInteractiveResumePrompt = null;
+  state.modelToRestoreAfterResume = void 0;
+  state.latestSessionCtx = void 0;
+  state.resumeModelRegistry = void 0;
+  state.forcedErrorToolCallIds.clear();
+  state.approvedProjectAgentDirsForSession.clear();
+  clearRenderCaches();
+  if (!dropWorkers) return;
+  state.activeSubagentUsageSummaries.clear();
+  state.activeSubagents.clear();
+  state.activeResumeNames.clear();
+  state.latestBroadcastTargets.all = [];
+  state.latestBroadcastTargets.youngest = [];
 }
 
 // index.ts
@@ -12520,7 +12673,7 @@ function index_default(pi) {
     description: "Block delegating to agents already in the current delegation stack (default: true).",
     type: "boolean"
   });
-  const state = createExtensionState(pi);
+  const state = claimReloadHandoff(pi) ?? createExtensionState(pi);
   registerResumeProvider(state);
   registerSessionLifecycle(state);
   registerSessionEvents(state);

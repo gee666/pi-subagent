@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { createFauxCore, fauxAssistantMessage, type Provider, type Model, type Api } from "@earendil-works/pi-ai";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
+import { createEventBus, type EventBus } from "@earendil-works/pi-coding-agent";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -135,7 +136,7 @@ type CapturedTool = {
   execute(id: string, args: unknown, ctx: ExtensionContext): Promise<AgentToolResult<unknown>>;
 };
 
-export function createExtensionHarness(options: { confirmAnswer?: boolean } = {}) {
+export function createExtensionHarness(options: { confirmAnswer?: boolean; events?: EventBus } = {}) {
   const handlers = new Map<EventName, Array<(event: ExtensionEvent, ctx: ExtensionContext) => unknown>>();
   const providers = new Map<string, Provider>();
   const tools = new Map<string, CapturedTool>();
@@ -175,6 +176,7 @@ export function createExtensionHarness(options: { confirmAnswer?: boolean } = {}
   }
 
   const pi = hostDouble<ExtensionAPI>({
+    events: options.events ?? createEventBus(),
     registerFlag() {},
     registerShortcut() {},
     registerCommand(name, command) {

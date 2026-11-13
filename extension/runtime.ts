@@ -39,21 +39,45 @@ export function getParentModelForSubagent(state: ExtensionState, ctx: SessionCon
   );
 }
 
+/** During a reload hand-off no session is bound yet. Queue session work for the adopting instance. */
+export function deferDuringReload(state: ExtensionState, generation: number, run: () => void): boolean {
+  const handoff = state.reloadHandoff;
+  if (state.sessionActive || !handoff || generation !== state.lifecycleGeneration) return false;
+  handoff.queue.push(run);
+  return true;
+}
+
+// Durable tasks deliver worker results. They survive a reload hand-off; other tasks may hold a stale ctx.
+const durableTasks = new WeakSet<object>();
+
 export function scheduleSessionTask(
   state: ExtensionState,
   callback: () => void,
   delayMs: number,
   cancelOnInterrupt = false,
+  durable = false,
 ): void {
   const expectedGeneration = state.lifecycleGeneration;
   const interruptEpoch = state.interruptEpoch ?? 0;
-  const timer = setTimeout(() => {
-    state.scheduledTasks.delete(timer);
+  const run = () => {
     if (!state.sessionActive || expectedGeneration !== state.lifecycleGeneration) return;
     if (cancelOnInterrupt && interruptEpoch !== (state.interruptEpoch ?? 0)) return;
     callback();
+  };
+  const timer = setTimeout(() => {
+    state.scheduledTasks.delete(timer);
+    if (!durable || !deferDuringReload(state, expectedGeneration, run)) run();
   }, delayMs);
+  if (durable) durableTasks.add(timer);
   state.scheduledTasks.add(timer);
+}
+
+export function clearSessionTasks(state: ExtensionState, keepDurable = false): void {
+  for (const timer of state.scheduledTasks) {
+    if (keepDurable && durableTasks.has(timer)) continue;
+    clearTimeout(timer);
+    state.scheduledTasks.delete(timer);
+  }
 }
 
 export function sendAutomaticResumePrompt(state: ExtensionState, prompt: string): void {

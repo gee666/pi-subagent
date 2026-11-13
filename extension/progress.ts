@@ -66,7 +66,8 @@ export function trackProgress(
     if (isSubagentDetails(partial.details)) {
       state.activeSubagentUsageSummaries.set(toolCallId, collectLiveUsageSummary(partial.details));
       updateLatestBroadcastTargets(state, partial.details, topLevelBaseId);
-      refreshUsage(state, ctx);
+      // The tool ctx goes stale on reload while background workers keep reporting.
+      refreshUsage(state, state.latestSessionCtx ?? ctx);
       emitNestedProgressToParent(state, toolCallId, partial.details);
     }
     onUpdate?.(partial);

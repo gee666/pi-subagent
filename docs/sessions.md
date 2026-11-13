@@ -74,7 +74,7 @@ Worker sessions live in `sessions-subagents`, beside Pi's normal `sessions` dire
 - Durable references retain output, usage, model, and tool counts across JSON/session restarts.
 - Nested workers recover in the same way.
 - Provider fallback preserves the selected model's effective provider, authentication, endpoints, headers, and environment.
-- `/resume`, `/new`, `/fork`, and `/reload` discard pending recovery state and callbacks from the previous runtime.
+- `/resume`, `/new`, `/fork`, and `/reload` discard pending recovery state and callbacks from the previous runtime. `/reload` keeps live workers: the old instance parks them on a process-global hand-off, and the reloaded instance adopts them when the same session starts with reason `reload`. A different session, an incompatible hand-off protocol, or no adoption within 60 seconds stops them as on quit. The same applies inside nested workers.
 
 Message acknowledgement is separate from worker completion. Recovery uses durable worker state rather than treating an acknowledged message as completed work. Retrying contact uses the same name without allocating a new worker or charging the same funded increase twice.
 

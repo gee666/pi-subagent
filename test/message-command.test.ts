@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { ExtensionAPI, ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
+import {
+  createEventBus,
+  type ExtensionAPI,
+  type ExtensionCommandContext,
+  type RegisteredCommand,
+} from "@earendil-works/pi-coding-agent";
 import subagentExtension from "../index.js";
 import { decodeNestedBroadcast, updateLatestBroadcastTargets } from "../extension/broadcast.js";
 import { registerMessageSubagentCommand } from "../extension/message-command.js";
@@ -74,6 +79,7 @@ test("/message_subagent is registered by the extension entry point", () => {
       registerFlag() {},
       registerShortcut() {},
       getFlag: () => undefined,
+      events: createEventBus(),
       on: () => () => {},
       registerProvider() {},
       registerTool() {},
