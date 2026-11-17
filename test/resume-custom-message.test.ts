@@ -52,9 +52,10 @@ test("async completions persisted as custom_message entries close their launch s
 test("only the async slot without a custom_message completion remains resumable", () => {
   const plans = findLatestResumableSubagentCalls(persistedSession([1]));
   assert.equal(plans.length, 1);
+  assert.deepEqual(plans[0].tasks, [tasks[0]]);
   assert.deepEqual(
-    plans[0].details?.results.map((result) => result.exitCode),
-    [-1, 0],
+    plans[0].details?.results.map((result) => [result.name, result.exitCode]),
+    [["Ada", -1]],
   );
 });
 

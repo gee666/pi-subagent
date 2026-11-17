@@ -14,10 +14,12 @@ export const KEEP_ON_NEXT_ABORT_EVENT = "pi-subagent:keep-on-next-abort";
 /** Follow Pi's settled abort signal, never raw terminal input. */
 export function registerSubagentInterrupt(state: ExtensionState): void {
   let keepSubagents = false;
-  let startingResumeEpoch: number | undefined;
+  let startingResume: ExtensionState["pendingAutomaticResume"];
+  const resumeCanceled = (pending: NonNullable<ExtensionState["pendingAutomaticResume"]>) =>
+    pending.interruptEpoch !== (state.interruptEpoch ?? 0) || pending.resumeEpoch !== (state.resumeEpoch ?? 0);
   state.onSessionReadyForInterrupt = () => {
     keepSubagents = false;
-    startingResumeEpoch = undefined;
+    startingResume = undefined;
   };
   state.pi.registerShortcut("alt+w", {
     description: "Interrupt only the main agent, leaving subagents running",
@@ -104,32 +106,26 @@ export function registerSubagentInterrupt(state: ExtensionState): void {
   });
   state.pi.on("input", (event) => {
     const pending = state.pendingAutomaticResume;
-    if (
-      pending &&
-      event.source === "extension" &&
-      event.text === pending.prompt &&
-      pending.interruptEpoch !== (state.interruptEpoch ?? 0)
-    ) {
+    if (pending && event.source === "extension" && event.text === pending.prompt && resumeCanceled(pending)) {
       state.pendingAutomaticResume = undefined;
       return { action: "handled" as const };
     }
   });
   state.pi.on("before_agent_start", (event) => {
     const pending = state.pendingAutomaticResume;
-    startingResumeEpoch =
-      event.messageType === "user" && pending && event.prompt === pending.prompt ? pending.interruptEpoch : undefined;
-    if (startingResumeEpoch !== undefined) state.pendingAutomaticResume = undefined;
+    startingResume = event.messageType === "user" && pending && event.prompt === pending.prompt ? pending : undefined;
+    if (startingResume) state.pendingAutomaticResume = undefined;
   });
   state.pi.on("agent_start", (_event, ctx) => {
-    const epoch = startingResumeEpoch;
-    startingResumeEpoch = undefined;
-    // Pi can await prompt preflight after submission. Abort at loop entry if Escape
-    // canceled that automatic prompt while it was outside the active agent loop.
-    if (epoch !== undefined && epoch !== (state.interruptEpoch ?? 0)) ctx.abort();
+    const pending = startingResume;
+    startingResume = undefined;
+    // Pi can await prompt preflight after submission. Abort at loop entry if
+    // an interrupt or tree switch canceled recovery during that preflight.
+    if (pending && resumeCanceled(pending)) ctx.abort();
   });
   state.pi.on("session_shutdown", () => {
     keepSubagents = false;
-    startingResumeEpoch = undefined;
+    startingResume = undefined;
     state.pendingAutomaticResume = undefined;
   });
 }

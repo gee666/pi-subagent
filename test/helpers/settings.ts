@@ -1,18 +1,42 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { SETTING_DEFINITIONS } from "../../settings.js";
 
+function resolved(dir: string): string {
+  try {
+    return fs.realpathSync(dir);
+  } catch {
+    return path.resolve(dir);
+  }
+}
+
+function isWithin(dir: string, parent: string): boolean {
+  const relative = path.relative(resolved(parent), resolved(dir));
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
 export function settingsFixture() {
-  fs.mkdirSync("tmp", { recursive: true });
-  const root = fs.mkdtempSync(path.resolve("tmp/settings-"));
+  // Config discovery walks cwd ancestors, so a root under the real home would pick
+  // up (and save-settings would overwrite) the user's ~/.pi config.
+  const base = os.tmpdir();
+  // The account home, not $HOME, which an unclosed fixture may have replaced.
+  if (isWithin(base, os.userInfo().homedir))
+    throw new Error(`Settings fixtures need a TMPDIR outside your home directory; got ${base}.`);
+  const root = fs.mkdtempSync(path.join(base, "pi-subagent-settings-"));
   const home = path.join(root, "home");
   const agent = path.join(root, "agent");
   const project = path.join(root, "project");
   for (const dir of [home, agent, project]) fs.mkdirSync(dir);
+  // Child scripts written under the root resolve packages by walking up from their own path.
+  // Recursive rm unlinks this link without following it.
+  const packages = path.resolve("node_modules");
+  if (fs.existsSync(packages)) fs.symlinkSync(packages, path.join(root, "node_modules"), "junction");
   const keys = new Set([
     ...SETTING_DEFINITIONS.map(([, , env]) => env),
-    // Legacy-switch regression tests must not leak this env into later tests.
+    // Legacy-switch regression tests must not leak these envs into later tests.
     "DISABLE_RESUMABLE_SUBAGENTS",
+    "PI_SUBAGENT_RESUME_PROMPT",
     "PI-SUBAGENT-DISABLED",
     "PI-SUBAGENT-EXCLUDE-EXTENSIONS",
     "PI_SUBAGENT_DEPTH",

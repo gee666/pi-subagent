@@ -13,7 +13,6 @@ export const SETTING_DEFINITIONS = [
   ["delegation", "depth", "PI_SUBAGENT_MAX_DEPTH", "integer"],
   ["delegation", "preventCycles", "PI_SUBAGENT_PREVENT_CYCLES", "boolean"],
   ["resume", "disableAuto", "PI_SUBAGENT_DISABLE_RESUME", "boolean"],
-  ["resume", "prompt", "PI_SUBAGENT_RESUME_PROMPT", "boolean"],
   ["models", "intelligence", "PI_SUBAGENT_INTELLIGENCE", "boolean"],
   ["models", "fallback", "PI_SUBAGENT_FALLBACK_MODEL", "string"],
   ["runner", "startupTimeoutMs", "PI_SUBAGENT_STARTUP_TIMEOUT", "integer"],

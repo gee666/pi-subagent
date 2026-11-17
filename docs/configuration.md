@@ -57,7 +57,7 @@ For each setting, an explicitly set environment variable wins over JSON, then th
   "agents": { "confirmProject": "ask" },
   "limits": { "total": 50, "tasksPerCall": 20, "concurrency": 8 },
   "delegation": { "depth": 3, "preventCycles": true },
-  "resume": { "disableAuto": false, "prompt": true },
+  "resume": { "disableAuto": false },
   "models": { "intelligence": true },
   "runner": {
     "startupTimeoutMs": 120000,
@@ -77,7 +77,6 @@ For each setting, an explicitly set environment variable wins over JSON, then th
 | `delegation.depth` | `PI_SUBAGENT_MAX_DEPTH` | `3` |
 | `delegation.preventCycles` | `PI_SUBAGENT_PREVENT_CYCLES` | `true` |
 | `resume.disableAuto` | `PI_SUBAGENT_DISABLE_RESUME` | `false` |
-| `resume.prompt` | `PI_SUBAGENT_RESUME_PROMPT` | `true` |
 | `models.intelligence` | `PI_SUBAGENT_INTELLIGENCE` | `true` |
 | `models.fallback` | `PI_SUBAGENT_FALLBACK_MODEL` | No configured fallback |
 | `runner.startupTimeoutMs` | `PI_SUBAGENT_STARTUP_TIMEOUT` | `120000` |
@@ -97,7 +96,7 @@ Only user-configurable extension variables have JSON counterparts. Inherited run
 
 ## Session settings commands
 
-Use `/subagent:settings` to list controls and their current values. Separate `/subagent:enable` and `/subagent:disable` commands avoid an ambiguous toggle. Disabling blocks new launches and resumes without stopping running workers. Whenever delegation is enabled, workers receive durable names and `message_subagent` is available. Automatic recovery and its confirmation prompt have separate controls below.
+Use `/subagent:settings` to list controls and their current values. Separate `/subagent:enable` and `/subagent:disable` commands avoid an ambiguous toggle. Disabling blocks new launches and resumes without stopping running workers. Whenever delegation is enabled, workers receive durable names and `message_subagent` is available. Session-open recovery always requires yes/no confirmation; tree navigation never offers recovery.
 
 | Command | Setting or behavior |
 | --- | --- |
@@ -106,8 +105,7 @@ Use `/subagent:settings` to list controls and their current values. Separate `/s
 | `/subagent:max-concurency 4` | Root-only session override for the shared cap of 4 live workers across the entire tree; extra launches and saved-worker resumes wait in one cross-process FIFO queue |
 | `/subagent:max-depth 2` | Maximum delegation depth |
 | `/subagent:prevent-cycles on` | Block delegation cycles |
-| `/subagent:auto-resume off` | Stop automatic recovery of unfinished tasks when reopening a chat or navigating history |
-| `/subagent:resume-prompt on` | Ask before recovery in the interactive terminal. `off` recovers without asking; it does not disable recovery |
+| `/subagent:auto-resume off` | Disable recovery offers when opening a session |
 | `/subagent:intelligence on` | Use configured worker model presets, such as junior and senior |
 | `/subagent:confirm-project session` | Approval for repository-defined agents. `ask` requests approval, `session` preapproves for the session, `never` skips prompts rather than blocking agents |
 

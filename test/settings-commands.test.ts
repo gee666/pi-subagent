@@ -223,7 +223,6 @@ test("remaining session controls and inspection work while the main agent is bus
       ["max-depth", "2"],
       ["prevent-cycles", "off"],
       ["auto-resume", "on"],
-      ["resume-prompt", "off"],
       ["confirm-project", "session"],
     ]) {
       await s.command(name, value);
@@ -238,7 +237,7 @@ test("remaining session controls and inspection work while the main agent is bus
     assert.deepEqual(saved, {
       limits: { tasksPerCall: 7 },
       delegation: { depth: 2, preventCycles: false },
-      resume: { disableAuto: false, prompt: false },
+      resume: { disableAuto: false },
       agents: { confirmProject: "session" },
     });
     await s.host.emit("session_shutdown", {}, s.ctx);
@@ -276,9 +275,13 @@ test("validation, inspection and child restrictions leave settings untouched", a
     assert.match(s.notifications.at(-1)!, /subagent:max-total/);
     assert.doesNotMatch(s.notifications.at(-1)!, /fallback-model|subagent:resume(?:\s|$)/);
     assert.match(s.notifications.at(-1)!, /subagent:auto-resume/);
-    assert.match(s.notifications.at(-1)!, /subagent:resume-prompt/);
-    await s.command("resume-prompt");
-    assert.match(s.notifications.at(-1)!, /off continues without asking, not without recovery/);
+    assert.doesNotMatch(s.notifications.at(-1)!, /resume-prompt/);
+    // Recovery always asks, so the old switch to skip the question is gone.
+    assert.equal(s.host.commands.has("subagent:resume-prompt"), false);
+    await s.command("auto-resume");
+    assert.doesNotMatch(s.notifications.at(-1)!, /resume-prompt|without asking/);
+    const resumeCompletions = await s.host.commands.get("subagent:auto-resume")!.getArgumentCompletions!("");
+    assert.doesNotMatch(JSON.stringify(resumeCompletions), /resume-prompt|without asking/);
     await s.command("confirm-project");
     assert.match(s.notifications.at(-1)!, /it does not block them/);
     const completions = await s.host.commands.get("subagent:confirm-project")!.getArgumentCompletions!("never");

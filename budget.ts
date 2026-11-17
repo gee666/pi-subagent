@@ -229,6 +229,15 @@ export function overrideResumeBudgets(
   }
 }
 
+/** The grants an earlier tool call reserved, in task order, without changing the ledger. */
+export function reservedSubagentBudgets(budget: SubagentBudget, callId: string): Reservation | undefined {
+  return latestState(budget).state.reservations[reservationKey(callId)];
+}
+
+function reservationKey(callId: string): string {
+  return createHash("sha256").update(callId).digest("hex");
+}
+
 /** Reserve the whole batch before any child starts. Failed requests change nothing. */
 export function reserveSubagentBudgets(
   budget: SubagentBudget,
@@ -248,7 +257,7 @@ export function reserveSubagentBudgets(
       throw new SubagentBudgetError("Requested subagent budget is too large. Reduce the child allowances.");
   }
   if (!tasks.length) return [];
-  const key = createHash("sha256").update(callId).digest("hex");
+  const key = reservationKey(callId);
   // A successful commit consumes at least one slot, so competing writers
   // cannot keep retrying forever within a finite allowance.
   for (;;) {

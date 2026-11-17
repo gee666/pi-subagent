@@ -227,7 +227,7 @@ export function registerSessionLifecycle(state: ExtensionState): void {
       const resumeDisabled = parseBooleanEnv(configuredEnv(SUBAGENT_RESUME_DISABLE_ENV, state.settings)) === true;
       if (!state.canDelegate || resumeDisabled || (event.reason !== "resume" && event.reason !== "startup")) return;
 
-      await maybeOfferSubagentResume(state, ctx, { deferInteractivePrompt: true });
+      await maybeOfferSubagentResume(state, ctx);
     } catch (err) {
       console.error("[pi-subagent] Error in session_start:", err);
       await restoreModelAfterResumeFailure(state, ctx);

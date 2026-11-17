@@ -58,14 +58,12 @@ test(
     f.write(f.agent, {
       runner: { command: process.execPath, argsPrefix: [script] },
       limits: { concurrency: 1 },
-      resume: { prompt: false },
     });
     const budget = createBudget(path.join(f.root, "root-budget"), 10);
     const entries: SessionEntry[] = [customEntry(SUBAGENT_BUDGET_CUSTOM_TYPE, budget)];
     const context = (host: ReturnType<typeof createExtensionHarness>, id: string) =>
       host.makeCtx(entries, {
         cwd: f.project,
-        hasUI: false,
         isProjectTrusted: () => true,
         sessionManager: hostDouble<ExtensionContext["sessionManager"]>({
           getEntries: () => entries,
@@ -136,14 +134,16 @@ test(
       });
       reopenedCtx = context(reopened, "reopened-root");
       await reopened.emit("session_start", { reason: "resume" }, reopenedCtx);
-      assert.equal(reopened.calls.confirms, 0);
+      assert.equal(reopened.calls.confirms, 1, "recovery always asks first");
       assert.ok(reopened.calls.setModel.some((value) => value.provider === RESUME_PROVIDER));
       const response = await reopened
         .provider(RESUME_PROVIDER)
         .streamSimple(
           model(RESUME_PROVIDER, RESUME_MODEL_ID, "openai-responses"),
           normalizeContext({
-            messages: [{ role: "user", content: [{ type: "text", text: "continue" }], timestamp: Date.now() }],
+            messages: [
+              { role: "user", content: [{ type: "text", text: "Resuming 1 subagents..." }], timestamp: Date.now() },
+            ],
           }),
           {},
         )

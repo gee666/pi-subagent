@@ -1,20 +1,22 @@
-import { configuredEnv } from "../settings.js";
-import { findLatestResumableSubagentCalls, parseBooleanEnv, SUBAGENT_RESUME_PROMPT_ENV } from "../resume.js";
+import { findLatestResumableSubagentCalls, recoveryWorkerLabels } from "../resume.js";
 import { RESUME_MODEL_ID, RESUME_PROVIDER } from "../shared.js";
 import type { SessionContext } from "./contracts.js";
-import { getRestorableModel, RESUME_INTERACTIVE_DELAY_MS, SUBAGENT_FALLBACK_MODEL_ENV } from "./models.js";
+import { getRestorableModel, SUBAGENT_FALLBACK_MODEL_ENV } from "./models.js";
 import { ensureSubagentToolActive, hasCliInitialPrompt, isRpcMode } from "./policy.js";
-import { restoreModelAfterResumeFailure, scheduleSessionTask, sendAutomaticResumePrompt } from "./runtime.js";
+import { restoreModelAfterResumeFailure } from "./runtime.js";
 import type { ExtensionState } from "./state.js";
 
-export async function maybeOfferSubagentResume(
-  state: ExtensionState,
-  ctx: SessionContext,
-  opts: { deferInteractivePrompt: boolean },
-): Promise<void> {
+export async function maybeOfferSubagentResume(state: ExtensionState, ctx: SessionContext): Promise<void> {
+  // Recovery requires an explicit yes. Print/JSON modes and parent-owned
+  // RPC workers have no human dialog responder. Top-level RPC clients can ask.
+  if (!ctx.hasUI || state.currentDepth > 0) return;
   const generation = state.lifecycleGeneration;
   const interruptEpoch = state.interruptEpoch ?? 0;
-  const canceled = () => generation !== state.lifecycleGeneration || interruptEpoch !== (state.interruptEpoch ?? 0);
+  const resumeEpoch = state.resumeEpoch ?? 0;
+  const canceled = () =>
+    generation !== state.lifecycleGeneration ||
+    interruptEpoch !== (state.interruptEpoch ?? 0) ||
+    resumeEpoch !== (state.resumeEpoch ?? 0);
   const restorableModel = getRestorableModel(ctx, state.settings);
   if (restorableModel) {
     state.lastRestorableModel = restorableModel;
@@ -25,17 +27,16 @@ export async function maybeOfferSubagentResume(
   if (plans.length === 0) return;
   const totalTaskCount = plans.reduce((sum, plan) => sum + plan.tasks.length, 0);
 
-  let shouldResume = true;
-  const shouldPrompt = parseBooleanEnv(configuredEnv(SUBAGENT_RESUME_PROMPT_ENV, state.settings)) !== false;
-  const rpcMode = isRpcMode(process.argv);
-  if (ctx.hasUI && !rpcMode && shouldPrompt) {
-    shouldResume = await ctx.ui.confirm(
-      "Resume subagents?",
-      `The resumed session has ${plans.length === 1 ? "an" : String(plans.length)} unfinished subagent call${plans.length === 1 ? "" : "s"} (${totalTaskCount} task${totalTaskCount === 1 ? "" : "s"}). Resume from saved subagent sessions?`,
-    );
-  }
+  const shouldResume = await ctx.ui.confirm(
+    "Resume subagents?",
+    `Resume ${totalTaskCount} interrupted subagent${totalTaskCount === 1 ? "" : "s"} from saved sessions?\n\n${recoveryWorkerLabels(
+      plans,
+    )
+      .map((label) => `- ${label}`)
+      .join("\n")}`,
+  );
   if (canceled()) return;
-  if (!shouldResume) {
+  if (shouldResume !== true) {
     if (ctx.model?.provider === RESUME_PROVIDER) {
       if (restorableModel) {
         await state.pi.setModel(restorableModel);
@@ -60,12 +61,9 @@ export async function maybeOfferSubagentResume(
   state.pendingResumePlans = [...plans];
   state.resumeState.plans = [...plans];
   state.resumeState.phase = "tool";
-  // Headless subprocess/RPC subagents cannot answer a visible resume
-  // prompt. They already receive an initial RPC prompt from the parent
-  // runner, so inject the synthetic resume tool call into that next model
-  // request. Interactive top-level sessions keep using a visible prompt so
-  // the user sees exactly what is happening.
-  const injectOnNextRequest = rpcMode || hasCliInitialPrompt(process.argv) || !ctx.hasUI;
+  // After approval, RPC/CLI prompts use the next request rather than
+  // inserting an extra user message ahead of their initial prompt.
+  const injectOnNextRequest = isRpcMode(process.argv) || hasCliInitialPrompt(process.argv);
   state.resumeState.trigger = injectOnNextRequest ? "nextRequest" : "resumePrompt";
   state.modelToRestoreAfterResume = restorableModel ?? ctx.model;
   state.resumeModelRegistry = ctx.modelRegistry;
@@ -82,32 +80,16 @@ export async function maybeOfferSubagentResume(
     return;
   }
 
-  // In print/json subprocesses there is already an initial CLI prompt about
-  // to be sent. That prompt will be answered by the synthetic provider with
-  // a real assistant subagent tool call. In interactive mode, submit a short
-  // visible prompt that triggers the same synthetic provider path.
+  // An initial CLI/RPC prompt triggers the approved tool call on its next
+  // request. Otherwise queue a visible prompt after the initial chat render.
   if (injectOnNextRequest) {
-    if (ctx.hasUI) ctx.ui.notify(`Resuming ${totalTaskCount} subagents...`, "info");
-  } else if (opts.deferInteractivePrompt) {
+    ctx.ui.notify(`Resuming ${totalTaskCount} subagents...`, "info");
+  } else {
     // Do not start the synthetic resume turn from session_start. Pi renders
     // the resumed chat only after session_start/resources_discover complete;
     // starting now lets that render wipe out the live tool component, so no
     // real-time updates appear. Queue it for resources_discover instead,
     // which is the last extension hook before the initial chat render.
     state.pendingInteractiveResumePrompt = `Resuming ${totalTaskCount} subagents...`;
-  } else {
-    scheduleSessionTask(
-      state,
-      () => {
-        try {
-          sendAutomaticResumePrompt(state, `Resuming ${totalTaskCount} subagents...`);
-        } catch (err) {
-          console.error("[pi-subagent] Failed to start resume turn after tree navigation:", err);
-          void restoreModelAfterResumeFailure(state, ctx);
-        }
-      },
-      RESUME_INTERACTIVE_DELAY_MS,
-      true,
-    );
   }
 }

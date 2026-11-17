@@ -127,6 +127,7 @@ test("saved explicit choice recovers through the provider and tool with sole, ze
         getBranch: () => entries,
         getLeafId: () => entries.at(-1)?.id ?? null,
         getSessionId: () => "root",
+        getSessionFile: () => undefined,
         getSessionDir: () => path.join(root, "sessions"),
         getHeader: () => null,
       }),
@@ -158,7 +159,7 @@ test("saved explicit choice recovers through the provider and tool with sole, ze
           content: [{ type: "text", text: "interrupted" }],
           details: serializedDetails({
             ...launched.details,
-            results: [{ ...saved, exitCode: 130, stopReason: "aborted" }],
+            results: [{ ...saved, exitCode: -1, stopReason: undefined, errorMessage: undefined }],
           }),
           isError: true,
           timestamp: Date.now(),
@@ -182,6 +183,10 @@ test("saved explicit choice recovers through the provider and tool with sole, ze
       try {
         await host.emit("session_start", {}, ctx);
         await assert.rejects(host.callAndWait("subagents", "ordinary", { tasks: [savedTask] }, ctx));
+        ctx.hasUI = true;
+        process.env.PI_SUBAGENT_DISABLE_RESUME = "false";
+        await host.emit("session_start", { reason: "resume" }, ctx);
+        assert.equal(host.calls.confirms, 1);
         const stream = host.provider(RESUME_PROVIDER).streamSimple(
           model(RESUME_PROVIDER, RESUME_MODEL_ID, "openai-responses"),
           normalizeContext({

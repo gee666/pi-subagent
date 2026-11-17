@@ -2,13 +2,15 @@ import * as path from "node:path";
 import { DEFAULT_AGENT } from "./agents.js";
 import { excludeStoppedWorkers } from "./storage/stopped-workers.js";
 import { getAgentDir, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { parseBoolean, RESUME_PROVIDER } from "./shared.js";
+import { parseBoolean } from "./shared.js";
 import { isBudgetAmount } from "./budget.js";
 import { isRecord, sanitizePathComponent } from "./storage/values.js";
-import { sessionEntryMessages } from "./storage/session-entries.js";
+import { hasOnlyIgnorableTrailingEntries } from "./resume-tail.js";
+import { findPendingAsyncPlans, type AsyncLaunch } from "./resume-slots.js";
+import { formatSubagentLabel } from "./ui/agent-label.js";
 import {
   asyncJobId,
-  getNestedSubagentResults,
+  emptyUsage,
   isResultError,
   isSubagentDetails,
   isSubagentLaunchToolName,
@@ -16,7 +18,6 @@ import {
   type SubagentDetails,
 } from "./types.js";
 
-export const SUBAGENT_RESUME_PROMPT_ENV = "PI_SUBAGENT_RESUME_PROMPT";
 export const SUBAGENT_RESUME_DISABLE_ENV = "PI_SUBAGENT_DISABLE_RESUME";
 export const SUBAGENT_SESSION_ROOT_ENV = "PI_SUBAGENT_SESSION_ROOT";
 type SessionEntry = ReturnType<ExtensionContext["sessionManager"]["getEntries"]>[number];
@@ -40,7 +41,10 @@ export function getTaskBranchSize(task: ResumableTask): number | undefined {
 
 export interface ResumableSubagentCall {
   previousToolCallId: string;
+  /** Only the interrupted tasks of the launch, aligned with `details.results`. */
   tasks: ResumableTask[];
+  /** Launch index of each task, which keys its default session directory. Omitted when identical. */
+  taskIndexes?: number[];
   details?: SubagentDetails;
 }
 
@@ -130,111 +134,78 @@ function normalizeTasks(args: unknown): ResumableTask[] | null {
   return tasks;
 }
 
-function hasUnfinishedResults(details: SubagentDetails | undefined, expectedTaskCount: number): boolean {
-  if (!details) return true;
-  if (details.results.length < expectedTaskCount) return true;
-  return details.results.slice(0, expectedTaskCount).some((result) => result.exitCode === -1 || isResultError(result));
-}
+/** What a synchronous launch's tool result proves about its workers. */
+type LegacyOutcome = SubagentDetails | "interrupted" | "rejected";
 
-function getMessageText(message: unknown): string {
-  const content = isRecord(message) ? message.content : undefined;
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((part) => (isRecord(part) && part.type === "text" && typeof part.text === "string" ? part.text : ""))
-    .join("");
-}
-
-function messageHasNonEmptyText(message: unknown): boolean {
-  return getMessageText(message).trim().length > 0;
-}
-
-function messageHasToolCall(message: unknown): boolean {
+// Pi closes a tool call it aborted with exactly this error result.
+function isPiAbortedToolResult(message: { isError?: unknown; content?: unknown }): boolean {
+  const content = message.content;
   return (
-    isRecord(message) &&
-    Array.isArray(message.content) &&
-    message.content.some((part) => isRecord(part) && part.type === "toolCall")
+    message.isError === true &&
+    Array.isArray(content) &&
+    content.length === 1 &&
+    isRecord(content[0]) &&
+    content[0].text === "Operation aborted"
   );
 }
 
-function isIgnorableTrailingAbortMessage(entry: unknown): boolean {
-  if (!isRecord(entry) || entry.type !== "message") return true;
-  const message = entry.message;
-  if (!isRecord(message)) return true;
-
-  // Pi may append a final aborted/error assistant message after it has already
-  // closed an interrupted tool with a synthetic toolResult. That message is not
-  // user-visible progress after the subagent activity, so it must not prevent
-  // resume detection.
-  if (
-    message.role === "assistant" &&
-    (message.stopReason === "aborted" || message.stopReason === "error") &&
-    !messageHasNonEmptyText(message) &&
-    !messageHasToolCall(message)
-  ) {
-    return true;
-  }
-
-  return false;
+/**
+ * Task indexes of a synchronous launch that were interrupted rather than
+ * settled. A missing tool result or Pi's abort result means every task was cut
+ * off; otherwise only missing and aborted runs were. Failures are final, and a
+ * result without workers means the launch itself was rejected.
+ */
+function interruptedLegacyIndexes(outcome: LegacyOutcome | undefined, taskCount: number): number[] {
+  const indexes = Array.from({ length: taskCount }, (_task, index) => index);
+  if (outcome === undefined || outcome === "interrupted") return indexes;
+  if (outcome === "rejected" || outcome.results.length === 0) return [];
+  return indexes.filter((index) => {
+    const result = outcome.results[index];
+    return !result || result.exitCode === -1 || result.stopReason === "aborted";
+  });
 }
 
-function isResumePromptEntry(entry: unknown): boolean {
-  if (!isRecord(entry) || entry.type !== "message") return false;
-  const message = entry.message;
-  if (!isRecord(message) || message.role !== "user") return false;
-  return /^Resuming \d+ subagents\.\.\.$/.test(getMessageText(message).trim());
+/** A never-started task, so recovered results stay aligned with recovered tasks. */
+function unstartedResult(task: ResumableTask): SingleResult {
+  return {
+    agent: task.agent,
+    agentSource: "unknown",
+    task: task.task,
+    exitCode: -1,
+    messages: [],
+    stderr: "",
+    usage: emptyUsage(),
+    toolCalls: {},
+    completedTurns: 0,
+    turnInProgress: false,
+    liveLog: [],
+  };
 }
 
-function isSyntheticResumeModelChange(entry: unknown): boolean {
-  return isRecord(entry) && entry.type === "model_change" && entry.provider === RESUME_PROVIDER;
+function legacyPlan(
+  previousToolCallId: string,
+  tasks: ResumableTask[],
+  outcome: LegacyOutcome | undefined,
+  pending: number[],
+): ResumableSubagentCall {
+  const details = typeof outcome === "object" ? outcome : undefined;
+  return {
+    previousToolCallId,
+    tasks: pending.map((index) => tasks[index]),
+    taskIndexes: pending,
+    details: details && {
+      ...details,
+      results: pending.map((index) => details.results[index] ?? unstartedResult(tasks[index])),
+    },
+  };
 }
 
-function isFailedResumeAttemptTail(entries: SessionEntry[], start: number): boolean {
-  if (start >= entries.length) return true;
-
-  let sawSyntheticModel = false;
-  let sawResumePrompt = false;
-  let sawFailure = false;
-
-  for (let i = start; i < entries.length; i++) {
-    const entry = entries[i];
-
-    if (isSyntheticResumeModelChange(entry)) {
-      sawSyntheticModel = true;
-      continue;
-    }
-
-    if (entry?.type === "thinking_level_change") continue;
-
-    if (isResumePromptEntry(entry)) {
-      if (!sawSyntheticModel) return false;
-      sawResumePrompt = true;
-      continue;
-    }
-
-    if (isIgnorableTrailingAbortMessage(entry)) {
-      if (entry?.type === "message" && sawResumePrompt) sawFailure = true;
-      continue;
-    }
-
-    return false;
-  }
-
-  return sawSyntheticModel && sawResumePrompt && sawFailure;
-}
-
-function hasOnlyIgnorableTrailingEntries(entries: SessionEntry[], activityOrder: number): boolean {
-  const start = activityOrder + 1;
-  for (let i = start; i < entries.length; i++) {
-    if (!isIgnorableTrailingAbortMessage(entries[i])) return isFailedResumeAttemptTail(entries, start);
-  }
-  return true;
-}
-
+/** Workers interrupted when the session ended, grouped by their original launch call. */
 export function findLatestResumableSubagentCalls(ctx: ExtensionContext): ResumableSubagentCall[] {
   const entries = branchEntries(ctx);
   const calls = new Map<string, { tasks: ResumableTask[]; order: number }>();
-  const results = new Map<string, { details?: SubagentDetails; isError: boolean; order: number }>();
+  const results = new Map<string, { outcome: LegacyOutcome; order: number }>();
+  const launches: AsyncLaunch[] = [];
 
   entries.forEach((entry, order) => {
     if (entry?.type !== "message") return;
@@ -243,67 +214,34 @@ export function findLatestResumableSubagentCalls(ctx: ExtensionContext): Resumab
       const tasks = normalizeTasks(call.args);
       if (tasks) calls.set(call.id, { tasks, order });
     }
-    if (msg?.role === "toolResult" && isSubagentLaunchToolName(msg.toolName) && typeof msg.toolCallId === "string") {
+    if (msg?.role !== "toolResult" || !isSubagentLaunchToolName(msg.toolName) || typeof msg.toolCallId !== "string")
+      return;
+    const details = isSubagentDetails(msg.details) ? msg.details : undefined;
+    const tasks = calls.get(msg.toolCallId)?.tasks;
+    if (details && asyncJobId(details) && tasks) launches.push({ toolCallId: msg.toolCallId, tasks, details, order });
+    else
       results.set(msg.toolCallId, {
-        details: isSubagentDetails(msg.details) ? msg.details : undefined,
-        isError: msg.isError === true,
+        outcome: details ?? (isPiAbortedToolResult(msg) ? "interrupted" : "rejected"),
         order,
       });
-    }
   });
 
-  // Completion messages may arrive long after the launch tool returned. Merge
-  // by launch ID and task index rather than treating them as unrelated progress.
-  for (const nested of getNestedSubagentResults(sessionEntryMessages(entries))) {
-    const recorded = results.get(nested.toolCallId);
-    if (recorded && asyncJobId(nested.details)) {
-      results.set(nested.toolCallId, { ...recorded, details: nested.details, isError: nested.isError });
-    }
+  const asyncLaunchIds = new Set(launches.map((launch) => launch.toolCallId));
+  const candidates: Array<{ id: string; pending: number[]; callOrder: number; activityOrder: number }> = [];
+  for (const [id, call] of calls) {
+    if (asyncLaunchIds.has(id)) continue;
+    const result = results.get(id);
+    const pending = interruptedLegacyIndexes(result?.outcome, call.tasks.length);
+    if (pending.length > 0)
+      candidates.push({ id, pending, callOrder: call.order, activityOrder: result?.order ?? call.order });
   }
-
-  const asyncCalls: ResumableSubagentCall[] = [];
-  const candidates: Array<ResumableSubagentCall & { callOrder: number; activityOrder: number }> = [];
-  for (const [toolCallId, call] of calls) {
-    const result = results.get(toolCallId);
-    const unfinished = !result || result.isError || hasUnfinishedResults(result.details, call.tasks.length);
-    if (!unfinished) continue;
-    if (result?.details && asyncJobId(result.details)) {
-      asyncCalls.push({ previousToolCallId: toolCallId, tasks: call.tasks, details: result.details });
-      continue;
-    }
-    candidates.push({
-      previousToolCallId: toolCallId,
-      tasks: call.tasks,
-      details: result?.details,
-      callOrder: call.order,
-      activityOrder: result?.order ?? call.order,
-    });
-  }
-
-  const pendingAsyncCalls = asyncCalls.filter(
-    (call, index) =>
-      !asyncCalls
-        .slice(index + 1)
-        .some(
-          (later) =>
-            sameTasks(call.tasks, later.tasks) &&
-            call.details?.results.length === later.details?.results.length &&
-            call.details?.results.every(
-              (result, taskIndex) =>
-                result.sessionDir && result.sessionDir === later.details?.results[taskIndex]?.sessionDir,
-            ),
-        ),
-  );
+  const asyncPlans = findPendingAsyncPlans(entries, launches);
   const latest = candidates.sort((a, b) => a.activityOrder - b.activityOrder).at(-1);
-  if (!latest) return excludeStoppedWorkers(pendingAsyncCalls, entries, calls);
+  if (!latest) return excludeStoppedWorkers(asyncPlans, entries, calls);
 
-  // If one assistant message issued several subagent tool calls, Pi records
-  // separate tool results for them. Resuming only the last one leaves sibling
-  // subagents permanently abandoned. Resume every unfinished call from that
-  // same assistant message as one synthetic assistant turn.
-  const batch = candidates
-    .filter((candidate) => candidate.callOrder === latest.callOrder)
-    .sort((a, b) => a.activityOrder - b.activityOrder);
+  // One assistant message may issue several synchronous launch calls. Recover
+  // every interrupted sibling together, or the others are abandoned.
+  const batch = candidates.filter((candidate) => candidate.callOrder === latest.callOrder);
   const siblingResultOrders = Array.from(calls.entries())
     .filter(([, call]) => call.order === latest.callOrder)
     .map(([toolCallId]) => results.get(toolCallId)?.order)
@@ -313,19 +251,19 @@ export function findLatestResumableSubagentCalls(ctx: ExtensionContext): Resumab
     ...batch.map((candidate) => candidate.activityOrder),
     ...siblingResultOrders,
   );
-  if (!hasOnlyIgnorableTrailingEntries(entries, latestBatchActivity)) return pendingAsyncCalls;
+  if (!hasOnlyIgnorableTrailingEntries(entries, latestBatchActivity))
+    return excludeStoppedWorkers(asyncPlans, entries, calls);
 
-  return excludeStoppedWorkers(
-    [
-      ...pendingAsyncCalls,
-      ...batch.map(({ previousToolCallId, tasks, details }) => ({
-        previousToolCallId,
-        tasks,
-        details,
-      })),
-    ],
-    entries,
-    calls,
+  const legacyPlans = batch.map(({ id, pending }) =>
+    legacyPlan(id, calls.get(id)?.tasks ?? [], results.get(id)?.outcome, pending),
+  );
+  return excludeStoppedWorkers([...asyncPlans, ...legacyPlans], entries, calls);
+}
+
+/** Display labels of every worker a recovery would restart, in plan order. */
+export function recoveryWorkerLabels(plans: ResumableSubagentCall[]): string[] {
+  return plans.flatMap((plan) =>
+    plan.tasks.map((task, index) => formatSubagentLabel(plan.details?.results[index] ?? task)),
   );
 }
 

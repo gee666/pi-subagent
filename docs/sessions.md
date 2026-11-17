@@ -67,12 +67,12 @@ Relative `--skill`, `--prompt-template`, and theme file/directory arguments keep
 
 ## Crash recovery
 
-Worker sessions live in `sessions-subagents`, beside Pi's normal `sessions` directory. Async recovery tracks outstanding workers durably on the active branch, even though their launch calls already returned `started`. On parent resume or session-tree navigation, recovery checks that work rather than waiting for an unfinished blocking tool call.
+Worker sessions live in `sessions-subagents`, beside Pi's normal `sessions` directory. Async recovery tracks outstanding workers durably on the active branch, even though their launch calls already returned `started`. Opening a saved parent session checks that work rather than waiting for an unfinished blocking tool call. Navigating the session tree never offers or starts recovery and cancels any pending startup recovery.
 
-- Interactive mode asks whether to resume. Non-UI modes resume automatically.
-- Finished siblings reuse their saved output and statistics without rerunning. Unfinished siblings continue their own sessions. Completion steering wakes a live idle lead; parked parents resume through the root broker.
+- Recovery always asks yes or no, including through RPC clients. Only an explicit yes resumes work. Print/JSON modes cannot ask and leave saved workers untouched.
+- The question lists only interrupted workers, not completed siblings or workers with recorded failed/stopped completions. Recovery keeps each worker's original name, session directory, and reserved budget. Completion steering wakes a live idle lead; parked parents resume through the root broker.
 - Durable references retain output, usage, model, and tool counts across JSON/session restarts.
-- Nested workers recover in the same way.
+- Parked nested workers reattach to broker-owned children without relaunching them.
 - Provider fallback preserves the selected model's effective provider, authentication, endpoints, headers, and environment.
 - `/resume`, `/new`, `/fork`, and `/reload` discard pending recovery state and callbacks from the previous runtime. `/reload` keeps live workers: the old instance parks them on a process-global hand-off, and the reloaded instance adopts them when the same session starts with reason `reload`. A different session, an incompatible hand-off protocol, or no adoption within 60 seconds stops them as on quit. The same applies inside nested workers.
 
@@ -80,9 +80,8 @@ Message acknowledgement is separate from worker completion. Recovery uses durabl
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `PI_SUBAGENT_RESUME_PROMPT` | `true` | `false` skips the interactive question and resumes automatically |
 | `PI_SUBAGENT_DISABLE_RESUME` | `false` | `true` disables automatic crash recovery |
 | `PI_SUBAGENT_NAMES_FILE` | Internal | Shared registry path, propagated to children |
 | `PI_SUBAGENT_BUDGET_DIR` | Internal | Reserved branch ledger, propagated and saved in session metadata |
 
-The recovery controls also have JSON settings: `resume.prompt` and `resume.disableAuto`, respectively. Neither disables worker names or `message_subagent`. Use `/subagent:auto-resume` and `/subagent:resume-prompt` to change recovery behavior for the current session. See [settings files](configuration.md#settings-files). Internal storage paths are managed by the extension and have no JSON counterpart.
+`resume.disableAuto` is the JSON recovery switch; `/subagent:auto-resume` controls offers for the current session. It does not disable worker names or `message_subagent`. The former `resume.prompt`, `PI_SUBAGENT_RESUME_PROMPT`, and `/subagent:resume-prompt` bypass controls are no longer supported: confirmation cannot be disabled. See [settings files](configuration.md#settings-files). Internal storage paths are managed by the extension and have no JSON counterpart.

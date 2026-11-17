@@ -61,8 +61,9 @@ describe("synthetic resume provider streamSimple", () => {
 
   test("injects the resumed subagent tool call as a faux assistant turn", async () => {
     const h = setup();
-    // Point the provider at a branch with an unfinished subagent call.
-    await h.emit("message_end", { type: "message_end" }, h.makeCtx(unfinishedBranch()));
+    // Only confirmed session-open recovery may arm the provider.
+    await h.emit("session_start", { reason: "resume" }, h.makeCtx(unfinishedBranch()));
+    assert.equal(h.calls.confirms, 1);
 
     const stream = await h.config.streamSimple(resumeModel, userPrompt("Resuming 2 subagents..."), {});
     const events = await drain(stream);
@@ -81,6 +82,29 @@ describe("synthetic resume provider streamSimple", () => {
     assert.equal(done.reason, "toolUse");
     assert.equal(done.message.provider, RESUME_PROVIDER);
     assert.equal(done.message.model, RESUME_MODEL_ID);
+  });
+
+  test("cannot rediscover unapproved work from a matching resume prompt", async () => {
+    const h = setup();
+    await h.emit("message_end", {}, h.makeCtx(unfinishedBranch()));
+    const events = await drain(h.config.streamSimple(resumeModel, userPrompt("Resuming 2 subagents..."), {}));
+    assert.ok(events.some((event) => event.type === "error"));
+    assert.ok(!events.some((event) => event.type === "toolcall_end"));
+    assert.equal(h.calls.confirms, 0);
+    assert.deepEqual(h.calls.setModel, []);
+  });
+
+  test("declining recovery cannot be bypassed by selecting the synthetic model", async () => {
+    const h = createExtensionHarness({ confirmAnswer: false });
+    const ctx = h.makeCtx(unfinishedBranch());
+    await h.emit("session_start", { reason: "resume" }, ctx);
+    const events = await drain(
+      h.provider(RESUME_PROVIDER).streamSimple(resumeModel, userPrompt("Resuming 2 subagents..."), {}),
+    );
+    assert.equal(h.calls.confirms, 1);
+    assert.ok(!events.some((event) => event.type === "toolcall_end"));
+    assert.deepEqual(h.calls.setModel, []);
+    assert.deepEqual(h.calls.sentUserMessages, []);
   });
 
   test("emits an error turn when there is no plan and no fallback model", async () => {

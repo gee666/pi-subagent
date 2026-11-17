@@ -8,6 +8,7 @@ import { createBudget, readBudget, SUBAGENT_BUDGET_CUSTOM_TYPE } from "../budget
 import { resolveDelegationDepthConfig, getProjectAgentConfirmationSetting } from "../extension/policy.js";
 import { readSettings } from "../settings.js";
 import { getEnvFallbackModel } from "../extension/models.js";
+import { RESUME_PROVIDER } from "../shared.js";
 import { createExtensionHarness, customEntry, hostDouble, resumeBranch } from "./helpers/extension.js";
 import { settingsFixture } from "./helpers/settings.js";
 
@@ -156,10 +157,10 @@ test("JSON cannot loosen child depth/cycle grants or replace a child's zero bran
   }
 });
 
-test("resume prompt and automatic-resume switches apply to lifecycle handlers with env priority", async () => {
+test("auto-resume switch applies to lifecycle handlers with env priority", async () => {
   const f = settingsFixture();
   try {
-    f.write(f.agent, { resume: { disableAuto: true, prompt: false } });
+    f.write(f.agent, { resume: { disableAuto: true } });
     const host = createExtensionHarness();
     const ctx = host.makeCtx(resumeBranch(), { cwd: f.project });
     await host.emit("session_start", { reason: "resume" }, ctx);
@@ -167,18 +168,45 @@ test("resume prompt and automatic-resume switches apply to lifecycle handlers wi
     assert.equal(host.calls.confirms, 0);
     assert.equal(host.calls.setModel.length, 0);
     process.env.PI_SUBAGENT_DISABLE_RESUME = "false";
-    process.env.PI_SUBAGENT_RESUME_PROMPT = "true";
     await host.emit("session_start", { reason: "resume" }, ctx);
     assert.equal(host.calls.confirms, 1);
     await host.emit("session_shutdown", {}, ctx);
-    delete process.env.PI_SUBAGENT_RESUME_PROMPT;
-    const automatic = createExtensionHarness();
-    const automaticCtx = automatic.makeCtx(resumeBranch(), { cwd: f.project });
-    await automatic.emit("session_start", { reason: "resume" }, automaticCtx);
-    assert.equal(automatic.calls.confirms, 0);
-    assert.ok(automatic.calls.setModel.length);
-    await automatic.emit("session_shutdown", {}, automaticCtx);
   } finally {
+    f.close();
+  }
+});
+
+test("legacy resume-prompt env and JSON cannot skip the recovery confirmation", async () => {
+  const f = settingsFixture();
+  // The fixture no longer tracks this removed setting, so restore it here.
+  const previous = process.env.PI_SUBAGENT_RESUME_PROMPT;
+  try {
+    for (const source of ["env", "json"] as const) {
+      if (source === "env") process.env.PI_SUBAGENT_RESUME_PROMPT = "false";
+      else delete process.env.PI_SUBAGENT_RESUME_PROMPT;
+      f.write(f.agent, { resume: { disableAuto: false, ...(source === "json" ? { prompt: false } : {}) } });
+      for (const accept of [true, false]) {
+        const host = createExtensionHarness({ confirmAnswer: accept });
+        const ctx = host.makeCtx(resumeBranch(), { cwd: f.project });
+        await host.emit("session_start", { reason: "resume" }, ctx);
+        assert.equal(host.calls.confirms, 1, `${source} prompt=false must still ask`);
+        assert.equal(
+          host.calls.setModel.some((value) => value.provider === RESUME_PROVIDER),
+          accept,
+          `${source}: only an accepted confirmation resumes`,
+        );
+        await host.emit("session_shutdown", {}, ctx);
+
+        const headless = createExtensionHarness();
+        const headlessCtx = headless.makeCtx(resumeBranch(), { cwd: f.project, hasUI: false });
+        await headless.emit("session_start", { reason: "resume" }, headlessCtx);
+        assert.equal(headless.calls.setModel.length, 0, `${source}: no UI skips recovery instead of resuming`);
+        await headless.emit("session_shutdown", {}, headlessCtx);
+      }
+    }
+  } finally {
+    if (previous === undefined) delete process.env.PI_SUBAGENT_RESUME_PROMPT;
+    else process.env.PI_SUBAGENT_RESUME_PROMPT = previous;
     f.close();
   }
 });

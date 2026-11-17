@@ -1,12 +1,8 @@
 import { refreshWorkerAllowance } from "./tool-registration.js";
 import { registerAsyncDeliveryEvents } from "./async-jobs.js";
-import { configuredEnv } from "../settings.js";
-import { SUBAGENT_RESUME_DISABLE_ENV, parseBooleanEnv } from "../resume.js";
-import { RESUME_PROVIDER } from "../shared.js";
 import { isSubagentToolName, subagentDetailsHaveErrors } from "../types.js";
 import { decodeNestedBroadcast, forwardNestedBroadcast } from "./broadcast.js";
 import { RESUME_INTERACTIVE_DELAY_MS } from "./models.js";
-import { maybeOfferSubagentResume } from "./resume-offer.js";
 import {
   restoreModelAfterResumeFailure,
   scheduleSessionTask,
@@ -17,29 +13,14 @@ import type { ExtensionState } from "./state.js";
 
 export function registerSessionEvents(state: ExtensionState): void {
   registerAsyncDeliveryEvents(state);
-  state.pi.on("session_tree", async (event, ctx) => {
+  state.pi.on("session_tree", async (_event, ctx) => {
     state.latestSessionCtx = ctx;
     updateCombinedUsageStatus(state, ctx);
-    try {
-      if (!state.canDelegate) return;
-      // Skip extension-driven navigation (e.g. compaction) and any state where
-      // a resume is already pending or subagents are still running.
-      if (event?.fromExtension) return;
-      if (state.activeSubagents.size > 0 || state.backgroundJobs.size > 0 || state.pendingCompletionDeliveries.size > 0)
-        return;
-      if (state.pendingResumePlans.length > 0) return;
-      if (state.pendingInteractiveResumePrompt) return;
-      if (ctx.model?.provider === RESUME_PROVIDER) return;
-      if (typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
-
-      const resumeDisabled = parseBooleanEnv(configuredEnv(SUBAGENT_RESUME_DISABLE_ENV, state.settings)) === true;
-      if (resumeDisabled) return;
-
-      await maybeOfferSubagentResume(state, ctx, { deferInteractivePrompt: false });
-    } catch (err) {
-      console.error("[pi-subagent] Error in session_tree:", err);
-      await restoreModelAfterResumeFailure(state, ctx);
-    }
+    // Browsing history is read-only for recovery. Invalidate even a startup
+    // confirmation or deferred turn approved for the branch we just left.
+    state.resumeEpoch = (state.resumeEpoch ?? 0) + 1;
+    state.pendingInteractiveResumePrompt = null;
+    await restoreModelAfterResumeFailure(state, ctx);
   });
 
   state.pi.on("agent_end", async (_event, ctx) => {
@@ -73,9 +54,11 @@ export function registerSessionEvents(state: ExtensionState): void {
     const prompt = state.pendingInteractiveResumePrompt;
     if (!prompt) return;
     state.pendingInteractiveResumePrompt = null;
+    const resumeEpoch = state.resumeEpoch ?? 0;
     scheduleSessionTask(
       state,
       () => {
+        if (resumeEpoch !== (state.resumeEpoch ?? 0)) return;
         try {
           sendAutomaticResumePrompt(state, prompt);
         } catch (err) {

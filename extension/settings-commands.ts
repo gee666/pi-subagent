@@ -61,25 +61,14 @@ export const SESSION_CONTROLS: Control[] = [
   {
     name: "auto-resume",
     env: "PI_SUBAGENT_DISABLE_RESUME",
-    description: "Recover unfinished worker tasks when reopening a chat or navigating its history",
+    description: "Offer to recover interrupted workers when opening a session, always after confirmation",
     choiceHints: {
-      on: "Enable recovery; resume-prompt controls whether to ask first",
+      on: "Ask yes or no when opening a session; never recover on tree navigation",
       off: "Do not automatically recover unfinished tasks; named resumes still work",
     },
     defaultValue: "false",
     choices: ["on", "off"],
     inverted: true,
-  },
-  {
-    name: "resume-prompt",
-    env: "PI_SUBAGENT_RESUME_PROMPT",
-    description: "Ask before recovering unfinished tasks; off continues without asking, not without recovery",
-    choiceHints: {
-      on: "Ask before recovery in the interactive terminal",
-      off: "Recover without asking; use auto-resume off to disable recovery",
-    },
-    defaultValue: "true",
-    choices: ["on", "off"],
   },
   {
     name: "intelligence",

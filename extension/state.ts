@@ -34,8 +34,10 @@ export interface ExtensionState extends DelegationDepthConfig {
   pendingCompletionDeliveries: Map<string, number>;
   pendingCompletionInterrupts: Map<string, () => void>;
   interruptEpoch: number;
+  /** Recovery-only cancellation; tree browsing must not interrupt live workers. */
+  resumeEpoch: number;
   onSessionReadyForInterrupt?: (ctx: SessionContext) => void;
-  pendingAutomaticResume?: { prompt: string; interruptEpoch: number };
+  pendingAutomaticResume?: { prompt: string; interruptEpoch: number; resumeEpoch: number };
   pi: ExtensionAPI;
   settings?: SubagentSettings;
   sessionSettings?: SubagentSettings;
@@ -107,6 +109,7 @@ export function createExtensionState(pi: ExtensionAPI): ExtensionState {
     pendingCompletionDeliveries: new Map(),
     pendingCompletionInterrupts: new Map(),
     interruptEpoch: 0,
+    resumeEpoch: 0,
     activeSubagents: new Map(),
     activeResumeNames: new Set(),
     forcedErrorToolCallIds: new Set(),

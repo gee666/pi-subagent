@@ -15,7 +15,7 @@ import { settingsFixture } from "./helpers/settings.js";
 import { makeResult } from "./helpers/results.js";
 
 for (const pending of ["background", "completion"] as const) {
-  test(`tree navigation cannot synthetically resume while ${pending} work has no active handle`, async () => {
+  test(`tree navigation never synthetically resumes, with or without ${pending} work lacking an active handle`, async () => {
     const f = settingsFixture();
     const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
     const pi = {
@@ -24,12 +24,13 @@ for (const pending of ["background", "completion"] as const) {
       getActiveTools: () => ["subagents"],
       setActiveTools: () => {},
       setModel: async () => true,
+      sendUserMessage: () => assert.fail("tree navigation must not start a resume turn"),
     } as unknown as ExtensionAPI;
     const state = createExtensionState(pi);
     state.sessionActive = true;
     state.canDelegate = true;
     const host = createExtensionHarness();
-    const baseCtx = host.makeCtx(resumeBranch(), { cwd: f.project, hasUI: false });
+    const baseCtx = host.makeCtx(resumeBranch(), { cwd: f.project });
     const ctx = { ...baseCtx, sessionManager: { ...baseCtx.sessionManager, getSessionFile: () => undefined } };
     state.latestSessionCtx = ctx;
     if (pending === "background") {
@@ -50,7 +51,9 @@ for (const pending of ["background", "completion"] as const) {
       state.backgroundJobs.clear();
       state.pendingCompletionDeliveries.clear();
       await handlers.get("session_tree")!({ type: "session_tree", newLeafId: "result-call-1" }, ctx);
-      assert.equal(state.pendingResumePlans.length, 1, "the same unfinished branch recovers once live work is drained");
+      assert.equal(state.pendingResumePlans.length, 0, "drained live work does not make navigation a recovery trigger");
+      assert.equal(state.resumeState.plans.length, 0);
+      assert.equal(host.calls.confirms, 0, "tree navigation never asks to resume");
     } finally {
       for (const timer of state.scheduledTasks) clearTimeout(timer);
       state.backgroundJobs.clear();

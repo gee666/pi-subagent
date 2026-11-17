@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
+import { execFileSync } from "node:child_process";
 import { configuredEnv, loadSubagentSettings, readSettings, SETTING_DEFINITIONS } from "../settings.js";
 import { findProjectConfig, loadPiSubagentsConfig } from "../config.js";
 import { configuredTotalBudget } from "../budget.js";
@@ -102,16 +104,17 @@ test("invalid JSON fields warn without contents, keep valid lower fields and fai
       models: { fallback: { secret: "hidden-secret" } },
       limits: { concurrency: -1, total: "hidden-secret" },
       agents: [],
+      // Removed setting: legacy values are ignored without a warning.
       resume: { prompt: "false" },
       delegation: { depth: Number.MAX_SAFE_INTEGER + 1 },
     });
     const settings = loadSubagentSettings(f.project, true);
     assert.equal(settings.PI_SUBAGENT_MAX_CONCURRENCY, "2");
-    assert.equal(settings.PI_SUBAGENT_RESUME_PROMPT, undefined);
+    assert.equal(Object.hasOwn(settings, "PI_SUBAGENT_RESUME_PROMPT"), false);
     assert.equal(settings.PI_SUBAGENT_PI_ARGS_PREFIX, undefined);
     assert.equal(settings.PI_SUBAGENT_MAX_DEPTH, undefined);
     assert.throws(() => configuredTotalBudget(configuredEnv("PI_SUBAGENT_MAX_TOTAL_AGENTS", settings)), /blocked/);
-    assert.equal(warnings.length, 8);
+    assert.equal(warnings.length, 7);
     assert.doesNotMatch(JSON.stringify(warnings), /hidden-secret/);
     process.env.PI_SUBAGENT_MAX_TOTAL_AGENTS = "0";
     assert.equal(configuredTotalBudget(configuredEnv("PI_SUBAGENT_MAX_TOTAL_AGENTS", settings)), 0);
@@ -205,13 +208,18 @@ test("the production extension env inventory contains only mapped settings, alia
   assert.deepEqual([...found].sort(), [...expected].sort());
 });
 
-test("removed resume.disabled JSON is ignored while recovery settings remain supported", () => {
+test("removed resume.disabled and resume.prompt JSON are ignored while auto-resume remains supported", (t) => {
+  const warnings: unknown[][] = [];
+  t.mock.method(console, "warn", (...args: unknown[]) => warnings.push(args));
   const settings = readSettings({ resume: { disabled: true, disableAuto: true, prompt: false } }, "test");
-  assert.deepEqual(settings, { PI_SUBAGENT_DISABLE_RESUME: "true", PI_SUBAGENT_RESUME_PROMPT: "false" });
-  assert.equal(
-    SETTING_DEFINITIONS.some(([, , env]) => String(env) === "DISABLE_RESUMABLE_SUBAGENTS"),
-    false,
-  );
+  assert.deepEqual(settings, { PI_SUBAGENT_DISABLE_RESUME: "true" });
+  assert.deepEqual(warnings, []);
+  for (const removed of ["DISABLE_RESUMABLE_SUBAGENTS", "PI_SUBAGENT_RESUME_PROMPT"]) {
+    assert.equal(
+      SETTING_DEFINITIONS.some(([, , env]) => String(env) === removed),
+      false,
+    );
+  }
 });
 
 test("settings fixtures isolate and restore inherited tree concurrency metadata", () => {
@@ -268,4 +276,35 @@ test("runtime identity and ledger paths cannot be supplied through JSON", () => 
     },
   };
   assert.deepEqual(readSettings(raw, "test"), {});
+});
+
+test("settings fixtures refuse a TMPDIR under the real home before creating files", () => {
+  const previous = process.env.TMPDIR;
+  const insideHome = path.join(os.userInfo().homedir, `pi-subagent-fixture-guard-${process.pid}`);
+  try {
+    process.env.TMPDIR = insideHome;
+    assert.throws(() => settingsFixture(), /TMPDIR outside your home directory/);
+    assert.equal(fs.existsSync(insideHome), false);
+  } finally {
+    if (previous === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previous;
+  }
+});
+
+test("settings fixtures resolve checkout packages and close without touching them", () => {
+  const f = settingsFixture();
+  const link = path.join(f.root, "node_modules");
+  const packages = fs.realpathSync("node_modules");
+  try {
+    assert.equal(fs.realpathSync(link), packages);
+    // Child processes run scripts from the fixture root, outside the checkout.
+    const script = path.join(f.root, "resolve.mjs");
+    fs.writeFileSync(script, 'console.log(import.meta.resolve("@earendil-works/pi-coding-agent"));');
+    const resolved = execFileSync(process.execPath, [script], { encoding: "utf8" }).trim();
+    assert.ok(resolved.startsWith("file:"));
+  } finally {
+    f.close();
+  }
+  assert.equal(fs.existsSync(f.root), false);
+  assert.ok(fs.existsSync(path.join(packages, "@earendil-works", "pi-coding-agent", "package.json")));
 });

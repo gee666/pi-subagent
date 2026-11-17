@@ -1,18 +1,10 @@
 import { createIntelligenceSchemas, validatePreparedArguments } from "./schemas.js";
 import { selectIntelligence } from "../intelligence.js";
 import { resolveLaunchModelSettings } from "../runner/arguments.js";
-import * as path from "node:path";
 import { DEFAULT_AGENT, discoverAgents } from "../agents.js";
-import {
-  createBudget,
-  isBranchBudgetAmount,
-  reserveSubagentBudgets,
-  SubagentBudgetError,
-  type SubagentBudget,
-} from "../budget.js";
+import { isBranchBudgetAmount, SubagentBudgetError } from "../budget.js";
 import { allocateSubagentNames } from "../names.js";
 import { recordToolCallStart, renderCall, renderResult } from "../render.js";
-import { getTaskBranchSize } from "../resume.js";
 import { buildSubagentDetails, DEFAULT_DELEGATION_MODE, SUBAGENT_TOOL_NAME } from "../types.js";
 import { updateLatestBroadcastTargets } from "./broadcast.js";
 import { makeDetailsFactory } from "./details.js";
@@ -34,7 +26,8 @@ import {
 } from "./policy.js";
 import { trackProgress } from "./progress.js";
 import { getSubagentsToolDescription } from "./prompts.js";
-import { ensureBudget, getParentModelForSubagent, getSessionDirForTask } from "./runtime.js";
+import { getParentModelForSubagent, getSessionDirForTask } from "./runtime.js";
+import { launchBudgets } from "./launch-budgets.js";
 import {
   findRecoveryPlanIndex,
   getPreparedRecoveryPlan,
@@ -196,41 +189,24 @@ export function registerSubagentsTool(state: ExtensionState) {
           }
           if (launchGeneration !== state.lifecycleGeneration || signal?.aborted)
             throw new SubagentBudgetError("Launch canceled or session changed. No slots were reserved.");
-          const budgets: Array<SubagentBudget | undefined> = tasks.map(() => undefined);
+          // A recovery plan may hold only the interrupted subset of its launch,
+          // so each worker keeps its recorded or original-slot session directory.
+          const sessionDirFor = (index: number) =>
+            resumePlan?.details?.results[index]?.sessionDir ??
+            getSessionDirForTask(
+              state,
+              resumePlan?.previousToolCallId ?? toolCallId,
+              resumePlan?.taskIndexes?.[index] ?? index,
+            );
           const runnable = tasks
-            .map((task, index) => ({ task, index }))
+            .map(({ agent, task, max_subagents_allowed }, index) => ({
+              index,
+              task: { agent, task, max_subagents_allowed },
+            }))
             .filter(
               ({ task, index }) => !cyclicTaskIndexes.has(index) && agents.some((agent) => agent.name === task.agent),
             );
-          if (resumePlan && resumePlan.tasks.every((task) => getTaskBranchSize(task) === undefined)) {
-            // Legacy recovery cannot grant fresh descendant allowances.
-            for (const { index } of runnable) {
-              budgets[index] =
-                resumePlan.details?.results[index]?.budget ??
-                createBudget(
-                  path.join(
-                    resumePlan.details?.results[index]?.sessionDir ??
-                      getSessionDirForTask(state, resumePlan.previousToolCallId, index),
-                    "legacy-budget",
-                  ),
-                  0,
-                );
-            }
-          } else if (runnable.length) {
-            const reserved = reserveSubagentBudgets(
-              ensureBudget(state),
-              resumePlan?.previousToolCallId ?? toolCallId,
-              runnable.map(({ task }) => ({
-                agent: task.agent,
-                task: task.task,
-                max_subagents_allowed: task.max_subagents_allowed,
-              })),
-              state.currentDepth === 0 ? "main" : "subagent",
-            );
-            runnable.forEach(({ index }, position) => {
-              budgets[index] = reserved[position];
-            });
-          }
+          const budgets = launchBudgets(state, toolCallId, tasks.length, runnable, resumePlan, sessionDirFor);
 
           if (resumePlanIndex >= 0) state.pendingResumePlans.splice(resumePlanIndex, 1);
           state.recoveryPlansByToolCallId?.delete(toolCallId);
@@ -261,9 +237,7 @@ export function registerSubagentsTool(state: ExtensionState) {
                         state.settings,
                       ),
                       tools: agentConfig?.tools,
-                      sessionDir:
-                        resumePlan?.details?.results[index]?.sessionDir ??
-                        getSessionDirForTask(state, resumePlan?.previousToolCallId ?? toolCallId, index),
+                      sessionDir: sessionDirFor(index),
                     };
                   }),
                 );
@@ -297,7 +271,7 @@ export function registerSubagentsTool(state: ExtensionState) {
                 trackedOnUpdate,
                 makeDetails,
                 resumePlan?.details?.results,
-                (index) => getSessionDirForTask(state, resumePlan?.previousToolCallId ?? toolCallId, index),
+                sessionDirFor,
                 !!resumePlan,
                 formatModelFlag(getParentModelForSubagent(state, ctx)),
                 topLevelBaseId,
@@ -317,7 +291,7 @@ export function registerSubagentsTool(state: ExtensionState) {
             names,
             budgets,
             admissions,
-            (index) => getSessionDirForTask(state, resumePlan?.previousToolCallId ?? toolCallId, index),
+            sessionDirFor,
             (index) => selectIntelligence(state.intelligencePresets, tasks[index].intelligence, state.settings)?.name,
             makeDetails(executionMode),
             toolCallId,

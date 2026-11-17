@@ -58,7 +58,6 @@ var SETTING_DEFINITIONS = [
   ["delegation", "depth", "PI_SUBAGENT_MAX_DEPTH", "integer"],
   ["delegation", "preventCycles", "PI_SUBAGENT_PREVENT_CYCLES", "boolean"],
   ["resume", "disableAuto", "PI_SUBAGENT_DISABLE_RESUME", "boolean"],
-  ["resume", "prompt", "PI_SUBAGENT_RESUME_PROMPT", "boolean"],
   ["models", "intelligence", "PI_SUBAGENT_INTELLIGENCE", "boolean"],
   ["models", "fallback", "PI_SUBAGENT_FALLBACK_MODEL", "string"],
   ["runner", "startupTimeoutMs", "PI_SUBAGENT_STARTUP_TIMEOUT", "integer"],
@@ -690,6 +689,12 @@ function overrideResumeBudgets(caller, updates, audience = "subagent") {
     }
   }
 }
+function reservedSubagentBudgets(budget, callId) {
+  return latestState(budget).state.reservations[reservationKey(callId)];
+}
+function reservationKey(callId) {
+  return createHash("sha256").update(callId).digest("hex");
+}
 function reserveSubagentBudgets(budget, callId, tasks, audience = "subagent") {
   let required = 0;
   for (const [index, task] of tasks.entries()) {
@@ -703,7 +708,7 @@ function reserveSubagentBudgets(budget, callId, tasks, audience = "subagent") {
       throw new SubagentBudgetError("Requested subagent budget is too large. Reduce the child allowances.");
   }
   if (!tasks.length) return [];
-  const key = createHash("sha256").update(callId).digest("hex");
+  const key = reservationKey(callId);
   for (; ; ) {
     const { revision, state } = latestState(budget);
     const existing = state.reservations[key];
@@ -1918,6 +1923,9 @@ function excludeStoppedWorkers(plans, entries, calls) {
       {
         ...plan,
         tasks: plan.tasks.filter((_task, index) => keep[index]),
+        taskIndexes: (plan.taskIndexes ?? plan.tasks.map((_task, index) => index)).filter(
+          (_slot, index) => keep[index]
+        ),
         details: plan.details ? { ...plan.details, results: plan.details.results.filter((_result, index) => keep[index]) } : void 0
       }
     ];
@@ -1926,6 +1934,63 @@ function excludeStoppedWorkers(plans, entries, calls) {
 
 // resume.ts
 import { getAgentDir as getAgentDir5 } from "@earendil-works/pi-coding-agent";
+
+// resume-tail.ts
+function getMessageText(message) {
+  const content = isRecord2(message) ? message.content : void 0;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((part) => isRecord2(part) && part.type === "text" && typeof part.text === "string" ? part.text : "").join("");
+}
+function messageHasToolCall(message) {
+  return isRecord2(message) && Array.isArray(message.content) && message.content.some((part) => isRecord2(part) && part.type === "toolCall");
+}
+function isIgnorableTrailingAbortMessage(entry) {
+  if (!isRecord2(entry) || entry.type !== "message") return true;
+  const message = entry.message;
+  if (!isRecord2(message)) return true;
+  return message.role === "assistant" && (message.stopReason === "aborted" || message.stopReason === "error") && getMessageText(message).trim().length === 0 && !messageHasToolCall(message);
+}
+function isResumePromptEntry(entry) {
+  if (!isRecord2(entry) || entry.type !== "message") return false;
+  const message = entry.message;
+  if (!isRecord2(message) || message.role !== "user") return false;
+  return /^Resuming \d+ subagents\.\.\.$/.test(getMessageText(message).trim());
+}
+function isSyntheticResumeModelChange(entry) {
+  return isRecord2(entry) && entry.type === "model_change" && entry.provider === RESUME_PROVIDER;
+}
+function isFailedResumeAttemptTail(entries, start) {
+  let sawSyntheticModel = false;
+  let sawResumePrompt = false;
+  let sawFailure = false;
+  for (let i = start; i < entries.length; i++) {
+    const entry = entries[i];
+    if (isSyntheticResumeModelChange(entry)) {
+      sawSyntheticModel = true;
+      continue;
+    }
+    if (entry?.type === "thinking_level_change") continue;
+    if (isResumePromptEntry(entry)) {
+      if (!sawSyntheticModel) return false;
+      sawResumePrompt = true;
+      continue;
+    }
+    if (isIgnorableTrailingAbortMessage(entry)) {
+      if (entry?.type === "message" && sawResumePrompt) sawFailure = true;
+      continue;
+    }
+    return false;
+  }
+  return sawSyntheticModel && sawResumePrompt && sawFailure;
+}
+function hasOnlyIgnorableTrailingEntries(entries, activityOrder) {
+  const start = activityOrder + 1;
+  for (let i = start; i < entries.length; i++) {
+    if (!isIgnorableTrailingAbortMessage(entries[i])) return isFailedResumeAttemptTail(entries, start);
+  }
+  return true;
+}
 
 // storage/session-entries.ts
 function sessionEntryMessage(entry) {
@@ -1949,8 +2014,86 @@ function sessionEntryMessages(entries) {
   });
 }
 
+// resume-slots.ts
+function workerKeys(result) {
+  const keys = [];
+  if (result.sessionDir) keys.push(`dir:${result.sessionDir}`);
+  if (result.name) keys.push(`name:${result.name}`);
+  return keys;
+}
+var jobKey = (jobId, index) => JSON.stringify([jobId, index]);
+function findPendingAsyncPlans(entries, launches) {
+  const slots = [];
+  const byKey = /* @__PURE__ */ new Map();
+  const byJob = /* @__PURE__ */ new Map();
+  for (const launch of launches) {
+    launch.details.results.forEach((result, index) => {
+      const keys = workerKeys(result);
+      let slot = keys.map((key) => byKey.get(key)).find((candidate) => candidate !== void 0);
+      if (slot) {
+        Object.assign(slot, { result, order: launch.order, jobId: launch.toolCallId, jobIndex: index });
+      } else if (launch.tasks[index]) {
+        slot = { launch, index, result, order: launch.order, jobId: launch.toolCallId, jobIndex: index };
+        slots.push(slot);
+      } else return;
+      for (const key of keys) byKey.set(key, slot);
+      byJob.set(jobKey(launch.toolCallId, index), slot);
+    });
+  }
+  entries.forEach((entry, order) => {
+    const message = sessionEntryMessage(entry);
+    if (message?.role !== "custom" || message.customType !== SUBAGENT_COMPLETION_TYPE) return;
+    if (!isSubagentDetails(message.details)) return;
+    const jobId = asyncJobId(message.details);
+    const taskIndex = Reflect.get(message.details, "asyncTaskIndex");
+    const launched = byJob.get(jobKey(jobId, taskIndex));
+    for (const result of message.details.results) {
+      if (launched) {
+        if (launched.jobId === jobId && launched.jobIndex === taskIndex) launched.result = result;
+        continue;
+      }
+      const slot = workerKeys(result).map((key) => byKey.get(key)).find((candidate) => candidate !== void 0);
+      if (slot && order > slot.order) slot.result = result;
+    }
+  });
+  const plans = /* @__PURE__ */ new Map();
+  for (const slot of slots) {
+    if (slot.result.exitCode !== -1) continue;
+    const plan = plans.get(slot.launch) ?? { tasks: [], taskIndexes: [], results: [] };
+    plans.set(slot.launch, plan);
+    plan.tasks.push(slot.launch.tasks[slot.index]);
+    plan.taskIndexes.push(slot.index);
+    plan.results.push(slot.result);
+  }
+  return [...plans].map(([launch, { tasks, taskIndexes, results }]) => ({
+    previousToolCallId: launch.toolCallId,
+    tasks,
+    taskIndexes,
+    details: { ...launch.details, results }
+  }));
+}
+
+// ui/value.ts
+function asRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+function finiteNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+function stringValue(value, fallback = "") {
+  return typeof value === "string" ? value : fallback;
+}
+
+// ui/agent-label.ts
+function formatSubagentLabel(identity2) {
+  const name = stringValue(identity2.name);
+  const agent = stringValue(identity2.agent);
+  const intelligence = stringValue(identity2.intelligence);
+  const qualifier = [intelligence ? displayIntelligence(intelligence) : "", agent].filter(Boolean).join("/");
+  return name ? `${name}${qualifier ? ` (${qualifier})` : ""}` : qualifier || "subagent";
+}
+
 // resume.ts
-var SUBAGENT_RESUME_PROMPT_ENV = "PI_SUBAGENT_RESUME_PROMPT";
 var SUBAGENT_RESUME_DISABLE_ENV = "PI_SUBAGENT_DISABLE_RESUME";
 var SUBAGENT_SESSION_ROOT_ENV = "PI_SUBAGENT_SESSION_ROOT";
 function getTaskBranchSize(task) {
@@ -2021,144 +2164,98 @@ function normalizeTasks(args) {
   }
   return tasks;
 }
-function hasUnfinishedResults(details, expectedTaskCount) {
-  if (!details) return true;
-  if (details.results.length < expectedTaskCount) return true;
-  return details.results.slice(0, expectedTaskCount).some((result) => result.exitCode === -1 || isResultError(result));
+function isPiAbortedToolResult(message) {
+  const content = message.content;
+  return message.isError === true && Array.isArray(content) && content.length === 1 && isRecord2(content[0]) && content[0].text === "Operation aborted";
 }
-function getMessageText(message) {
-  const content = isRecord2(message) ? message.content : void 0;
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content.map((part) => isRecord2(part) && part.type === "text" && typeof part.text === "string" ? part.text : "").join("");
+function interruptedLegacyIndexes(outcome, taskCount) {
+  const indexes2 = Array.from({ length: taskCount }, (_task, index) => index);
+  if (outcome === void 0 || outcome === "interrupted") return indexes2;
+  if (outcome === "rejected" || outcome.results.length === 0) return [];
+  return indexes2.filter((index) => {
+    const result = outcome.results[index];
+    return !result || result.exitCode === -1 || result.stopReason === "aborted";
+  });
 }
-function messageHasNonEmptyText(message) {
-  return getMessageText(message).trim().length > 0;
+function unstartedResult(task) {
+  return {
+    agent: task.agent,
+    agentSource: "unknown",
+    task: task.task,
+    exitCode: -1,
+    messages: [],
+    stderr: "",
+    usage: emptyUsage(),
+    toolCalls: {},
+    completedTurns: 0,
+    turnInProgress: false,
+    liveLog: []
+  };
 }
-function messageHasToolCall(message) {
-  return isRecord2(message) && Array.isArray(message.content) && message.content.some((part) => isRecord2(part) && part.type === "toolCall");
-}
-function isIgnorableTrailingAbortMessage(entry) {
-  if (!isRecord2(entry) || entry.type !== "message") return true;
-  const message = entry.message;
-  if (!isRecord2(message)) return true;
-  if (message.role === "assistant" && (message.stopReason === "aborted" || message.stopReason === "error") && !messageHasNonEmptyText(message) && !messageHasToolCall(message)) {
-    return true;
-  }
-  return false;
-}
-function isResumePromptEntry(entry) {
-  if (!isRecord2(entry) || entry.type !== "message") return false;
-  const message = entry.message;
-  if (!isRecord2(message) || message.role !== "user") return false;
-  return /^Resuming \d+ subagents\.\.\.$/.test(getMessageText(message).trim());
-}
-function isSyntheticResumeModelChange(entry) {
-  return isRecord2(entry) && entry.type === "model_change" && entry.provider === RESUME_PROVIDER;
-}
-function isFailedResumeAttemptTail(entries, start) {
-  if (start >= entries.length) return true;
-  let sawSyntheticModel = false;
-  let sawResumePrompt = false;
-  let sawFailure = false;
-  for (let i = start; i < entries.length; i++) {
-    const entry = entries[i];
-    if (isSyntheticResumeModelChange(entry)) {
-      sawSyntheticModel = true;
-      continue;
+function legacyPlan(previousToolCallId, tasks, outcome, pending2) {
+  const details = typeof outcome === "object" ? outcome : void 0;
+  return {
+    previousToolCallId,
+    tasks: pending2.map((index) => tasks[index]),
+    taskIndexes: pending2,
+    details: details && {
+      ...details,
+      results: pending2.map((index) => details.results[index] ?? unstartedResult(tasks[index]))
     }
-    if (entry?.type === "thinking_level_change") continue;
-    if (isResumePromptEntry(entry)) {
-      if (!sawSyntheticModel) return false;
-      sawResumePrompt = true;
-      continue;
-    }
-    if (isIgnorableTrailingAbortMessage(entry)) {
-      if (entry?.type === "message" && sawResumePrompt) sawFailure = true;
-      continue;
-    }
-    return false;
-  }
-  return sawSyntheticModel && sawResumePrompt && sawFailure;
-}
-function hasOnlyIgnorableTrailingEntries(entries, activityOrder) {
-  const start = activityOrder + 1;
-  for (let i = start; i < entries.length; i++) {
-    if (!isIgnorableTrailingAbortMessage(entries[i])) return isFailedResumeAttemptTail(entries, start);
-  }
-  return true;
+  };
 }
 function findLatestResumableSubagentCalls(ctx) {
   const entries = branchEntries(ctx);
   const calls = /* @__PURE__ */ new Map();
   const results = /* @__PURE__ */ new Map();
+  const launches = [];
   entries.forEach((entry, order) => {
     if (entry?.type !== "message") return;
     const msg = entry.message;
     for (const call of getSubagentToolCalls(msg)) {
-      const tasks = normalizeTasks(call.args);
-      if (tasks) calls.set(call.id, { tasks, order });
+      const tasks2 = normalizeTasks(call.args);
+      if (tasks2) calls.set(call.id, { tasks: tasks2, order });
     }
-    if (msg?.role === "toolResult" && isSubagentLaunchToolName(msg.toolName) && typeof msg.toolCallId === "string") {
+    if (msg?.role !== "toolResult" || !isSubagentLaunchToolName(msg.toolName) || typeof msg.toolCallId !== "string")
+      return;
+    const details = isSubagentDetails(msg.details) ? msg.details : void 0;
+    const tasks = calls.get(msg.toolCallId)?.tasks;
+    if (details && asyncJobId(details) && tasks) launches.push({ toolCallId: msg.toolCallId, tasks, details, order });
+    else
       results.set(msg.toolCallId, {
-        details: isSubagentDetails(msg.details) ? msg.details : void 0,
-        isError: msg.isError === true,
+        outcome: details ?? (isPiAbortedToolResult(msg) ? "interrupted" : "rejected"),
         order
       });
-    }
   });
-  for (const nested of getNestedSubagentResults(sessionEntryMessages(entries))) {
-    const recorded = results.get(nested.toolCallId);
-    if (recorded && asyncJobId(nested.details)) {
-      results.set(nested.toolCallId, { ...recorded, details: nested.details, isError: nested.isError });
-    }
-  }
-  const asyncCalls = [];
+  const asyncLaunchIds = new Set(launches.map((launch) => launch.toolCallId));
   const candidates = [];
-  for (const [toolCallId, call] of calls) {
-    const result = results.get(toolCallId);
-    const unfinished = !result || result.isError || hasUnfinishedResults(result.details, call.tasks.length);
-    if (!unfinished) continue;
-    if (result?.details && asyncJobId(result.details)) {
-      asyncCalls.push({ previousToolCallId: toolCallId, tasks: call.tasks, details: result.details });
-      continue;
-    }
-    candidates.push({
-      previousToolCallId: toolCallId,
-      tasks: call.tasks,
-      details: result?.details,
-      callOrder: call.order,
-      activityOrder: result?.order ?? call.order
-    });
+  for (const [id, call] of calls) {
+    if (asyncLaunchIds.has(id)) continue;
+    const result = results.get(id);
+    const pending2 = interruptedLegacyIndexes(result?.outcome, call.tasks.length);
+    if (pending2.length > 0)
+      candidates.push({ id, pending: pending2, callOrder: call.order, activityOrder: result?.order ?? call.order });
   }
-  const pendingAsyncCalls = asyncCalls.filter(
-    (call, index) => !asyncCalls.slice(index + 1).some(
-      (later) => sameTasks(call.tasks, later.tasks) && call.details?.results.length === later.details?.results.length && call.details?.results.every(
-        (result, taskIndex) => result.sessionDir && result.sessionDir === later.details?.results[taskIndex]?.sessionDir
-      )
-    )
-  );
+  const asyncPlans = findPendingAsyncPlans(entries, launches);
   const latest = candidates.sort((a, b) => a.activityOrder - b.activityOrder).at(-1);
-  if (!latest) return excludeStoppedWorkers(pendingAsyncCalls, entries, calls);
-  const batch = candidates.filter((candidate) => candidate.callOrder === latest.callOrder).sort((a, b) => a.activityOrder - b.activityOrder);
+  if (!latest) return excludeStoppedWorkers(asyncPlans, entries, calls);
+  const batch = candidates.filter((candidate) => candidate.callOrder === latest.callOrder);
   const siblingResultOrders = Array.from(calls.entries()).filter(([, call]) => call.order === latest.callOrder).map(([toolCallId]) => results.get(toolCallId)?.order).filter((order) => typeof order === "number");
   const latestBatchActivity = Math.max(
     latest.callOrder,
     ...batch.map((candidate) => candidate.activityOrder),
     ...siblingResultOrders
   );
-  if (!hasOnlyIgnorableTrailingEntries(entries, latestBatchActivity)) return pendingAsyncCalls;
-  return excludeStoppedWorkers(
-    [
-      ...pendingAsyncCalls,
-      ...batch.map(({ previousToolCallId, tasks, details }) => ({
-        previousToolCallId,
-        tasks,
-        details
-      }))
-    ],
-    entries,
-    calls
+  if (!hasOnlyIgnorableTrailingEntries(entries, latestBatchActivity))
+    return excludeStoppedWorkers(asyncPlans, entries, calls);
+  const legacyPlans = batch.map(
+    ({ id, pending: pending2 }) => legacyPlan(id, calls.get(id)?.tasks ?? [], results.get(id)?.outcome, pending2)
+  );
+  return excludeStoppedWorkers([...asyncPlans, ...legacyPlans], entries, calls);
+}
+function recoveryWorkerLabels(plans) {
+  return plans.flatMap(
+    (plan) => plan.tasks.map((task, index) => formatSubagentLabel(plan.details?.results[index] ?? task))
   );
 }
 function sameTasks(a, b) {
@@ -3444,17 +3541,6 @@ async function clearResumeActive(file, name, resumerSessionId) {
   }
 }
 
-// ui/value.ts
-function asRecord(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value) ? value : {};
-}
-function finiteNumber(value) {
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
-}
-function stringValue(value, fallback = "") {
-  return typeof value === "string" ? value : fallback;
-}
-
 // ui/tree-format.ts
 function formatClockTime(epochMs) {
   const d = new Date(Number.isFinite(epochMs) ? epochMs : 0);
@@ -3675,15 +3761,6 @@ function readSessionEntries(file) {
 }
 function readSessionMessages(file) {
   return sessionEntryMessages(readSessionEntries(file));
-}
-
-// ui/agent-label.ts
-function formatSubagentLabel(identity2) {
-  const name = stringValue(identity2.name);
-  const agent = stringValue(identity2.agent);
-  const intelligence = stringValue(identity2.intelligence);
-  const qualifier = [intelligence ? displayIntelligence(intelligence) : "", agent].filter(Boolean).join("/");
-  return name ? `${name}${qualifier ? ` (${qualifier})` : ""}` : qualifier || "subagent";
 }
 
 // ui/tree-build.ts
@@ -4244,7 +4321,11 @@ function clearSessionTasks(state, keepDurable = false) {
   }
 }
 function sendAutomaticResumePrompt(state, prompt) {
-  state.pendingAutomaticResume = { prompt, interruptEpoch: state.interruptEpoch ?? 0 };
+  state.pendingAutomaticResume = {
+    prompt,
+    interruptEpoch: state.interruptEpoch ?? 0,
+    resumeEpoch: state.resumeEpoch ?? 0
+  };
   state.pi.sendUserMessage(prompt, { deliverAs: "steer" });
 }
 async function restoreVisibleModelForResume(state, expectedGeneration = state.lifecycleGeneration) {
@@ -4777,9 +4858,6 @@ function buildPiArgs(agent, systemPromptPath, task, sessionDir, resumeSession, f
     prompt: rawPrompt || agent.source === "default" ? task : resumeSession ? `Continue the previous task from where you left off. Original task: ${task}` : `Task: ${task}`
   };
 }
-
-// extension/launch-tool.ts
-import * as path28 from "node:path";
 
 // render.ts
 import {
@@ -9056,6 +9134,55 @@ function sameToolPrompts(left, right) {
   return leftKeys.length === rightKeys.length && leftKeys.every((key) => left[key] === right[key]);
 }
 
+// extension/launch-budgets.ts
+import * as path28 from "node:path";
+function sameBudgetTask(a, b) {
+  return a.agent === b.agent && a.task === b.task && a.max_subagents_allowed === b.max_subagents_allowed;
+}
+function launchBudgets(state, toolCallId, taskCount, runnable, plan, sessionDirFor) {
+  const budgets = Array.from({ length: taskCount }, () => void 0);
+  const audience = state.currentDepth === 0 ? "main" : "subagent";
+  if (!plan) {
+    const reserved = reserveSubagentBudgets(
+      ensureBudget(state),
+      toolCallId,
+      runnable.map(({ task }) => task),
+      audience
+    );
+    runnable.forEach(({ index }, position) => budgets[index] = reserved[position]);
+    return budgets;
+  }
+  for (const { index } of runnable) budgets[index] = plan.details?.results[index]?.budget;
+  const missing = runnable.filter(({ index }) => !budgets[index]);
+  if (!missing.length) return budgets;
+  const zeroAllowance = (index) => createBudget(path28.join(sessionDirFor(index), "legacy-budget"), 0);
+  if (plan.tasks.every((task) => getTaskBranchSize(task) === void 0)) {
+    for (const { index } of missing) budgets[index] = zeroAllowance(index);
+    return budgets;
+  }
+  const original = reservedSubagentBudgets(ensureBudget(state), plan.previousToolCallId);
+  if (!original) {
+    const reserved = reserveSubagentBudgets(
+      ensureBudget(state),
+      plan.previousToolCallId,
+      missing.map(({ task }) => task),
+      audience
+    );
+    missing.forEach(({ index }, position) => budgets[index] = reserved[position]);
+    return budgets;
+  }
+  const claimed = new Set(budgets.map((budget) => budget?.directory));
+  for (const { index, task } of missing) {
+    const position = original.tasks.findIndex(
+      (reservedTask, candidate) => sameBudgetTask(reservedTask, task) && !claimed.has(original.children[candidate]?.directory)
+    );
+    const child = original.children[position];
+    budgets[index] = child ?? zeroAllowance(index);
+    if (child) claimed.add(child.directory);
+  }
+  return budgets;
+}
+
 // extension/launch-tool.ts
 function registerSubagentsTool(state) {
   const hasAgentTypes = state.discoveredAgents.length > 0;
@@ -9195,35 +9322,18 @@ Set ${SUBAGENT_CONFIRM_PROJECT_AGENTS_ENV}=false or =session only if this reposi
           }
           if (launchGeneration !== state.lifecycleGeneration || signal?.aborted)
             throw new SubagentBudgetError("Launch canceled or session changed. No slots were reserved.");
-          const budgets = tasks.map(() => void 0);
-          const runnable = tasks.map((task, index) => ({ task, index })).filter(
+          const sessionDirFor = (index) => resumePlan?.details?.results[index]?.sessionDir ?? getSessionDirForTask(
+            state,
+            resumePlan?.previousToolCallId ?? toolCallId,
+            resumePlan?.taskIndexes?.[index] ?? index
+          );
+          const runnable = tasks.map(({ agent, task, max_subagents_allowed }, index) => ({
+            index,
+            task: { agent, task, max_subagents_allowed }
+          })).filter(
             ({ task, index }) => !cyclicTaskIndexes.has(index) && agents.some((agent) => agent.name === task.agent)
           );
-          if (resumePlan && resumePlan.tasks.every((task) => getTaskBranchSize(task) === void 0)) {
-            for (const { index } of runnable) {
-              budgets[index] = resumePlan.details?.results[index]?.budget ?? createBudget(
-                path28.join(
-                  resumePlan.details?.results[index]?.sessionDir ?? getSessionDirForTask(state, resumePlan.previousToolCallId, index),
-                  "legacy-budget"
-                ),
-                0
-              );
-            }
-          } else if (runnable.length) {
-            const reserved = reserveSubagentBudgets(
-              ensureBudget(state),
-              resumePlan?.previousToolCallId ?? toolCallId,
-              runnable.map(({ task }) => ({
-                agent: task.agent,
-                task: task.task,
-                max_subagents_allowed: task.max_subagents_allowed
-              })),
-              state.currentDepth === 0 ? "main" : "subagent"
-            );
-            runnable.forEach(({ index }, position) => {
-              budgets[index] = reserved[position];
-            });
-          }
+          const budgets = launchBudgets(state, toolCallId, tasks.length, runnable, resumePlan, sessionDirFor);
           if (resumePlanIndex >= 0) state.pendingResumePlans.splice(resumePlanIndex, 1);
           state.recoveryPlansByToolCallId?.delete(toolCallId);
           const names = tasks.map(
@@ -9250,7 +9360,7 @@ Set ${SUBAGENT_CONFIRM_PROJECT_AGENTS_ENV}=false or =session only if this reposi
                         state.settings
                       ),
                       tools: agentConfig?.tools,
-                      sessionDir: resumePlan?.details?.results[index]?.sessionDir ?? getSessionDirForTask(state, resumePlan?.previousToolCallId ?? toolCallId, index)
+                      sessionDir: sessionDirFor(index)
                     };
                   })
                 );
@@ -9282,7 +9392,7 @@ Set ${SUBAGENT_CONFIRM_PROJECT_AGENTS_ENV}=false or =session only if this reposi
               trackedOnUpdate,
               makeDetails,
               resumePlan?.details?.results,
-              (index) => getSessionDirForTask(state, resumePlan?.previousToolCallId ?? toolCallId, index),
+              sessionDirFor,
               !!resumePlan,
               formatModelFlag(getParentModelForSubagent(state, ctx)),
               topLevelBaseId,
@@ -9302,7 +9412,7 @@ Set ${SUBAGENT_CONFIRM_PROJECT_AGENTS_ENV}=false or =session only if this reposi
             names,
             budgets,
             admissions,
-            (index) => getSessionDirForTask(state, resumePlan?.previousToolCallId ?? toolCallId, index),
+            sessionDirFor,
             (index) => selectIntelligence(state.intelligencePresets, tasks[index].intelligence, state.settings)?.name,
             makeDetails(executionMode),
             toolCallId
@@ -11447,25 +11557,14 @@ var SESSION_CONTROLS = [
   {
     name: "auto-resume",
     env: "PI_SUBAGENT_DISABLE_RESUME",
-    description: "Recover unfinished worker tasks when reopening a chat or navigating its history",
+    description: "Offer to recover interrupted workers when opening a session, always after confirmation",
     choiceHints: {
-      on: "Enable recovery; resume-prompt controls whether to ask first",
+      on: "Ask yes or no when opening a session; never recover on tree navigation",
       off: "Do not automatically recover unfinished tasks; named resumes still work"
     },
     defaultValue: "false",
     choices: ["on", "off"],
     inverted: true
-  },
-  {
-    name: "resume-prompt",
-    env: "PI_SUBAGENT_RESUME_PROMPT",
-    description: "Ask before recovering unfinished tasks; off continues without asking, not without recovery",
-    choiceHints: {
-      on: "Ask before recovery in the interactive terminal",
-      off: "Recover without asking; use auto-resume off to disable recovery"
-    },
-    defaultValue: "true",
-    choices: ["on", "off"]
   },
   {
     name: "intelligence",
@@ -11661,111 +11760,15 @@ function registerSettingsCommands(state) {
   });
 }
 
-// extension/resume-offer.ts
-async function maybeOfferSubagentResume(state, ctx, opts) {
-  const generation = state.lifecycleGeneration;
-  const interruptEpoch = state.interruptEpoch ?? 0;
-  const canceled = () => generation !== state.lifecycleGeneration || interruptEpoch !== (state.interruptEpoch ?? 0);
-  const restorableModel = getRestorableModel(ctx, state.settings);
-  if (restorableModel) {
-    state.lastRestorableModel = restorableModel;
-    state.resumeModelRegistry = ctx.modelRegistry;
-  }
-  const plans = findLatestResumableSubagentCalls(ctx);
-  if (plans.length === 0) return;
-  const totalTaskCount = plans.reduce((sum, plan) => sum + plan.tasks.length, 0);
-  let shouldResume = true;
-  const shouldPrompt = parseBooleanEnv(configuredEnv(SUBAGENT_RESUME_PROMPT_ENV, state.settings)) !== false;
-  const rpcMode = isRpcMode(process.argv);
-  if (ctx.hasUI && !rpcMode && shouldPrompt) {
-    shouldResume = await ctx.ui.confirm(
-      "Resume subagents?",
-      `The resumed session has ${plans.length === 1 ? "an" : String(plans.length)} unfinished subagent call${plans.length === 1 ? "" : "s"} (${totalTaskCount} task${totalTaskCount === 1 ? "" : "s"}). Resume from saved subagent sessions?`
-    );
-  }
-  if (canceled()) return;
-  if (!shouldResume) {
-    if (ctx.model?.provider === RESUME_PROVIDER) {
-      if (restorableModel) {
-        await state.pi.setModel(restorableModel);
-      } else {
-        ctx.ui.notify(
-          `Subagent resume was declined, but the current model is the synthetic resume model and no real fallback model is available. Select a real model before continuing, or set ${SUBAGENT_FALLBACK_MODEL_ENV}=provider/model.`,
-          "error"
-        );
-      }
-    }
-    return;
-  }
-  if (!restorableModel && ctx.model?.provider === RESUME_PROVIDER) {
-    ctx.ui.notify(
-      `Cannot resume subagents while on the synthetic resume model because no real fallback model is available. Select a real model or set ${SUBAGENT_FALLBACK_MODEL_ENV}=provider/model.`,
-      "error"
-    );
-    return;
-  }
-  state.pendingResumePlans = [...plans];
-  state.resumeState.plans = [...plans];
-  state.resumeState.phase = "tool";
-  const injectOnNextRequest = rpcMode || hasCliInitialPrompt(process.argv) || !ctx.hasUI;
-  state.resumeState.trigger = injectOnNextRequest ? "nextRequest" : "resumePrompt";
-  state.modelToRestoreAfterResume = restorableModel ?? ctx.model;
-  state.resumeModelRegistry = ctx.modelRegistry;
-  ensureSubagentToolActive(state.pi);
-  const resumeModel = ctx.modelRegistry.find(RESUME_PROVIDER, RESUME_MODEL_ID);
-  const switched = resumeModel && await state.pi.setModel(resumeModel);
-  if (canceled()) {
-    if (generation === state.lifecycleGeneration && restorableModel) await state.pi.setModel(restorableModel);
-    return;
-  }
-  if (!switched) {
-    ctx.ui.notify("Failed to switch to synthetic subagent resume model.", "error");
-    await restoreModelAfterResumeFailure(state, ctx);
-    return;
-  }
-  if (injectOnNextRequest) {
-    if (ctx.hasUI) ctx.ui.notify(`Resuming ${totalTaskCount} subagents...`, "info");
-  } else if (opts.deferInteractivePrompt) {
-    state.pendingInteractiveResumePrompt = `Resuming ${totalTaskCount} subagents...`;
-  } else {
-    scheduleSessionTask(
-      state,
-      () => {
-        try {
-          sendAutomaticResumePrompt(state, `Resuming ${totalTaskCount} subagents...`);
-        } catch (err) {
-          console.error("[pi-subagent] Failed to start resume turn after tree navigation:", err);
-          void restoreModelAfterResumeFailure(state, ctx);
-        }
-      },
-      RESUME_INTERACTIVE_DELAY_MS,
-      true
-    );
-  }
-}
-
 // extension/events.ts
 function registerSessionEvents(state) {
   registerAsyncDeliveryEvents(state);
-  state.pi.on("session_tree", async (event, ctx) => {
+  state.pi.on("session_tree", async (_event, ctx) => {
     state.latestSessionCtx = ctx;
     updateCombinedUsageStatus(state, ctx);
-    try {
-      if (!state.canDelegate) return;
-      if (event?.fromExtension) return;
-      if (state.activeSubagents.size > 0 || state.backgroundJobs.size > 0 || state.pendingCompletionDeliveries.size > 0)
-        return;
-      if (state.pendingResumePlans.length > 0) return;
-      if (state.pendingInteractiveResumePrompt) return;
-      if (ctx.model?.provider === RESUME_PROVIDER) return;
-      if (typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
-      const resumeDisabled = parseBooleanEnv(configuredEnv(SUBAGENT_RESUME_DISABLE_ENV, state.settings)) === true;
-      if (resumeDisabled) return;
-      await maybeOfferSubagentResume(state, ctx, { deferInteractivePrompt: false });
-    } catch (err) {
-      console.error("[pi-subagent] Error in session_tree:", err);
-      await restoreModelAfterResumeFailure(state, ctx);
-    }
+    state.resumeEpoch = (state.resumeEpoch ?? 0) + 1;
+    state.pendingInteractiveResumePrompt = null;
+    await restoreModelAfterResumeFailure(state, ctx);
   });
   state.pi.on("agent_end", async (_event, ctx) => {
     updateCombinedUsageStatus(state, ctx);
@@ -11794,9 +11797,11 @@ function registerSessionEvents(state) {
     const prompt = state.pendingInteractiveResumePrompt;
     if (!prompt) return;
     state.pendingInteractiveResumePrompt = null;
+    const resumeEpoch = state.resumeEpoch ?? 0;
     scheduleSessionTask(
       state,
       () => {
+        if (resumeEpoch !== (state.resumeEpoch ?? 0)) return;
         try {
           sendAutomaticResumePrompt(state, prompt);
         } catch (err) {
@@ -11824,10 +11829,11 @@ function registerSessionEvents(state) {
 var KEEP_ON_NEXT_ABORT_EVENT = "pi-subagent:keep-on-next-abort";
 function registerSubagentInterrupt(state) {
   let keepSubagents = false;
-  let startingResumeEpoch;
+  let startingResume;
+  const resumeCanceled = (pending2) => pending2.interruptEpoch !== (state.interruptEpoch ?? 0) || pending2.resumeEpoch !== (state.resumeEpoch ?? 0);
   state.onSessionReadyForInterrupt = () => {
     keepSubagents = false;
-    startingResumeEpoch = void 0;
+    startingResume = void 0;
   };
   state.pi.registerShortcut("alt+w", {
     description: "Interrupt only the main agent, leaving subagents running",
@@ -11900,24 +11906,24 @@ function registerSubagentInterrupt(state) {
   });
   state.pi.on("input", (event) => {
     const pending2 = state.pendingAutomaticResume;
-    if (pending2 && event.source === "extension" && event.text === pending2.prompt && pending2.interruptEpoch !== (state.interruptEpoch ?? 0)) {
+    if (pending2 && event.source === "extension" && event.text === pending2.prompt && resumeCanceled(pending2)) {
       state.pendingAutomaticResume = void 0;
       return { action: "handled" };
     }
   });
   state.pi.on("before_agent_start", (event) => {
     const pending2 = state.pendingAutomaticResume;
-    startingResumeEpoch = event.messageType === "user" && pending2 && event.prompt === pending2.prompt ? pending2.interruptEpoch : void 0;
-    if (startingResumeEpoch !== void 0) state.pendingAutomaticResume = void 0;
+    startingResume = event.messageType === "user" && pending2 && event.prompt === pending2.prompt ? pending2 : void 0;
+    if (startingResume) state.pendingAutomaticResume = void 0;
   });
   state.pi.on("agent_start", (_event, ctx) => {
-    const epoch = startingResumeEpoch;
-    startingResumeEpoch = void 0;
-    if (epoch !== void 0 && epoch !== (state.interruptEpoch ?? 0)) ctx.abort();
+    const pending2 = startingResume;
+    startingResume = void 0;
+    if (pending2 && resumeCanceled(pending2)) ctx.abort();
   });
   state.pi.on("session_shutdown", () => {
     keepSubagents = false;
-    startingResumeEpoch = void 0;
+    startingResume = void 0;
     state.pendingAutomaticResume = void 0;
   });
 }
@@ -12277,12 +12283,7 @@ function registerResumeProvider(state) {
       streamSimple: (model, context, options) => {
         const resume = state.resumeState;
         const expectedGeneration = state.lifecycleGeneration;
-        const discoveredPlans = resume.plans.length > 0 ? resume.plans : state.pendingResumePlans.length > 0 ? state.pendingResumePlans : state.latestSessionCtx ? findLatestResumableSubagentCalls(state.latestSessionCtx) : [];
-        if (discoveredPlans.length > 0 && resume.plans.length === 0) {
-          resume.plans = [...discoveredPlans];
-          state.pendingResumePlans = [...discoveredPlans];
-        }
-        const plans = discoveredPlans;
+        const plans = resume.plans.length > 0 ? resume.plans : state.pendingResumePlans;
         const totalTaskCount = plans.reduce((sum, plan) => sum + plan.tasks.length, 0);
         const phase = resume.phase;
         const triggerMatches = resume.trigger === "nextRequest" || (totalTaskCount > 0 ? isSyntheticResumePrompt(context, totalTaskCount) : false);
@@ -12363,6 +12364,7 @@ function createExtensionState(pi) {
     pendingCompletionDeliveries: /* @__PURE__ */ new Map(),
     pendingCompletionInterrupts: /* @__PURE__ */ new Map(),
     interruptEpoch: 0,
+    resumeEpoch: 0,
     activeSubagents: /* @__PURE__ */ new Map(),
     activeResumeNames: /* @__PURE__ */ new Set(),
     forcedErrorToolCallIds: /* @__PURE__ */ new Set(),
@@ -12465,6 +12467,78 @@ function adoptReloadHandoff(state, reason, sessionId) {
 
 // extension/session-start.ts
 import * as path30 from "node:path";
+
+// extension/resume-offer.ts
+async function maybeOfferSubagentResume(state, ctx) {
+  if (!ctx.hasUI || state.currentDepth > 0) return;
+  const generation = state.lifecycleGeneration;
+  const interruptEpoch = state.interruptEpoch ?? 0;
+  const resumeEpoch = state.resumeEpoch ?? 0;
+  const canceled = () => generation !== state.lifecycleGeneration || interruptEpoch !== (state.interruptEpoch ?? 0) || resumeEpoch !== (state.resumeEpoch ?? 0);
+  const restorableModel = getRestorableModel(ctx, state.settings);
+  if (restorableModel) {
+    state.lastRestorableModel = restorableModel;
+    state.resumeModelRegistry = ctx.modelRegistry;
+  }
+  const plans = findLatestResumableSubagentCalls(ctx);
+  if (plans.length === 0) return;
+  const totalTaskCount = plans.reduce((sum, plan) => sum + plan.tasks.length, 0);
+  const shouldResume = await ctx.ui.confirm(
+    "Resume subagents?",
+    `Resume ${totalTaskCount} interrupted subagent${totalTaskCount === 1 ? "" : "s"} from saved sessions?
+
+${recoveryWorkerLabels(
+      plans
+    ).map((label) => `- ${label}`).join("\n")}`
+  );
+  if (canceled()) return;
+  if (shouldResume !== true) {
+    if (ctx.model?.provider === RESUME_PROVIDER) {
+      if (restorableModel) {
+        await state.pi.setModel(restorableModel);
+      } else {
+        ctx.ui.notify(
+          `Subagent resume was declined, but the current model is the synthetic resume model and no real fallback model is available. Select a real model before continuing, or set ${SUBAGENT_FALLBACK_MODEL_ENV}=provider/model.`,
+          "error"
+        );
+      }
+    }
+    return;
+  }
+  if (!restorableModel && ctx.model?.provider === RESUME_PROVIDER) {
+    ctx.ui.notify(
+      `Cannot resume subagents while on the synthetic resume model because no real fallback model is available. Select a real model or set ${SUBAGENT_FALLBACK_MODEL_ENV}=provider/model.`,
+      "error"
+    );
+    return;
+  }
+  state.pendingResumePlans = [...plans];
+  state.resumeState.plans = [...plans];
+  state.resumeState.phase = "tool";
+  const injectOnNextRequest = isRpcMode(process.argv) || hasCliInitialPrompt(process.argv);
+  state.resumeState.trigger = injectOnNextRequest ? "nextRequest" : "resumePrompt";
+  state.modelToRestoreAfterResume = restorableModel ?? ctx.model;
+  state.resumeModelRegistry = ctx.modelRegistry;
+  ensureSubagentToolActive(state.pi);
+  const resumeModel = ctx.modelRegistry.find(RESUME_PROVIDER, RESUME_MODEL_ID);
+  const switched = resumeModel && await state.pi.setModel(resumeModel);
+  if (canceled()) {
+    if (generation === state.lifecycleGeneration && restorableModel) await state.pi.setModel(restorableModel);
+    return;
+  }
+  if (!switched) {
+    ctx.ui.notify("Failed to switch to synthetic subagent resume model.", "error");
+    await restoreModelAfterResumeFailure(state, ctx);
+    return;
+  }
+  if (injectOnNextRequest) {
+    ctx.ui.notify(`Resuming ${totalTaskCount} subagents...`, "info");
+  } else {
+    state.pendingInteractiveResumePrompt = `Resuming ${totalTaskCount} subagents...`;
+  }
+}
+
+// extension/session-start.ts
 function registerSessionLifecycle(state) {
   state.pi.on("session_start", async (event, ctx) => {
     const replay = adoptReloadHandoff(state, event.reason, ctx.sessionManager.getSessionId?.() ?? "ephemeral");
@@ -12605,7 +12679,7 @@ function registerSessionLifecycle(state) {
       if (restoredBrokerJobs) return;
       const resumeDisabled = parseBooleanEnv(configuredEnv(SUBAGENT_RESUME_DISABLE_ENV, state.settings)) === true;
       if (!state.canDelegate || resumeDisabled || event.reason !== "resume" && event.reason !== "startup") return;
-      await maybeOfferSubagentResume(state, ctx, { deferInteractivePrompt: true });
+      await maybeOfferSubagentResume(state, ctx);
     } catch (err) {
       console.error("[pi-subagent] Error in session_start:", err);
       await restoreModelAfterResumeFailure(state, ctx);

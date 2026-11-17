@@ -39,9 +39,9 @@ function worker(index: number, cost = 0, overrides: Partial<SingleResult> = {}):
   });
 }
 
-function launch(id = "launch", results = [worker(0), worker(1)]): SessionEntry[] {
+function launch(id = "launch", results = [worker(0), worker(1)], callTasks = tasks): SessionEntry[] {
   const details = Object.assign(buildSubagentDetails("parallel", "spawn", null, results), { asyncJobId: id });
-  return [assistantSubagentCall(id), subagentToolResult(id, details, false)];
+  return [assistantSubagentCall(id, callTasks), subagentToolResult(id, details, false)];
 }
 
 function completion(id: string, index: number, result = worker(index, index + 2, { exitCode: 0 })): SessionEntry {
@@ -69,7 +69,7 @@ function roundTrip<T>(value: T): T {
   return JSON.parse(JSON.stringify(value));
 }
 
-test("partial async completion preserves finished output and unfinished siblings across later conversation", () => {
+test("partial async completion leaves only the unfinished sibling across later conversation", () => {
   const entries = roundTrip([
     ...launch(),
     assistantText("I am doing other work."),
@@ -79,11 +79,12 @@ test("partial async completion preserves finished output and unfinished siblings
   const plans = findLatestResumableSubagentCalls(makeCtx(entries));
   assert.equal(plans.length, 1);
   assert.equal(plans[0].previousToolCallId, "launch");
+  assert.deepEqual(plans[0].tasks, [tasks[0]]);
+  assert.deepEqual(plans[0].taskIndexes, [0]);
   assert.deepEqual(
-    plans[0].details?.results.map((result) => result.exitCode),
-    [-1, 0],
+    plans[0].details?.results.map((result) => [result.name, result.exitCode]),
+    [["Ada", -1]],
   );
-  assert.equal(plans[0].details?.results[1].name, "Bo");
   assert.deepEqual(findLatestResumableSubagentCalls(makeCtx([...entries, completion("launch", 0)])), []);
 });
 
@@ -91,7 +92,10 @@ test("all unfinished async launches survive later turns, but legacy recovery rem
   const entries = [
     ...launch("first"),
     assistantText("More work"),
-    ...launch("second", [worker(0, 0, { sessionDir: "/second/0" }), worker(1, 0, { sessionDir: "/second/1" })]),
+    ...launch("second", [
+      worker(0, 0, { name: "Cy", sessionDir: "/second/0" }),
+      worker(1, 0, { name: "Di", sessionDir: "/second/1" }),
+    ]),
     userText("Continue"),
   ];
   assert.deepEqual(
@@ -102,25 +106,35 @@ test("all unfinished async launches survive later turns, but legacy recovery rem
   assert.deepEqual(findLatestResumableSubagentCalls(makeCtx(legacy)), []);
 });
 
-test("failed async completions remain recoverable and unrelated completion IDs cannot finish a launch", () => {
+test("failed async completions are final and unrelated completion IDs cannot finish a launch", () => {
   const failed = worker(0, 2, { exitCode: 1, errorMessage: "failed" });
   const entries = [
     ...launch(),
-    completion("unrelated", 1, worker(1, 3, { exitCode: 0, sessionDir: "/unrelated" })),
+    completion("unrelated", 1, worker(1, 3, { exitCode: 0, name: "Cy", sessionDir: "/unrelated" })),
     completion("launch", 0, failed),
     assistantText("Later"),
   ];
   const [plan] = findLatestResumableSubagentCalls(makeCtx(entries));
+  assert.deepEqual(plan.tasks, [tasks[1]]);
   assert.deepEqual(
-    plan.details?.results.map((result) => result.exitCode),
-    [1, -1],
+    plan.details?.results.map((result) => [result.name, result.exitCode]),
+    [["Bo", -1]],
   );
 });
 
 test("a recovered batch does not reopen or duplicate the original async launch", () => {
-  const entries = [...launch("original"), completion("original", 0), ...launch("recovery"), userText("Later")];
-  assert.equal(findLatestResumableSubagentCalls(makeCtx(entries)).length, 1);
-  entries.push(completion("recovery", 1));
+  const entries = [
+    ...launch("original"),
+    completion("original", 0),
+    ...launch("recovery", [worker(1)], [tasks[1]]),
+    userText("Later"),
+  ];
+  const plans = findLatestResumableSubagentCalls(makeCtx(entries));
+  assert.deepEqual(
+    plans.map((plan) => [plan.previousToolCallId, plan.taskIndexes]),
+    [["original", [1]]],
+  );
+  entries.push(completion("recovery", 0, worker(1, 3, { exitCode: 0 })));
   assert.deepEqual(findLatestResumableSubagentCalls(makeCtx(entries)), []);
 });
 

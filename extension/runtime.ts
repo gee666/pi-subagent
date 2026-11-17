@@ -81,7 +81,11 @@ export function clearSessionTasks(state: ExtensionState, keepDurable = false): v
 }
 
 export function sendAutomaticResumePrompt(state: ExtensionState, prompt: string): void {
-  state.pendingAutomaticResume = { prompt, interruptEpoch: state.interruptEpoch ?? 0 };
+  state.pendingAutomaticResume = {
+    prompt,
+    interruptEpoch: state.interruptEpoch ?? 0,
+    resumeEpoch: state.resumeEpoch ?? 0,
+  };
   state.pi.sendUserMessage(prompt, { deliverAs: "steer" });
 }
 

@@ -55,6 +55,9 @@ export function excludeStoppedWorkers(
       {
         ...plan,
         tasks: plan.tasks.filter((_task, index) => keep[index]),
+        taskIndexes: (plan.taskIndexes ?? plan.tasks.map((_task, index) => index)).filter(
+          (_slot, index) => keep[index],
+        ),
         details: plan.details
           ? { ...plan.details, results: plan.details.results.filter((_result, index) => keep[index]) }
           : undefined,

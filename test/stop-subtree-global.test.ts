@@ -274,7 +274,17 @@ test("stopping a parent suppresses historical failed descendants in a remote chi
         "parallel",
         "spawn",
         null,
-        names.map((name) => makeResult({ name, task: name, startedAt, sessionDir: `/workers/${name}` })),
+        // Launch receipts hold running placeholders; only stop markers suppress recovery.
+        names.map((name) =>
+          makeResult({
+            name,
+            task: name,
+            startedAt,
+            sessionDir: `/workers/${name}`,
+            exitCode: -1,
+            stopReason: undefined,
+          }),
+        ),
       ),
       { asyncJobId: "remote-children" },
     );

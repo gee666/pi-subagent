@@ -1,5 +1,4 @@
 import { createFauxCore, createProvider, fauxAssistantMessage, fauxToolCall, lazyStream } from "@earendil-works/pi-ai";
-import { findLatestResumableSubagentCalls } from "../resume.js";
 import { RESUME_PROVIDER } from "../shared.js";
 import { SUBAGENT_TOOL_NAME } from "../types.js";
 import type { ResumeModel, StreamOptions, ProviderContext } from "./contracts.js";
@@ -103,19 +102,9 @@ export function registerResumeProvider(state: ExtensionState): void {
       streamSimple: (model, context, options) => {
         const resume = state.resumeState;
         const expectedGeneration = state.lifecycleGeneration;
-        const discoveredPlans =
-          resume.plans.length > 0
-            ? resume.plans
-            : state.pendingResumePlans.length > 0
-              ? state.pendingResumePlans
-              : state.latestSessionCtx
-                ? findLatestResumableSubagentCalls(state.latestSessionCtx)
-                : [];
-        if (discoveredPlans.length > 0 && resume.plans.length === 0) {
-          resume.plans = [...discoveredPlans];
-          state.pendingResumePlans = [...discoveredPlans];
-        }
-        const plans = discoveredPlans;
+        // Only session-open confirmation may arm recovery. A saved synthetic
+        // model or matching prompt must never rediscover and launch old work.
+        const plans = resume.plans.length > 0 ? resume.plans : state.pendingResumePlans;
         const totalTaskCount = plans.reduce((sum, plan) => sum + plan.tasks.length, 0);
         const phase = resume.phase;
         const triggerMatches =

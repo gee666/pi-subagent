@@ -132,6 +132,10 @@ ctx.abort();
 
 The signal covers only the next aborted settlement and is ignored while the session is idle.
 
+### Recovering interrupted workers
+
+Opening a saved session may offer to recover interrupted workers, but always asks **yes or no** first. Browsing the session tree never offers or starts recovery. Print/JSON modes cannot ask and do not recover automatically. Old settings that disabled confirmation are ignored.
+
 ### Reloading Pi
 
 `/reload` and `ctx.reload()` keep running, queued, and parked workers. The reloaded extension instance takes them over: completions and lead messages raised during the reload are delivered afterwards, and `stop_subagent`, `message_subagent`, Escape, the activity line, and the shared concurrency cap keep working. Running worker processes keep their old code; a worker's next resume starts with the reloaded code. If the reloaded instance cannot take over, for example after an incompatible upgrade, a different session, or no reloaded session within 60 seconds, the old work stops as on quit.
