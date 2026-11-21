@@ -54,7 +54,7 @@ Print-lifecycle, steering, recovery, usage, and render tests cover delivery, rec
 Interrupt tests cover real worker cancellation and the run-scoped main-only shortcut. `interrupt-sdk.test.ts`
 drives actual SDK abort/settlement events and a `sendCustomMessage` completion wake without a pending resume.
 Alt+W matching is checked for legacy Meta and Kitty sequences; focused overlay handling remains Pi-owned.
-Tested with global Pi 1.5.2 and latest 1.5.2 SDK packages; live interactive terminal behavior is not e2e-covered.
+Tested with global Pi 1.6.0 and latest 1.6.0 SDK packages; live interactive terminal behavior is not e2e-covered.
 The real-RPC fixture supplies `session.isIdle`, required by Pi 1.5.1's orderly extension shutdown check.
 Its private `modes/rpc/rpc-mode.js` import is another test-only SDK layout/lifecycle dependency.
 Pi 1.5 validates our JSON Schema-compatible TypeBox tools through pi-schema; no TypeBox-only refinements
@@ -66,6 +66,14 @@ they do not silently continue in the caller's cwd or invoke Pi's import/fork UI.
 entries survive Pi forks with new session IDs; legacy reconstruction follows the parentSession chain.
 The real SDK resume-selection test covers cross-cwd private forks, repeat resumes without duplicate files,
 and an untouched original transcript. No runtime change is needed for 1.5.2.
+
+Pi 1.6.0 compatibility: RPC/JSON `session_start` records are ignored by the worker JSONL
+parser; extension lifecycle initialization does not depend on duplicate start/discovery calls.
+Delegation gates filter only this extension's tools, preserving unrelated active tools (including MCP).
+Rendering maps cached Text lines instead of mutating them. Worker model/reasoning selection remains
+explicit and saved on resume; Pi owns default-model selection and provider reasoning validation.
+Esc's `Operation aborted` tool results do not allocate workers or reservations for unstarted calls.
+No runtime changes were needed for these upstream fixes.
 
 ## Dependency maintenance
 Keep TypeScript on 5.9.3: 7.0.2 rejects the package export test's explicit-file compiler invocation
